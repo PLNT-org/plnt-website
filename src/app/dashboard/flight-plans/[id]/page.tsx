@@ -196,20 +196,49 @@ export default function FlightPlanDetailPage() {
 
     const waypoints = flightPlan.waypoints.coordinates
     const actions = flightPlan.waypoints.actions || waypoints.map(() => 'photo')
+    const gimbalPitches = flightPlan.waypoints.gimbalPitches || waypoints.map(() => -90)
+    const headings = flightPlan.waypoints.headings || waypoints.map(() => 0)
     const photoIntervalMeters = flightPlan.waypoints.photoIntervalMeters
     const estimatedPhotos = flightPlan.waypoints.estimatedPhotos || waypoints.length
+    const missionType = flightPlan.waypoints.missionType || 'orthomosaic'
     let content = ''
     let filename = ''
     let mimeType = ''
 
     if (format === 'litchi') {
       // Litchi CSV format for DJI drones with camera triggers
+      // CAPTURE-WHILE-MOVING mode: Uses distance-based photo triggering instead of hover-and-capture
+      // - curvesize > 0: Drone curves through waypoints without stopping (5m radius)
+      // - actiontype1=-1: No per-waypoint photo action (photos triggered by distance interval)
+      // - photo_distinterval: Triggers camera every N meters while flying
+      // - Speed 4-5 m/s recommended to minimize motion blur with 1/500s+ shutter
       content = 'latitude,longitude,altitude(m),heading(deg),curvesize(m),rotationdir,gimbalmode,gimbalpitchangle,actiontype1,actionparam1,actiontype2,actionparam2,actiontype3,actionparam3,actiontype4,actionparam4,actiontype5,actionparam5,actiontype6,actionparam6,actiontype7,actionparam7,actiontype8,actionparam8,actiontype9,actionparam9,actiontype10,actionparam10,actiontype11,actionparam11,actiontype12,actionparam12,actiontype13,actionparam13,actiontype14,actionparam14,actiontype15,actionparam15,altitudemode,speed(m/s),poi_latitude,poi_longitude,poi_altitude(m),poi_altitudemode,photo_timeinterval,photo_distinterval\n'
+
+      // Curve radius for smooth flight through waypoints (meters)
+      // 5m provides good balance between flight efficiency and path accuracy
+      const curveRadius = 5
+
+      // Use photo_distinterval for distance-based triggering
+      // Fall back to 5m interval if not specified
+      const distInterval = photoIntervalMeters || 5
+
       waypoints.forEach((coord, index) => {
-        const action = actions[index] || 'photo'
-        // actiontype1=1 means Take Photo, actiontype1=-1 means no action
-        const actionType = action === 'photo' ? 1 : -1
-        content += `${coord[1]},${coord[0]},${flightPlan.altitude_m},0,0,0,2,-90,${actionType},0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,1,${flightPlan.speed_ms},0,0,0,0,-1,${photoIntervalMeters || -1}\n`
+        // First and last waypoints: no curve (start/end precisely)
+        // Middle waypoints: use curve radius for smooth continuous flight
+        const isEndpoint = index === 0 || index === waypoints.length - 1
+        const curve = isEndpoint ? 0 : curveRadius
+
+        // Get gimbal pitch for this waypoint (supports variable angles for 3D mapping)
+        // -90 = nadir (straight down), -45 = oblique (for 3D reconstruction)
+        const gimbalPitch = gimbalPitches[index] || -90
+
+        // Get heading for this waypoint (for 3D mapping, heading follows flight direction)
+        // This ensures oblique shots capture objects from all directions (N/S/E/W)
+        const heading = headings[index] || 0
+
+        // actiontype1=-1: No per-waypoint action (photos triggered by distance interval instead)
+        // This allows continuous flight without hovering at each waypoint
+        content += `${coord[1]},${coord[0]},${flightPlan.altitude_m},${heading},${curve},0,2,${gimbalPitch},-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,1,${flightPlan.speed_ms},0,0,0,0,-1,${distInterval}\n`
       })
       filename = `${flightPlan.name.replace(/\s+/g, '_')}_litchi.csv`
       mimeType = 'text/csv'
@@ -436,11 +465,11 @@ ${waypoints.map(coord => `          ${coord[0]},${coord[1]},${flightPlan.altitud
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-gray-600">Altitude</p>
-                  <p className="font-medium">{flightPlan.altitude_m}m</p>
+                  <p className="font-medium">{Math.round(flightPlan.altitude_m * 3.28084)} ft</p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-gray-600">Speed</p>
-                  <p className="font-medium">{flightPlan.speed_ms} m/s</p>
+                  <p className="font-medium">{Math.round(flightPlan.speed_ms * 3.28084)} ft/s</p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-gray-600">Overlap</p>
@@ -483,7 +512,7 @@ ${waypoints.map(coord => `          ${coord[0]},${coord[1]},${flightPlan.altitud
                 Export flight path with camera triggers • {flightPlan.waypoints?.coordinates?.length || 0} photo waypoints
                 {flightPlan.waypoints?.photoIntervalMeters && (
                   <span className="block mt-1 font-medium text-green-700">
-                    Photo interval: {flightPlan.waypoints.photoIntervalMeters.toFixed(1)}m
+                    Photo interval: {(flightPlan.waypoints.photoIntervalMeters * 3.28084).toFixed(1)} ft
                   </span>
                 )}
               </CardDescription>
@@ -494,7 +523,7 @@ ${waypoints.map(coord => `          ${coord[0]},${coord[1]},${flightPlan.altitud
                   {flightPlan.waypoints?.photoIntervalMeters && (
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
                       <p className="text-sm text-blue-800">
-                        <strong>For Maven EVO / Litchi:</strong> Import the Litchi CSV - camera triggers are included at each waypoint
+                        <strong>For Maven EVO / Litchi:</strong> Capture-while-moving enabled - photos trigger every {flightPlan.waypoints.photoIntervalMeters.toFixed(1)}m during continuous flight (no hover stops)
                       </p>
                     </div>
                   )}

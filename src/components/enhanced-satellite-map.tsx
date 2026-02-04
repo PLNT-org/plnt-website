@@ -34,7 +34,9 @@ interface MapArea {
   id: number
   points: { x: number; y: number; lat: number; lng: number }[]
   area: string
-  coordinates: { lat: number; lng: number }[]
+  coordinates: { lat: number; lng: number; action?: 'photo' }[]
+  photoIntervalMeters?: number
+  estimatedPhotos?: number
 }
 
 interface EnhancedSatelliteMapProps {
@@ -122,8 +124,8 @@ export default function EnhancedSatelliteMap({
         drawnItems.addLayer(polygon)
         map.fitBounds(polygon.getBounds())
         
-        // Generate flight path for existing boundary
-        const flightPath = generateFlightPath(polygon.getBounds(), altitude)
+        // Generate flight path for existing boundary, filtered to polygon
+        const { flightPath } = generateFlightPath(polygon.getBounds(), altitude, existingBoundary)
         drawHighQualityFlightPath(map, flightPathLayer, flightPath, polygon.getLatLngs()[0] as L.LatLng[])
       }
     }
@@ -302,10 +304,16 @@ export default function EnhancedSatelliteMap({
       })
     }
 
-    // Calculate area and create MapArea object
+    // Calculate area and generate flight path with camera triggers
     const area = calculateArea(drawingPointsRef.current)
     const bounds = L.latLngBounds(drawingPointsRef.current)
-    
+
+    // Convert polygon points to the format needed for point-in-polygon check
+    const polygonBoundary = drawingPointsRef.current.map(ll => ({ lat: ll.lat, lng: ll.lng }))
+
+    // Generate optimized flight path with camera trigger waypoints, filtered to polygon boundary
+    const { flightPath, photoIntervalMeters, estimatedPhotos } = generateFlightPath(bounds, altitude, polygonBoundary)
+
     const mapArea: MapArea = {
       id: Date.now(),
       points: drawingPointsRef.current.map(ll => ({
@@ -315,18 +323,19 @@ export default function EnhancedSatelliteMap({
         lng: ll.lng
       })),
       area: `${area.toFixed(2)} acres`,
-      coordinates: drawingPointsRef.current.map(ll => ({
-        lat: ll.lat,
-        lng: ll.lng
-      }))
+      // Use the full flight path with camera triggers as coordinates
+      coordinates: flightPath,
+      photoIntervalMeters,
+      estimatedPhotos
     }
+
+    console.log(`Generated flight path: ${estimatedPhotos} photo waypoints, ${photoIntervalMeters.toFixed(1)}m interval`)
 
     setCurrentArea(mapArea)
     onAreaDrawn?.(mapArea)
 
-    // Generate and draw flight path
+    // Draw flight path on map
     if (flightPathLayerRef.current) {
-      const flightPath = generateFlightPath(bounds, altitude)
       drawHighQualityFlightPath(mapRef.current, flightPathLayerRef.current, flightPath, drawingPointsRef.current)
     }
 
@@ -393,44 +402,234 @@ export default function EnhancedSatelliteMap({
     return area * 0.000247105 // square meters to acres
   }
 
-  const generateFlightPath = (bounds: L.LatLngBounds, altitude: number) => {
+  // Check if a point is inside a polygon using ray casting algorithm
+  const isPointInPolygon = (point: { lat: number; lng: number }, polygon: { lat: number; lng: number }[]): boolean => {
+    let inside = false
+    const x = point.lng
+    const y = point.lat
+
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].lng
+      const yi = polygon[i].lat
+      const xj = polygon[j].lng
+      const yj = polygon[j].lat
+
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside
+      }
+    }
+
+    return inside
+  }
+
+  // Calculate distance between two lat/lng points in meters
+  const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+    const R = 6371000 // Earth's radius in meters
+    const dLat = (lat2 - lat1) * Math.PI / 180
+    const dLng = (lng2 - lng1) * Math.PI / 180
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLng / 2) * Math.sin(dLng / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return R * c
+  }
+
+  // Generate camera trigger waypoints along a flight line
+  const generateCameraTriggerWaypoints = (
+    startLat: number, startLng: number,
+    endLat: number, endLng: number,
+    photoIntervalMeters: number
+  ): { lat: number; lng: number; action: 'photo' }[] => {
+    const waypoints: { lat: number; lng: number; action: 'photo' }[] = []
+    const totalDistance = calculateDistance(startLat, startLng, endLat, endLng)
+
+    if (totalDistance === 0) return waypoints
+
+    const numPhotos = Math.max(1, Math.floor(totalDistance / photoIntervalMeters))
+
+    for (let i = 0; i <= numPhotos; i++) {
+      const fraction = i / numPhotos
+      const lat = startLat + (endLat - startLat) * fraction
+      const lng = startLng + (endLng - startLng) * fraction
+
+      waypoints.push({ lat, lng, action: 'photo' })
+    }
+
+    return waypoints
+  }
+
+  // Find the optimal flight direction based on the polygon's longest edge
+  const findOptimalFlightAngle = (boundary: { lat: number; lng: number }[]): number => {
+    if (boundary.length < 2) return 0
+
+    let longestEdgeLength = 0
+    let longestEdgeAngle = 0
+
+    for (let i = 0; i < boundary.length; i++) {
+      const p1 = boundary[i]
+      const p2 = boundary[(i + 1) % boundary.length]
+
+      // Calculate edge length in meters
+      const edgeLength = calculateDistance(p1.lat, p1.lng, p2.lat, p2.lng)
+
+      if (edgeLength > longestEdgeLength) {
+        longestEdgeLength = edgeLength
+        // Calculate angle of this edge (in radians)
+        const avgLat = (p1.lat + p2.lat) / 2
+        const lngScale = Math.cos(avgLat * Math.PI / 180)
+        const dx = (p2.lng - p1.lng) * lngScale
+        const dy = p2.lat - p1.lat
+        longestEdgeAngle = Math.atan2(dy, dx)
+      }
+    }
+
+    return longestEdgeAngle
+  }
+
+  // Rotate a point around a center point
+  const rotatePoint = (
+    point: { lat: number; lng: number },
+    center: { lat: number; lng: number },
+    angle: number
+  ): { lat: number; lng: number } => {
+    const lngScale = Math.cos(center.lat * Math.PI / 180)
+    const dx = (point.lng - center.lng) * lngScale
+    const dy = point.lat - center.lat
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    const rotatedX = dx * cos - dy * sin
+    const rotatedY = dx * sin + dy * cos
+    return {
+      lat: rotatedY + center.lat,
+      lng: rotatedX / lngScale + center.lng
+    }
+  }
+
+  const generateFlightPath = (
+    bounds: L.LatLngBounds,
+    altitudeM: number,
+    polygon?: { lat: number; lng: number }[]
+  ): {
+    flightPath: { lat: number; lng: number; action?: 'photo' }[],
+    photoIntervalMeters: number,
+    estimatedPhotos: number
+  } => {
+    const horizontalFOV = 84 // degrees (typical for DJI/Autel drones)
+    const verticalFOV = 55 // degrees (approximate for 4:3 sensor)
+    const overlapPercent = 80
+
+    // Calculate ground coverage (side overlap - for line spacing)
+    const coverageWidth = 2 * altitudeM * Math.tan((horizontalFOV / 2) * Math.PI / 180)
+    const lineSpacing = coverageWidth * (1 - overlapPercent / 100)
+    const lineSpacingDeg = lineSpacing / 111320 // meters to degrees
+
+    // Calculate forward ground coverage (for photo interval)
+    const forwardCoverage = 2 * altitudeM * Math.tan((verticalFOV / 2) * Math.PI / 180)
+    const photoIntervalMeters = forwardCoverage * (1 - overlapPercent / 100)
+
+    // If we have a polygon, use optimized rotation-based approach
+    if (polygon && polygon.length >= 3) {
+      // Calculate center of polygon
+      const centerLat = polygon.reduce((sum, p) => sum + p.lat, 0) / polygon.length
+      const centerLng = polygon.reduce((sum, p) => sum + p.lng, 0) / polygon.length
+      const center = { lat: centerLat, lng: centerLng }
+
+      // Find optimal flight angle (parallel to longest edge)
+      const flightAngle = findOptimalFlightAngle(polygon)
+
+      // Rotate polygon to align with axes
+      const rotatedPolygon = polygon.map(p => rotatePoint(p, center, -flightAngle))
+
+      // Get bounds of rotated polygon
+      const rotatedLats = rotatedPolygon.map(p => p.lat)
+      const rotatedLngs = rotatedPolygon.map(p => p.lng)
+      const north = Math.max(...rotatedLats)
+      const south = Math.min(...rotatedLats)
+      const east = Math.max(...rotatedLngs)
+      const west = Math.min(...rotatedLngs)
+
+      const allWaypoints: { lat: number; lng: number; action?: 'photo' }[] = []
+      let currentLat = south
+      let lineNumber = 0
+
+      // Generate lawnmower pattern in rotated coordinate system
+      while (currentLat <= north) {
+        let lineStart: { lat: number; lng: number }
+        let lineEnd: { lat: number; lng: number }
+
+        if (lineNumber % 2 === 0) {
+          lineStart = { lat: currentLat, lng: west }
+          lineEnd = { lat: currentLat, lng: east }
+        } else {
+          lineStart = { lat: currentLat, lng: east }
+          lineEnd = { lat: currentLat, lng: west }
+        }
+
+        const lineWaypoints = generateCameraTriggerWaypoints(
+          lineStart.lat, lineStart.lng,
+          lineEnd.lat, lineEnd.lng,
+          photoIntervalMeters
+        )
+
+        allWaypoints.push(...lineWaypoints)
+        currentLat += lineSpacingDeg
+        lineNumber++
+      }
+
+      // Rotate waypoints back to original coordinate system
+      const rotatedWaypoints = allWaypoints.map(wp => {
+        const rotatedBack = rotatePoint(wp, center, flightAngle)
+        return { ...wp, lat: rotatedBack.lat, lng: rotatedBack.lng }
+      })
+
+      // Filter to only include points inside the original polygon
+      const flightPath = rotatedWaypoints.filter(wp => isPointInPolygon(wp, polygon))
+
+      return {
+        flightPath,
+        photoIntervalMeters,
+        estimatedPhotos: flightPath.length
+      }
+    }
+
+    // Fallback: use bounds-based approach (no polygon)
     const north = bounds.getNorth()
     const south = bounds.getSouth()
     const east = bounds.getEast()
     const west = bounds.getWest()
-    
-    const cameraFOV = 84 // degrees
-    const overlap = 0.8 // 80% overlap
-    
-    const coverageWidth = 2 * altitude * Math.tan((cameraFOV / 2) * Math.PI / 180)
-    const lineSpacing = coverageWidth * (1 - overlap)
-    const lineSpacingDeg = lineSpacing / 111320
 
-    const flightPath: { lat: number; lng: number }[] = []
+    const allWaypoints: { lat: number; lng: number; action?: 'photo' }[] = []
     let currentLat = south
     let lineNumber = 0
 
     while (currentLat <= north) {
+      let lineStart: { lat: number; lng: number }
+      let lineEnd: { lat: number; lng: number }
+
       if (lineNumber % 2 === 0) {
-        flightPath.push({ lat: currentLat, lng: west })
-        flightPath.push({ lat: currentLat, lng: east })
+        lineStart = { lat: currentLat, lng: west }
+        lineEnd = { lat: currentLat, lng: east }
       } else {
-        flightPath.push({ lat: currentLat, lng: east })
-        flightPath.push({ lat: currentLat, lng: west })
+        lineStart = { lat: currentLat, lng: east }
+        lineEnd = { lat: currentLat, lng: west }
       }
-      
+
+      const lineWaypoints = generateCameraTriggerWaypoints(
+        lineStart.lat, lineStart.lng,
+        lineEnd.lat, lineEnd.lng,
+        photoIntervalMeters
+      )
+
+      allWaypoints.push(...lineWaypoints)
       currentLat += lineSpacingDeg
       lineNumber++
     }
 
-    if (flightPath.length > 0) {
-      const entryPoint = { lat: south - lineSpacingDeg, lng: west }
-      const exitPoint = { lat: flightPath[flightPath.length - 1].lat, lng: flightPath[flightPath.length - 1].lng }
-      flightPath.unshift(entryPoint)
-      flightPath.push(exitPoint)
+    return {
+      flightPath: allWaypoints,
+      photoIntervalMeters,
+      estimatedPhotos: allWaypoints.length
     }
-
-    return flightPath
   }
 
   const drawHighQualityFlightPath = (

@@ -22,6 +22,7 @@ import {
   Settings,
   Clock,
   Activity,
+  Pencil,
 } from 'lucide-react'
 
 interface PlotDetails {
@@ -132,7 +133,7 @@ function PlotDetailsContent() {
       }
     } catch (error) {
       console.error('Error fetching plot data:', error)
-      router.push('/dashboard?tab=plots')
+      router.push('/dashboard/plots')
     } finally {
       setLoading(false)
     }
@@ -163,7 +164,7 @@ function PlotDetailsContent() {
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4">
-              <Link href="/dashboard?tab=plots">
+              <Link href="/dashboard/plots">
                 <Button variant="ghost" size="sm">
                   <ArrowLeft className="w-4 h-4 mr-2" />
                   Back to Plots
@@ -181,9 +182,12 @@ function PlotDetailsContent() {
                   Plan New Flight
                 </Button>
               </Link>
-              <Button variant="outline">
-                <Settings className="w-4 h-4" />
-              </Button>
+              <Link href={`/dashboard/plots/${plot.id}/edit`}>
+                <Button variant="outline">
+                  <Pencil className="w-4 h-4 mr-2" />
+                  Edit
+                </Button>
+              </Link>
             </div>
           </div>
         </div>

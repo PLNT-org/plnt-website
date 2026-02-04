@@ -93,6 +93,12 @@ export default function PlantHealthAnalysisPage() {
       variThreshold: 0.1,
       plantTypeId: 0
     },
+    'yellow-foliage': {
+      name: 'Yellow/Golden Foliage',
+      description: 'Plants with naturally yellow or golden leaves',
+      variThreshold: -0.1,
+      plantTypeId: 6
+    },
     'purple-foliage': {
       name: 'Purple/Red Foliage',
       description: 'Plants with naturally purple or red leaves',
@@ -157,29 +163,41 @@ const enhancedVARI = (r: number, g: number, b: number, config: PlantConfig): { v
   
   // 1. Filter out black/dark pixels (fabric, shadows)
   if (config.filterFabric) {
-    // True black detection
-    if (maxChannel < 0.1) {
-      return { variIndex: -999, pixelType: 'fabric' }
-    }
-    
-    // BLUISH-GRAY FABRIC DETECTION - MORE SPECIFIC
-    // Only catch fabric, not dark plants
-    // Key difference: fabric has blue > green > red, plants have green > blue
-    if (b > g && g > r && saturation < 0.15 && brightness > 0.25 && brightness < 0.6) {
-      // Additional check: make sure green isn't too close to blue (which would indicate a plant)
-      const blueDominance = (b - g) / b
-      if (blueDominance > 0.05) { // Blue must be at least 5% higher than green
-        console.log('Bluish-gray fabric detected: R:', Math.round(r*255), 'G:', Math.round(g*255), 'B:', Math.round(b*255))
+    // Check if this is a green-dominant pixel (likely vegetation, even if dark)
+    const isGreenDominant = g > r && g > b
+    const greenRatio = g / (r + b + 0.001) // How much greener than red+blue
+    const isDarkGreen = isGreenDominant && greenRatio > 0.4 && brightness < 0.3
+
+    // True black detection - but PRESERVE dark green foliage
+    if (maxChannel < 0.1 && !isDarkGreen) {
+      // Additional check: if green is still the highest channel, it might be very dark foliage
+      if (!(g >= r && g >= b && g > 0.03)) {
         return { variIndex: -999, pixelType: 'fabric' }
       }
     }
-    
-    // Very neutral gray detection (for true gray fabrics only)
-    // Much stricter - all channels must be VERY similar
-    if (saturation < 0.05 && brightness > 0.2 && brightness < 0.45) {
-      const channelDiff = Math.abs(r - g) + Math.abs(g - b) + Math.abs(r - b)
-      if (channelDiff < 0.05) { // Much stricter tolerance
-        return { variIndex: -999, pixelType: 'fabric' }
+
+    // Skip fabric detection entirely for green-dominant pixels
+    if (isGreenDominant && greenRatio > 0.35) {
+      // This is likely vegetation, don't filter as fabric
+    } else {
+      // BLUISH-GRAY FABRIC DETECTION - MORE SPECIFIC
+      // Only catch fabric, not dark plants
+      // Key difference: fabric has blue > green > red, plants have green > blue
+      if (b > g && g > r && saturation < 0.15 && brightness > 0.25 && brightness < 0.6) {
+        // Additional check: make sure green isn't too close to blue (which would indicate a plant)
+        const blueDominance = (b - g) / b
+        if (blueDominance > 0.05) { // Blue must be at least 5% higher than green
+          return { variIndex: -999, pixelType: 'fabric' }
+        }
+      }
+
+      // Very neutral gray detection (for true gray fabrics only)
+      // Much stricter - all channels must be VERY similar
+      if (saturation < 0.05 && brightness > 0.2 && brightness < 0.45) {
+        const channelDiff = Math.abs(r - g) + Math.abs(g - b) + Math.abs(r - b)
+        if (channelDiff < 0.05) { // Much stricter tolerance
+          return { variIndex: -999, pixelType: 'fabric' }
+        }
       }
     }
   }
@@ -196,24 +214,34 @@ const enhancedVARI = (r: number, g: number, b: number, config: PlantConfig): { v
   
   // 4. Calculate VARI based on plant type
   let variIndex: number
-  
-  if (config.plantTypeId === 1) { 
+
+  if (config.plantTypeId === 1) {
     // Purple/Red foliage - modified VARI
     // For purple plants, healthy means MORE red/purple, less green
     variIndex = (r - g) / (r + g - b + 0.001)
-  } else if (config.plantTypeId === 2) { 
+  } else if (config.plantTypeId === 2) {
     // Variegated plants - average approach
     const variance = Math.abs(g - r) + Math.abs(g - b) + Math.abs(r - b)
     variIndex = (g - r) / (g + r - b + 0.001)
     // Reduce impact of variance
     variIndex = variIndex * (1.0 - variance * 0.2)
-  } else if (config.plantTypeId === 3 && saturation > 0.5) { 
+  } else if (config.plantTypeId === 3 && saturation > 0.5) {
     // Flowering plants - ignore high saturation areas
     return { variIndex: 0, pixelType: 'neutral' }
   } else if (config.plantTypeId === 4) {
     // Succulents - blue-green adjustment
     // Account for blue-green coloration
     variIndex = (g - r * 0.8) / (g + r - b * 1.2 + 0.001)
+  } else if (config.plantTypeId === 6) {
+    // Yellow/Golden foliage - modified VARI
+    // For yellow plants, healthy = high red AND green, low blue
+    // Yellow is R+G dominant, so we measure yellowness
+    const yellowness = (r + g) / 2 - b
+    const rgBalance = 1 - Math.abs(r - g) // Closer R and G = more yellow
+    // Combine yellowness with R-G balance for health metric
+    variIndex = (yellowness * rgBalance) / (r + g + 0.001)
+    // Normalize to similar range as standard VARI
+    variIndex = variIndex * 2 - 0.3
   } else {
     // Standard VARI for green plants
     variIndex = (g - r) / (g + r - b + 0.001)
@@ -425,39 +453,46 @@ useEffect(() => {
         // Regular VARI processing for vegetation
         const currentThreshold = threshold[0]
         const distanceFromThreshold = variIndex - currentThreshold
-        
-        // Color based on health status
-        if (distanceFromThreshold > 0.2) {
-          // Very healthy - PURE BRIGHT GREEN
-          processedData[i] = 0
-          processedData[i + 1] = 255
-          processedData[i + 2] = 0
-          processedData[i + 3] = 255
-        } else if (distanceFromThreshold > 0.05) {
-          // Healthy - MEDIUM GREEN
-          processedData[i] = 34
-          processedData[i + 1] = 200
-          processedData[i + 2] = 34
-          processedData[i + 3] = 255
-        } else if (distanceFromThreshold > -0.05) {
-          // Borderline - PURE YELLOW
-          processedData[i] = 255
-          processedData[i + 1] = 255
-          processedData[i + 2] = 0
-          processedData[i + 3] = 255
-        } else if (distanceFromThreshold > -0.2) {
-          // Stressed - PURE ORANGE
-          processedData[i] = 255
-          processedData[i + 1] = 140
-          processedData[i + 2] = 0
-          processedData[i + 3] = 255
-        } else {
-          // Severe stress - PURE RED
-          processedData[i] = 255
-          processedData[i + 1] = 0
-          processedData[i + 2] = 0
-          processedData[i + 3] = 255
+
+        // RdYlGn colormap (matching WebODM VARI colors)
+        // Normalize distanceFromThreshold to 0-1 range for color interpolation
+        // Range: -0.4 (red) to +0.4 (green)
+        const normalizedValue = Math.max(0, Math.min(1, (distanceFromThreshold + 0.4) / 0.8))
+
+        // RdYlGn color stops (from colorbrewer)
+        const rdYlGn = [
+          { pos: 0.0, r: 165, g: 0, b: 38 },    // #a50026 - Dark red
+          { pos: 0.1, r: 215, g: 48, b: 39 },   // #d73027 - Red
+          { pos: 0.2, r: 244, g: 109, b: 67 },  // #f46d43 - Orange-red
+          { pos: 0.3, r: 253, g: 174, b: 97 },  // #fdae61 - Orange
+          { pos: 0.4, r: 254, g: 224, b: 139 }, // #fee08b - Yellow-orange
+          { pos: 0.5, r: 255, g: 255, b: 191 }, // #ffffbf - Yellow
+          { pos: 0.6, r: 217, g: 239, b: 139 }, // #d9ef8b - Yellow-green
+          { pos: 0.7, r: 166, g: 217, b: 106 }, // #a6d96a - Light green
+          { pos: 0.8, r: 102, g: 189, b: 99 },  // #66bd63 - Green
+          { pos: 0.9, r: 26, g: 152, b: 80 },   // #1a9850 - Dark green
+          { pos: 1.0, r: 0, g: 104, b: 55 },    // #006837 - Very dark green
+        ]
+
+        // Find the two color stops to interpolate between
+        let lowerStop = rdYlGn[0]
+        let upperStop = rdYlGn[rdYlGn.length - 1]
+        for (let j = 0; j < rdYlGn.length - 1; j++) {
+          if (normalizedValue >= rdYlGn[j].pos && normalizedValue <= rdYlGn[j + 1].pos) {
+            lowerStop = rdYlGn[j]
+            upperStop = rdYlGn[j + 1]
+            break
+          }
         }
+
+        // Interpolate between the two stops
+        const range = upperStop.pos - lowerStop.pos
+        const t = range > 0 ? (normalizedValue - lowerStop.pos) / range : 0
+
+        processedData[i] = Math.round(lowerStop.r + t * (upperStop.r - lowerStop.r))
+        processedData[i + 1] = Math.round(lowerStop.g + t * (upperStop.g - lowerStop.g))
+        processedData[i + 2] = Math.round(lowerStop.b + t * (upperStop.b - lowerStop.b))
+        processedData[i + 3] = 255
         
         if (i % sampleRate === 0) {
           if (variIndex >= currentThreshold) {
@@ -1034,30 +1069,38 @@ useEffect(() => {
                 {analysisResults && !showOriginal && (
                   <div className="absolute bottom-4 right-4 bg-white/95 p-4 rounded-lg shadow-lg">
                     <div className="text-sm font-semibold mb-3">
-                      Enhanced VARI Scale
+                      RdYlGn VARI Scale
                     </div>
-                    
+
                     <div className="space-y-2">
                       <div className="text-xs font-medium mb-2">Vegetation Health:</div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#00FF00' }}></div>
-                        <span className="text-xs font-medium">Very Healthy</span>
+                      {/* RdYlGn Gradient Bar */}
+                      <div className="w-full h-4 rounded shadow" style={{
+                        background: 'linear-gradient(to right, #a50026, #d73027, #f46d43, #fdae61, #fee08b, #ffffbf, #d9ef8b, #a6d96a, #66bd63, #1a9850, #006837)'
+                      }}></div>
+                      <div className="flex justify-between text-xs text-gray-600">
+                        <span>Stressed</span>
+                        <span>Healthy</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-2">
+                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#006837' }}></div>
+                        <span className="text-xs font-medium">Very Healthy (+0.4)</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#22C822' }}></div>
+                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#66bd63' }}></div>
                         <span className="text-xs">Healthy (&gt;{threshold[0].toFixed(2)})</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#FFFF00' }}></div>
+                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#ffffbf' }}></div>
                         <span className="text-xs">Borderline</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#FF8C00' }}></div>
+                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#fdae61' }}></div>
                         <span className="text-xs">Stressed</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#FF0000' }}></div>
-                        <span className="text-xs">Severe Stress</span>
+                        <div className="w-4 h-4 rounded shadow" style={{ backgroundColor: '#a50026' }}></div>
+                        <span className="text-xs">Severe Stress (-0.4)</span>
                       </div>
                       
                       {(plantConfigs[plantType].filterFlowers || plantConfigs[plantType].filterFabric) && (

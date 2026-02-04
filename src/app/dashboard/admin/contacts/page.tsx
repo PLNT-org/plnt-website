@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { formatDistanceToNow } from 'date-fns'
+import { Trash2 } from 'lucide-react'
 
 interface Contact {
   id: string
@@ -47,6 +48,28 @@ export default function ContactsPage() {
 
     if (!error) {
       fetchContacts()
+    }
+  }
+
+  const deleteContact = async (id: string, name: string) => {
+    if (!confirm(`Are you sure you want to delete the message from ${name}? This action cannot be undone.`)) {
+      return
+    }
+
+    try {
+      const response = await fetch('/api/contacts/delete', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      })
+
+      if (response.ok) {
+        fetchContacts()
+      } else {
+        console.error('Failed to delete contact')
+      }
+    } catch (error) {
+      console.error('Error deleting contact:', error)
     }
   }
 
@@ -109,6 +132,15 @@ export default function ContactsPage() {
                   disabled={contact.status === 'archived'}
                 >
                   Archive
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="bg-red-500 text-white border-red-500 hover:bg-red-600 hover:border-red-600"
+                  onClick={() => deleteContact(contact.id, `${contact.first_name} ${contact.last_name}`)}
+                >
+                  <Trash2 className="w-4 h-4 mr-1" />
+                  Delete
                 </Button>
               </div>
             </CardContent>

@@ -3,7 +3,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
-import type { User } from '@supabase/supabase-js'
+import type { User, Session } from '@supabase/supabase-js'
 
 interface UserProfile {
   id: string
@@ -15,10 +15,12 @@ interface UserProfile {
 
 interface AuthContextType {
   user: User | null
+  session: Session | null
   userProfile: UserProfile | null
   loading: boolean
   signIn: (email: string, password: string) => Promise<void>
   signUp: (email: string, password: string) => Promise<void>
+  signInWithGoogle: () => Promise<void>
   signOut: () => Promise<void>
   isDemo: boolean
   setIsDemo: (value: boolean) => void
@@ -28,6 +30,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
+  const [session, setSession] = useState<Session | null>(null)
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(true)
   const [isDemo, setIsDemoState] = useState(false)
@@ -76,7 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let authSubscription: any = null;
 
     // Check active sessions and sets the user
-    supabase.auth.getSession().then(({ data: { session }, error }) => {
+    supabase.auth.getSession().then(({ data: { session: currentSession }, error }) => {
       if (error) {
         console.error('Session error:', error)
         // Clear any invalid tokens
@@ -88,23 +91,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
           })
           setUser(null)
+          setSession(null)
           setUserProfile(null)
         }
       } else {
-        setUser(session?.user ?? null)
+        setUser(currentSession?.user ?? null)
+        setSession(currentSession ?? null)
         // Fetch profile if user exists
-        if (session?.user) {
-          fetchUserProfile(session.user.id)
+        if (currentSession?.user) {
+          fetchUserProfile(currentSession.user.id)
         }
       }
       setLoading(false)
     })
 
     // Listen for changes on auth state (sign in, sign out, etc.)
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
-      if (session?.user) {
-        fetchUserProfile(session.user.id)
+    const { data } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+      setUser(currentSession?.user ?? null)
+      setSession(currentSession ?? null)
+      if (currentSession?.user) {
+        fetchUserProfile(currentSession.user.id)
       } else {
         setUserProfile(null)
       }
@@ -135,6 +141,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     router.push('/dashboard')
   }
 
+  const signInWithGoogle = async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback`,
+      },
+    })
+    if (error) throw error
+    localStorage.removeItem('isDemoMode')
+    setIsDemo(false)
+  }
+
   const signOut = async () => {
     // Only sign out from Supabase if there's a real user
     if (user) {
@@ -149,15 +167,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ 
-      user, 
-      userProfile, 
-      loading, 
-      signIn, 
-      signUp, 
-      signOut, 
-      isDemo, 
-      setIsDemo 
+    <AuthContext.Provider value={{
+      user,
+      session,
+      userProfile,
+      loading,
+      signIn,
+      signUp,
+      signInWithGoogle,
+      signOut,
+      isDemo,
+      setIsDemo
     }}>
       {children}
     </AuthContext.Provider>

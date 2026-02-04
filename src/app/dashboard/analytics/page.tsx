@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { TrendingUp, TrendingDown, Leaf, Calendar, Download, Map, BarChart3, Activity } from 'lucide-react'
+import { TrendingUp, TrendingDown, Leaf, Calendar, Download, Map, BarChart3, Activity, Droplets, Cloud } from 'lucide-react'
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -481,6 +481,43 @@ export default function AnalyticsPage() {
   </CardContent>
 </Card>
 
+{/* Soil Moisture Monitoring Card - NEW */}
+          <Card className="hover:shadow-lg transition-shadow cursor-pointer">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <Droplets className="w-8 h-8 text-blue-600" />
+                <Badge variant="outline">New</Badge>
+              </div>
+              <CardTitle>Soil Moisture Monitoring</CardTitle>
+              <CardDescription>
+                Real-time irrigation management with NDWI and thermal analysis
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                <div className="flex items-center text-sm text-gray-600">
+                  <Droplets className="w-4 h-4 mr-2 text-blue-500" />
+                  NDWI & thermal moisture detection
+                </div>
+                <div className="flex items-center text-sm text-gray-600">
+                  <Cloud className="w-4 h-4 mr-2 text-gray-500" />
+                  Weather-integrated scheduling
+                </div>
+                <div className="flex items-center text-sm text-gray-600">
+                  <Zap className="w-4 h-4 mr-2 text-yellow-500" />
+                  Smart irrigation automation
+                </div>
+              </div>
+              <Link href="/dashboard/analytics/soil-moisture">
+                <Button className="w-full mt-4 bg-blue-600 hover:bg-blue-700">
+                  <Droplets className="w-4 h-4 mr-2" />
+                  Monitor Moisture
+                </Button>
+              </Link>
+            </CardContent>
+          </Card>
+        </div>
+
         {/* Plot Details Table */}
         <Card>
           <CardHeader>
@@ -530,6 +567,5 @@ export default function AnalyticsPage() {
           </CardContent>
         </Card>
       </div>
-    </div>
   )
 }

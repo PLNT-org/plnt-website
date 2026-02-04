@@ -15,84 +15,81 @@ export default function AuthCallbackPage() {
   const [debugInfo, setDebugInfo] = useState('')
 
   useEffect(() => {
-    const handleEmailConfirmation = async () => {
+    const handleAuthCallback = async () => {
       try {
         // Log the full URL for debugging
         console.log('Full URL:', window.location.href)
         console.log('Hash:', window.location.hash)
-        
-        // Get parameters from URL
-        const hashParams = new URLSearchParams(window.location.hash.substring(1))
-        const type = hashParams.get('type')
-        const accessToken = hashParams.get('access_token')
-        const error = hashParams.get('error')
-        const errorDescription = hashParams.get('error_description')
+        console.log('Search:', window.location.search)
 
-        // Debug info
-        setDebugInfo(`Type: ${type}, Has Token: ${!!accessToken}, Error: ${error}`)
+        // Check for OAuth callback (uses query params) or email confirmation (uses hash)
+        const urlParams = new URLSearchParams(window.location.search)
+        const hashParams = new URLSearchParams(window.location.hash.substring(1))
+
+        // Check for errors in either location
+        const error = urlParams.get('error') || hashParams.get('error')
+        const errorDescription = urlParams.get('error_description') || hashParams.get('error_description')
 
         if (error) {
           setStatus('error')
-          setMessage(errorDescription || 'An error occurred during email confirmation')
+          setMessage(errorDescription || 'An error occurred during authentication')
           return
         }
 
-        // If we have an access token, we need to set the session
-        if (accessToken) {
-          // Get the refresh token as well
-          const refreshToken = hashParams.get('refresh_token')
-          
-          if (refreshToken) {
-            // Set the session manually
-            const { data, error: sessionError } = await supabase.auth.setSession({
-              access_token: accessToken,
-              refresh_token: refreshToken
-            })
+        // For OAuth, Supabase handles the session automatically via the URL
+        // We just need to check if a session was established
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
 
-            if (sessionError) {
-              console.error('Session error:', sessionError)
-              setStatus('error')
-              setMessage('Failed to set session. Please try signing in.')
-              return
-            }
-
-            // Session set successfully
-            setStatus('success')
-            setMessage('Email confirmed successfully! Redirecting to dashboard...')
-            
-            // Redirect to dashboard after 1 second
-            setTimeout(() => {
-              router.push('/dashboard')
-            }, 1000)
-          } else {
-            // No refresh token - this might be a signup confirmation
-            setStatus('success')
-            setMessage('Email confirmed! Please sign in with your credentials.')
-            
-            // Redirect to sign in page after 2 seconds
-            setTimeout(() => {
-              router.push('/auth/signin')
-            }, 2000)
-          }
-        } else {
-          // No access token - check if user exists (might be already confirmed)
-          const { data: { user } } = await supabase.auth.getUser()
-
-          if (user) {
-            setStatus('success')
-            setMessage('Already authenticated! Redirecting to dashboard...')
-            setTimeout(() => {
-              router.push('/dashboard')
-            }, 1000)
-          } else {
-            // No token and no user - probably need to sign in
-            setStatus('success')
-            setMessage('Email confirmed! Please sign in to continue.')
-            setTimeout(() => {
-              router.push('/auth/signin')
-            }, 2000)
-          }
+        if (sessionError) {
+          console.error('Session error:', sessionError)
+          setStatus('error')
+          setMessage('Failed to establish session. Please try signing in.')
+          return
         }
+
+        if (session) {
+          // Session established (OAuth or email confirmation)
+          setStatus('success')
+          setMessage('Authentication successful! Redirecting to dashboard...')
+          setTimeout(() => {
+            router.push('/dashboard')
+          }, 1000)
+          return
+        }
+
+        // Check hash params for email confirmation tokens
+        const accessToken = hashParams.get('access_token')
+        const refreshToken = hashParams.get('refresh_token')
+
+        if (accessToken && refreshToken) {
+          // Set the session manually for email confirmation
+          const { error: setSessionError } = await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken
+          })
+
+          if (setSessionError) {
+            console.error('Set session error:', setSessionError)
+            setStatus('error')
+            setMessage('Failed to set session. Please try signing in.')
+            return
+          }
+
+          setStatus('success')
+          setMessage('Email confirmed successfully! Redirecting to dashboard...')
+          setTimeout(() => {
+            router.push('/dashboard')
+          }, 1000)
+          return
+        }
+
+        // No session and no tokens - might be a stale callback
+        setStatus('success')
+        setMessage('Please sign in to continue.')
+        setTimeout(() => {
+          router.push('/auth/signin')
+        }, 2000)
+
       } catch (err) {
         console.error('Callback error:', err)
         setStatus('error')
@@ -101,7 +98,7 @@ export default function AuthCallbackPage() {
       }
     }
 
-    handleEmailConfirmation()
+    handleAuthCallback()
   }, [router])
 
   return (

@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  aruco-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aruco-service
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    volumes:
+      # Mount for development - remove in production
+      - ./app:/app/app:ro
+      # Shared temp directory for GeoTIFF downloads
+      - aruco_temp:/tmp/aruco
+    restart: unless-stopped
+    networks:
+      - plnt-network
+
+networks:
+  plnt-network:
+    driver: bridge
+
+volumes:
+  aruco_temp:

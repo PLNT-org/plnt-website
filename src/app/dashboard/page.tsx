@@ -11,14 +11,22 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import Image from 'next/image'
-import { 
-  Plane, MapPin, Camera, Leaf, TrendingUp,
-  Calendar, ChevronRight, Plus, Upload, BarChart3, 
+import {
+  Plane, MapPin, Camera, Leaf,
+  ChevronRight, Plus, Upload, BarChart3,
   Clock, Search, Filter, MoreVertical, Edit, Trash2,
   CheckCircle2, AlertCircle, PlayCircle, FileText,
   Activity, Users, Settings, HelpCircle, LogOut,
-  Home, Map, Eye, Lock
+  Home, Map, Eye, Lock, Layers, QrCode, Table2
 } from 'lucide-react'
 import Link from 'next/link'
 
@@ -32,6 +40,26 @@ interface DashboardStats {
   plotsList: any[]
   flightPlans: any[]
 }
+
+interface InventoryItem {
+  id: string
+  species_name: string
+  scientific_name?: string
+  category?: string
+  count: number
+  barcode?: string
+  aruco_id?: number
+  date_counted: string
+  plot_name?: string
+}
+
+const DEMO_INVENTORY: InventoryItem[] = [
+  { id: '1', species_name: 'White Oak', scientific_name: 'Quercus alba', category: 'Tree', count: 1247, barcode: 'WO-2024-001', aruco_id: 42, date_counted: new Date(Date.now() - 86400000).toISOString(), plot_name: 'North Field A' },
+  { id: '2', species_name: 'Red Maple', scientific_name: 'Acer rubrum', category: 'Tree', count: 892, barcode: 'RM-2024-002', aruco_id: 15, date_counted: new Date(Date.now() - 172800000).toISOString(), plot_name: 'East Grove' },
+  { id: '3', species_name: 'Blue Hydrangea', scientific_name: 'Hydrangea macrophylla', category: 'Shrub', count: 456, barcode: 'BH-2024-003', date_counted: new Date(Date.now() - 259200000).toISOString(), plot_name: 'North Field A' },
+  { id: '4', species_name: 'Japanese Maple', scientific_name: 'Acer palmatum', category: 'Tree', count: 234, barcode: 'JM-2024-004', aruco_id: 78, date_counted: new Date(Date.now() - 345600000).toISOString(), plot_name: 'South Nursery' },
+  { id: '5', species_name: 'Boxwood', scientific_name: 'Buxus sempervirens', category: 'Shrub', count: 1890, barcode: 'BX-2024-005', date_counted: new Date(Date.now() - 432000000).toISOString(), plot_name: 'East Grove' },
+]
 
 function DashboardContent() {
   const { user, userProfile, isDemo, signOut } = useAuth()
@@ -52,6 +80,8 @@ function DashboardContent() {
   const [searchQuery, setSearchQuery] = useState('')
   const [flightSearchQuery, setFlightSearchQuery] = useState('')
   const [userRole, setUserRole] = useState<string>('viewer')
+  const [inventory, setInventory] = useState<InventoryItem[]>([])
+  const [inventorySearch, setInventorySearch] = useState('')
   
   const checkRole = async () => {
     const { data: { user } } = await supabase.auth.getUser()
@@ -155,7 +185,7 @@ function DashboardContent() {
             scheduled_for: new Date(Date.now() + 86400000).toISOString(),
             drone_model: 'DJI Mavic 3',
             status: 'scheduled',
-            altitude_m: 30,
+            altitude_m: 30, // ~100 ft
             estimated_duration_min: 15
           },
           {
@@ -165,7 +195,7 @@ function DashboardContent() {
             scheduled_for: new Date(Date.now() + 172800000).toISOString(),
             drone_model: 'DJI Air 2S',
             status: 'draft',
-            altitude_m: 25,
+            altitude_m: 23, // ~75 ft
             estimated_duration_min: 12
           },
           {
@@ -175,15 +205,16 @@ function DashboardContent() {
             scheduled_for: new Date(Date.now() + 259200000).toISOString(),
             drone_model: 'DJI Mavic 3',
             status: 'draft',
-            altitude_m: 35,
+            altitude_m: 38, // ~125 ft
             estimated_duration_min: 20
           }
         ]
       })
+      setInventory(DEMO_INVENTORY)
       setLoading(false)
       return
     }
-    
+
     // Real data fetch
     try {
       const [plotsRes, flightsRes, countsRes, plansRes] = await Promise.all([
@@ -275,41 +306,32 @@ function DashboardContent() {
           
           {/* Navigation Tabs */}
           <nav className="hidden md:flex space-x-8">
-            <button 
+            <button
               onClick={() => setActiveTab('overview')}
               className={`font-medium ${activeTab === 'overview' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
             >
               Overview
             </button>
-            <button 
-              onClick={() => setActiveTab('plots')}
-              className={`font-medium ${activeTab === 'plots' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
-            >
+            <Link href="/dashboard/plots" className="text-gray-700 hover:text-green-700 font-medium">
               Plots
-            </button>
-            <button 
+            </Link>
+            <Link href="/dashboard/inventory" className="text-gray-700 hover:text-green-700 font-medium">
+              Inventory
+            </Link>
+            <button
               onClick={() => setActiveTab('flights')}
               className={`font-medium ${activeTab === 'flights' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
             >
               Flight Plans
             </button>
-            <button 
-              onClick={() => setActiveTab('results')}
-              className={`font-medium ${activeTab === 'results' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
-            >
-              Results
-            </button>
-            <Link href="/dashboard/analytics" className="text-gray-700 hover:text-green-700 font-medium">
-              Analytics
-            </Link>
           </nav>
           
           {/* User Menu */}
           <div className="flex items-center space-x-3">
-            <Link href="/dashboard/flight-planner">
+            <Link href="/dashboard/register-marker">
               <Button className="bg-green-700 hover:bg-green-800 text-white">
-                <Plus className="w-4 h-4 mr-2" />
-                New Flight
+                <QrCode className="w-4 h-4 mr-2" />
+                Register Marker
               </Button>
             </Link>
             
@@ -360,175 +382,147 @@ function DashboardContent() {
           {/* Overview Tab */}
           {activeTab === 'overview' && (
             <>
-              {/* Quick Stats - Only on Overview */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Total Plots</CardTitle>
-                    <MapPin className="h-4 w-4 text-gray-400" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{stats.totalPlots}</div>
-                    <p className="text-xs text-gray-500 mt-1">Active areas</p>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Completed Flights</CardTitle>
-                    <Plane className="h-4 w-4 text-gray-400" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{stats.totalFlights}</div>
-                    <p className="text-xs text-gray-500 mt-1">Total missions</p>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Plants Counted</CardTitle>
-                    <Leaf className="h-4 w-4 text-gray-400" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{stats.totalPlants.toLocaleString()}</div>
-                    <p className="text-xs text-green-600 mt-1 flex items-center">
-                      <TrendingUp className="w-3 h-3 mr-1" />
-                      +12% vs last month
-                    </p>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Pending Uploads</CardTitle>
-                    <Upload className="h-4 w-4 text-gray-400" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{stats.pendingUploads}</div>
-                    {stats.pendingUploads > 0 && (
-                      <Link href="/dashboard/upload">
-                        <p className="text-xs text-blue-600 mt-1 hover:underline cursor-pointer">
-                          Upload now →
-                        </p>
-                      </Link>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-
-              {/* Quick Actions - Only on Overview */}
-              <div className="grid md:grid-cols-4 gap-4 mb-6">
-                <Link href="/dashboard/flight-planner">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer">
-                    <CardContent className="pt-6">
-                      <Plus className="w-8 h-8 text-green-600 mb-2" />
-                      <h3 className="font-semibold">New Flight Plan</h3>
-                      <p className="text-sm text-gray-500 mt-1">Create mission</p>
+              {/* Quick Actions - 4 cards */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                <Link href="/dashboard/register-marker">
+                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                    <CardContent className="pt-6 text-center">
+                      <QrCode className="w-10 h-10 text-pink-600 mb-2 mx-auto" />
+                      <h3 className="font-semibold">Register Marker</h3>
+                      <p className="text-sm text-gray-500 mt-1">Tag plants in field</p>
                     </CardContent>
                   </Card>
                 </Link>
 
-                <Link href="/dashboard/test-flight">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer">
-                    <CardContent className="pt-6">
-                      <Plane className="w-8 h-8 text-blue-600 mb-2" />
-                      <h3 className="font-semibold">Test Flight</h3>
-                      <p className="text-sm text-gray-500 mt-1">Simulate mission</p>
+                <Link href="/dashboard/orthomosaic">
+                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                    <CardContent className="pt-6 text-center">
+                      <Layers className="w-10 h-10 text-teal-600 mb-2 mx-auto" />
+                      <h3 className="font-semibold">Create Orthomosaic</h3>
+                      <p className="text-sm text-gray-500 mt-1">Stitch drone images</p>
+                    </CardContent>
+                  </Card>
+                </Link>
+
+                <Link href="/dashboard/analytics/orthomosaic">
+                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                    <CardContent className="pt-6 text-center">
+                      <Map className="w-10 h-10 text-indigo-600 mb-2 mx-auto" />
+                      <h3 className="font-semibold">View Orthomosaics</h3>
+                      <p className="text-sm text-gray-500 mt-1">Label plants on maps</p>
                     </CardContent>
                   </Card>
                 </Link>
 
                 <Link href="/dashboard/upload">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer">
-                    <CardContent className="pt-6">
-                      <Camera className="w-8 h-8 text-purple-600 mb-2" />
+                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                    <CardContent className="pt-6 text-center">
+                      <Camera className="w-10 h-10 text-orange-600 mb-2 mx-auto" />
                       <h3 className="font-semibold">Upload Images</h3>
-                      <p className="text-sm text-gray-500 mt-1">Process photos</p>
-                    </CardContent>
-                  </Card>
-                </Link>
-
-                <Link href="/dashboard/analytics">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer">
-                    <CardContent className="pt-6">
-                      <BarChart3 className="w-8 h-8 text-orange-600 mb-2" />
-                      <h3 className="font-semibold">View Analytics</h3>
-                      <p className="text-sm text-gray-500 mt-1">Track trends</p>
+                      <p className="text-sm text-gray-500 mt-1">Process drone photos</p>
                     </CardContent>
                   </Card>
                 </Link>
               </div>
 
-              <div className="grid lg:grid-cols-2 gap-6">
-                {/* Recent Flights */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Recent Flights</CardTitle>
-                    <CardDescription>Your latest completed missions</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    {stats.recentFlights.length === 0 ? (
-                      <div className="text-center py-8">
-                        <Plane className="w-12 h-12 text-gray-300 mx-auto mb-2" />
-                        <p className="text-gray-500 text-sm">No flights completed yet</p>
-                        <Link href="/dashboard/test-flight">
-                          <Button variant="outline" size="sm" className="mt-4">
-                            Test Flight Simulator
-                          </Button>
-                        </Link>
+              {/* Inventory Table */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        <Table2 className="h-5 w-5 text-purple-600" />
+                        Inventory
+                      </CardTitle>
+                      <CardDescription>
+                        {inventory.length} species • {inventory.reduce((sum, item) => sum + item.count, 0).toLocaleString()} total plants
+                      </CardDescription>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="relative">
+                        <Search className="absolute left-2 top-2.5 h-4 w-4 text-gray-400" />
+                        <Input
+                          type="search"
+                          placeholder="Search..."
+                          value={inventorySearch}
+                          onChange={(e) => setInventorySearch(e.target.value)}
+                          className="pl-8 w-48"
+                        />
                       </div>
-                    ) : (
-                      stats.recentFlights.slice(0, 5).map(flight => (
-                        <div key={flight.id} className="flex items-center justify-between">
-                          <div>
-                            <p className="font-medium">{flight.flight_plans?.name || 'Unnamed'}</p>
-                            <p className="text-sm text-gray-500">
-                              {new Date(flight.completed_at).toLocaleDateString()} • 
-                              {flight.plant_counts?.[0]?.count || 0} plants
-                            </p>
-                          </div>
-                          <Link href={`/dashboard/flights/${flight.id}`}>
-                            <Button variant="ghost" size="sm">View</Button>
-                          </Link>
-                        </div>
-                      ))
-                    )}
-                  </CardContent>
-                </Card>
-
-                {/* Upcoming Missions */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Upcoming Missions</CardTitle>
-                    <CardDescription>Scheduled flight plans</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    {stats.upcomingMissions.length === 0 ? (
-                      <div className="text-center py-8">
-                        <Calendar className="w-12 h-12 text-gray-300 mx-auto mb-2" />
-                        <p className="text-gray-500 text-sm mb-4">No upcoming missions</p>
-                        <Link href="/dashboard/flight-planner">
-                          <Button variant="outline" size="sm">
-                            Schedule Mission
-                          </Button>
-                        </Link>
-                      </div>
-                    ) : (
-                      stats.upcomingMissions.map(mission => (
-                        <div key={mission.id} className="flex items-center justify-between">
-                          <div>
-                            <p className="font-medium">{mission.name}</p>
-                            <p className="text-sm text-gray-500">
-                              {mission.plot_name} • {new Date(mission.scheduled_for).toLocaleDateString()}
-                            </p>
-                          </div>
-                          <Badge>{mission.status}</Badge>
-                        </div>
-                      ))
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
+                      <Link href="/dashboard/inventory">
+                        <Button variant="outline" size="sm">
+                          View All
+                        </Button>
+                      </Link>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {inventory.length === 0 ? (
+                    <div className="text-center py-8">
+                      <Table2 className="w-12 h-12 mx-auto text-gray-300 mb-2" />
+                      <p className="text-gray-500">No inventory data yet</p>
+                      <p className="text-sm text-gray-400 mt-1">Start by registering markers or processing images</p>
+                    </div>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Species</TableHead>
+                          <TableHead>Type</TableHead>
+                          <TableHead className="text-right">Count</TableHead>
+                          <TableHead>Barcode / ArUco</TableHead>
+                          <TableHead>Date Counted</TableHead>
+                          <TableHead>Plot</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {inventory
+                          .filter(item =>
+                            item.species_name.toLowerCase().includes(inventorySearch.toLowerCase()) ||
+                            item.scientific_name?.toLowerCase().includes(inventorySearch.toLowerCase()) ||
+                            item.barcode?.toLowerCase().includes(inventorySearch.toLowerCase())
+                          )
+                          .slice(0, 10)
+                          .map((item) => (
+                            <TableRow key={item.id}>
+                              <TableCell>
+                                <div>
+                                  <div className="font-medium">{item.species_name}</div>
+                                  {item.scientific_name && (
+                                    <div className="text-sm text-gray-500 italic">{item.scientific_name}</div>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                {item.category && (
+                                  <Badge variant="outline" className="text-xs">{item.category}</Badge>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-right font-medium">
+                                {item.count.toLocaleString()}
+                              </TableCell>
+                              <TableCell>
+                                <div className="space-y-1">
+                                  {item.barcode && <div className="text-sm font-mono">{item.barcode}</div>}
+                                  {item.aruco_id !== undefined && (
+                                    <div className="text-xs text-gray-500">ArUco #{item.aruco_id}</div>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-sm">
+                                {new Date(item.date_counted).toLocaleDateString()}
+                              </TableCell>
+                              <TableCell className="text-sm text-gray-600">
+                                {item.plot_name || '—'}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
             </>
           )}
 
@@ -657,7 +651,7 @@ function DashboardContent() {
                         </div>
                         <div className="flex justify-between">
                           <span className="text-gray-500">Altitude</span>
-                          <span className="font-medium">{plan.altitude_m}m</span>
+                          <span className="font-medium">{Math.round(plan.altitude_m * 3.28084)} ft</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-gray-500">Duration</span>

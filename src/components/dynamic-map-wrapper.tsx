@@ -29,10 +29,20 @@ export const RealSatelliteMap = dynamic(
 
 export const FlightPathPreviewMap = dynamic(
   () => import('./flight-path-preview-map'),
-  { 
+  {
     ssr: false,
     loading: () => <div className="h-[400px] w-full rounded-lg bg-gray-100 animate-pulse flex items-center justify-center">
       <p className="text-gray-500">Loading flight path...</p>
+    </div>
+  }
+)
+
+export const PlotBoundaryMap = dynamic(
+  () => import('./plot-boundary-map'),
+  {
+    ssr: false,
+    loading: () => <div className="h-[500px] w-full rounded-lg bg-gray-100 animate-pulse flex items-center justify-center">
+      <p className="text-gray-500">Loading map...</p>
     </div>
   }
 )

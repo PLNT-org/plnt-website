@@ -10,9 +10,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Progress } from '@/components/ui/progress'
-import { Upload, X, CheckCircle2, AlertCircle, Image as ImageIcon, Loader2, Brain, FileUp } from 'lucide-react'
+import { Upload, X, CheckCircle2, AlertCircle, Image as ImageIcon, Loader2, Brain, FileUp, Map, Layers } from 'lucide-react'
 import { useDropzone } from 'react-dropzone'
 import Link from 'next/link'
+import Image from 'next/image'
 
 interface UploadedImage {
   file: File
@@ -48,6 +49,9 @@ export default function ImageUploadPage() {
   const [success, setSuccess] = useState(false)
   const [plantCount, setPlantCount] = useState<number | null>(null)
   const [loadingFlights, setLoadingFlights] = useState(true)
+  const [creatingOrthomosaic, setCreatingOrthomosaic] = useState(false)
+  const [orthomosaicId, setOrthomosaicId] = useState<string | null>(null)
+  const [processingType, setProcessingType] = useState<'2d' | '3d'>('2d')
 
   // Load recent flights on mount
   useEffect(() => {
@@ -210,6 +214,46 @@ export default function ImageUploadPage() {
     }
   }
 
+  const createOrthomosaic = async () => {
+    if (!selectedFlight) return
+
+    setCreatingOrthomosaic(true)
+    setError('')
+
+    try {
+      if (isDemo) {
+        // Simulate orthomosaic creation for demo
+        await new Promise(resolve => setTimeout(resolve, 1500))
+        setOrthomosaicId('demo-orthomosaic-' + Date.now())
+        return
+      }
+
+      const response = await fetch('/api/webodm/create-task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          flightId: selectedFlight,
+          name: processingType === '3d'
+            ? `3D Height Map - ${new Date().toLocaleDateString()}`
+            : `Orthomosaic - ${new Date().toLocaleDateString()}`,
+          quality: processingType === '3d' ? 'height-mapping' : 'balanced',
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to create orthomosaic')
+      }
+
+      setOrthomosaicId(data.orthomosaicId)
+    } catch (err: any) {
+      setError(err.message || 'Failed to start orthomosaic processing')
+    } finally {
+      setCreatingOrthomosaic(false)
+    }
+  }
+
   const processImagesForPlantCount = async (imagePaths: string[]): Promise<any> => {
     // Simulate processing for demo
     if (isDemo) {
@@ -273,6 +317,76 @@ export default function ImageUploadPage() {
                   </p>
                 </div>
 
+                {/* Orthomosaic Creation Section */}
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+                  <div className="flex items-center gap-3 mb-3">
+                    <Layers className="w-6 h-6 text-blue-600" />
+                    <h3 className="font-semibold text-blue-900">Create Orthomosaic</h3>
+                  </div>
+                  <p className="text-sm text-blue-700 mb-4">
+                    Stitch your drone images into a georeferenced orthomosaic map for plant labeling and analysis.
+                  </p>
+
+                  {/* Processing Type Selection */}
+                  <div className="grid grid-cols-2 gap-3 mb-4">
+                    <button
+                      onClick={() => setProcessingType('2d')}
+                      className={`p-3 rounded-lg border-2 text-left transition-colors ${
+                        processingType === '2d'
+                          ? 'border-blue-500 bg-white'
+                          : 'border-blue-200 bg-blue-25 hover:border-blue-300'
+                      }`}
+                    >
+                      <div className="font-medium text-blue-900">2D Orthomosaic</div>
+                      <div className="text-xs text-blue-600">Standard flat map for plant counting</div>
+                    </button>
+                    <button
+                      onClick={() => setProcessingType('3d')}
+                      className={`p-3 rounded-lg border-2 text-left transition-colors ${
+                        processingType === '3d'
+                          ? 'border-blue-500 bg-white'
+                          : 'border-blue-200 bg-blue-25 hover:border-blue-300'
+                      }`}
+                    >
+                      <div className="font-medium text-blue-900">3D Height Mapping</div>
+                      <div className="text-xs text-blue-600">DSM/DTM for tree height analysis</div>
+                    </button>
+                  </div>
+
+                  {orthomosaicId ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 text-green-700">
+                        <CheckCircle2 className="w-5 h-5" />
+                        <span className="font-medium">Orthomosaic processing started!</span>
+                      </div>
+                      <Link href={`/dashboard/analytics/orthomosaic?id=${orthomosaicId}`}>
+                        <Button className="w-full bg-blue-600 hover:bg-blue-700">
+                          <Map className="w-4 h-4 mr-2" />
+                          View Orthomosaic Progress
+                        </Button>
+                      </Link>
+                    </div>
+                  ) : (
+                    <Button
+                      onClick={createOrthomosaic}
+                      disabled={creatingOrthomosaic}
+                      className="w-full bg-blue-600 hover:bg-blue-700"
+                    >
+                      {creatingOrthomosaic ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Starting Processing...
+                        </>
+                      ) : (
+                        <>
+                          <Layers className="w-4 h-4 mr-2" />
+                          Create Orthomosaic Map
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+
                 <div className="flex gap-4 justify-center">
                   <Link href={`/dashboard/flights/${selectedFlight}`}>
                     <Button className="bg-green-700 hover:bg-green-800">
@@ -286,6 +400,7 @@ export default function ImageUploadPage() {
                       setImages([])
                       setPlantCount(null)
                       setSelectedFlight('')
+                      setOrthomosaicId(null)
                     }}
                   >
                     Process Another Flight
@@ -300,12 +415,30 @@ export default function ImageUploadPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-4xl mx-auto space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Upload Flight Images</h1>
-          <p className="text-gray-600 mt-2">Upload aerial images from your drone flight for plant counting analysis</p>
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <div className="bg-white border-b">
+        <div className="max-w-4xl mx-auto px-4 py-4">
+          <div className="flex items-center gap-6">
+            <Link href="/dashboard">
+              <Image
+                src="/images/plnt-logo.svg"
+                alt="PLNT Logo"
+                width={120}
+                height={40}
+                className="h-10 w-auto"
+                priority
+              />
+            </Link>
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">Upload Flight Images</h1>
+              <p className="text-gray-600">Upload aerial images from your drone flight for plant counting analysis</p>
+            </div>
+          </div>
         </div>
+      </div>
+
+      <div className="max-w-4xl mx-auto p-8 space-y-6">
 
         {/* Flight Selection */}
         <Card>

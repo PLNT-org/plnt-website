@@ -1,27 +1,61 @@
 // components/flight-planner.tsx
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
 import { supabase } from '@/lib/supabase/client'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { EnhancedSatelliteMap } from '@/components/dynamic-map-wrapper'
+import { FlightPlannerSidebar } from '@/components/flight-planner-sidebar'
 import Link from 'next/link'
-import { ArrowLeft, Save, Plane, Calendar, MapPin } from 'lucide-react'
-
-// Using Plane icon as Drone
-const Drone = Plane
+import Image from 'next/image'
+import { Plus, Loader2, MapPin } from 'lucide-react'
 
 interface Waypoint {
   lat: number
   lng: number
   action: 'fly' | 'photo'
+  gimbalPitch?: number
+  heading?: number
+}
+
+type MissionType = 'orthomosaic' | '3d-model' | '3d-fast' | 'custom'
+
+const MISSION_PRESETS = {
+  orthomosaic: {
+    name: 'Orthomosaic (2D)',
+    description: 'Single-grid pattern for flat imagery and plant counting',
+    frontalOverlap: 80,
+    sideOverlap: 75,
+    gimbalAngles: [-90],
+    pattern: 'single-grid' as const,
+  },
+  '3d-model': {
+    name: '3D Model (Height Mapping)',
+    description: 'Cross-hatch pattern with oblique angles for DSM/DTM',
+    frontalOverlap: 85,
+    sideOverlap: 75,
+    gimbalAngles: [-90, -45],
+    pattern: 'cross-hatch' as const,
+  },
+  '3d-fast': {
+    name: '3D Fast (Height Mapping)',
+    description: 'Faster 3D: single-grid nadir + cross-hatch oblique',
+    frontalOverlap: 85,
+    sideOverlap: 75,
+    gimbalAngles: [-90, -45],
+    pattern: 'fast-3d' as const,
+  },
+  custom: {
+    name: 'Custom',
+    description: 'Configure all parameters manually',
+    frontalOverlap: 80,
+    sideOverlap: 75,
+    gimbalAngles: [-90],
+    pattern: 'single-grid' as const,
+  },
 }
 
 interface MapArea {
@@ -31,6 +65,8 @@ interface MapArea {
   coordinates: Waypoint[]
   photoIntervalMeters?: number
   estimatedPhotos?: number
+  missionType?: MissionType
+  gimbalAngles?: number[]
 }
 
 interface Plot {
@@ -46,32 +82,35 @@ export default function FlightPlannerInterface() {
   const searchParams = useSearchParams()
   const plotId = searchParams.get('plot')
   const editId = searchParams.get('edit')
-  
+
+  // Form state
   const [name, setName] = useState('')
   const [selectedPlot, setSelectedPlot] = useState(plotId || 'custom')
   const [plots, setPlots] = useState<Plot[]>([])
   const [droneModel, setDroneModel] = useState('DJI Mavic 3')
-  const [altitude, setAltitude] = useState('30')
-  const [speed, setSpeed] = useState('5')
+  const [altitude, setAltitude] = useState('100')
+  const [speed, setSpeed] = useState('16')
   const [overlap, setOverlap] = useState('80')
   const [plantType, setPlantType] = useState('')
   const [scheduledDate, setScheduledDate] = useState('')
   const [mapArea, setMapArea] = useState<MapArea | null>(null)
+  const [missionType, setMissionType] = useState<MissionType>('orthomosaic')
+
+  // UI state
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [currentPlotBoundary, setCurrentPlotBoundary] = useState<{ lat: number; lng: number }[] | undefined>(undefined)
- 
-  // Add useEffect to handle plot selection changes
+
+  // Handle plot selection changes
   useEffect(() => {
     if (selectedPlot && selectedPlot !== 'custom') {
       const selected = plots.find(p => p.id === selectedPlot)
-      console.log('Selected plot:', selected) // Debug log
-      
+
       if (selected?.boundaries) {
         let boundary: { lat: number; lng: number }[] = []
-        
-        // Handle different boundary formats
+
         if (selected.boundaries.type === 'Polygon' && selected.boundaries.coordinates?.[0]) {
           boundary = selected.boundaries.coordinates[0].map((coord: number[]) => ({
             lat: coord[1],
@@ -88,17 +127,11 @@ export default function FlightPlannerInterface() {
             lng: coord.lng || coord[0]
           }))
         }
-        
-        console.log('Processed boundary:', boundary) // Debug log
-        
+
         if (boundary.length > 0) {
           setCurrentPlotBoundary(boundary)
-
-          // Calculate area
           const area = calculatePlotArea(boundary)
-
-          // Generate optimized flight path with camera trigger waypoints
-          const { coordinates, photoIntervalMeters, estimatedPhotos } = generateOptimizedFlightPath(boundary)
+          const { coordinates, photoIntervalMeters, estimatedPhotos } = generateFlightPath(boundary)
 
           const newMapArea = {
             id: Date.now(),
@@ -111,17 +144,18 @@ export default function FlightPlannerInterface() {
             area: `${area.toFixed(2)} acres`,
             coordinates,
             photoIntervalMeters,
-            estimatedPhotos
+            estimatedPhotos,
+            missionType,
+            gimbalAngles: MISSION_PRESETS[missionType].gimbalAngles
           }
 
-          console.log('Generated mapArea:', newMapArea) // Debug log
           setMapArea(newMapArea)
         }
       }
     } else {
       setCurrentPlotBoundary(undefined)
     }
-  }, [selectedPlot, plots, altitude, overlap])
+  }, [selectedPlot, plots, altitude, overlap, missionType])
 
   const calculatePlotArea = (coords: { lat: number; lng: number }[]): number => {
     let area = 0
@@ -138,12 +172,30 @@ export default function FlightPlannerInterface() {
     }
 
     area = Math.abs(area * 6378137 * 6378137 / 2)
-    return area / 4046.86 // Convert to acres
+    return area / 4046.86
   }
 
-  // Calculate distance between two lat/lng points in meters
+  const isPointInPolygon = (point: { lat: number; lng: number }, polygon: { lat: number; lng: number }[]): boolean => {
+    let inside = false
+    const x = point.lng
+    const y = point.lat
+
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].lng
+      const yi = polygon[i].lat
+      const xj = polygon[j].lng
+      const yj = polygon[j].lat
+
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside
+      }
+    }
+
+    return inside
+  }
+
   const calculateDistance = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
-    const R = 6371000 // Earth's radius in meters
+    const R = 6371000
     const dLat = (lat2 - lat1) * Math.PI / 180
     const dLng = (lng2 - lng1) * Math.PI / 180
     const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
@@ -153,7 +205,6 @@ export default function FlightPlannerInterface() {
     return R * c
   }
 
-  // Generate camera trigger waypoints along a flight line
   const generateCameraTriggerWaypoints = (
     startLat: number, startLng: number,
     endLat: number, endLng: number,
@@ -171,91 +222,472 @@ export default function FlightPlannerInterface() {
       const lat = startLat + (endLat - startLat) * fraction
       const lng = startLng + (endLng - startLng) * fraction
 
-      waypoints.push({
-        lat,
-        lng,
-        action: 'photo'
-      })
+      waypoints.push({ lat, lng, action: 'photo' })
     }
 
     return waypoints
   }
 
-  const generateOptimizedFlightPath = (boundary: { lat: number; lng: number }[]): { coordinates: Waypoint[], photoIntervalMeters: number, estimatedPhotos: number } => {
-    // Find bounds
-    const lats = boundary.map(coord => coord.lat)
-    const lngs = boundary.map(coord => coord.lng)
-    const north = Math.max(...lats)
-    const south = Math.min(...lats)
-    const east = Math.max(...lngs)
-    const west = Math.min(...lngs)
+  // Find the optimal flight direction based on the polygon's longest edge
+  const findOptimalFlightAngle = (boundary: { lat: number; lng: number }[]): number => {
+    if (boundary.length < 2) return 0
 
-    // Calculate optimal line spacing based on camera FOV and overlap
-    const altitudeM = parseInt(altitude) || 30
-    const horizontalFOV = 84 // degrees (typical for DJI/Autel drones)
-    const verticalFOV = 55 // degrees (approximate for 4:3 sensor)
+    let longestEdgeLength = 0
+    let longestEdgeAngle = 0
+
+    for (let i = 0; i < boundary.length; i++) {
+      const p1 = boundary[i]
+      const p2 = boundary[(i + 1) % boundary.length]
+
+      // Calculate edge length in meters
+      const edgeLength = calculateDistance(p1.lat, p1.lng, p2.lat, p2.lng)
+
+      if (edgeLength > longestEdgeLength) {
+        longestEdgeLength = edgeLength
+        // Calculate angle of this edge (in radians)
+        // Account for longitude scaling at this latitude
+        const avgLat = (p1.lat + p2.lat) / 2
+        const lngScale = Math.cos(avgLat * Math.PI / 180)
+        const dx = (p2.lng - p1.lng) * lngScale
+        const dy = p2.lat - p1.lat
+        longestEdgeAngle = Math.atan2(dy, dx)
+      }
+    }
+
+    return longestEdgeAngle
+  }
+
+  // Rotate a point around a center point
+  const rotatePoint = (
+    point: { lat: number; lng: number },
+    center: { lat: number; lng: number },
+    angle: number
+  ): { lat: number; lng: number } => {
+    // Account for longitude scaling at this latitude
+    const lngScale = Math.cos(center.lat * Math.PI / 180)
+
+    // Translate to origin and scale
+    const dx = (point.lng - center.lng) * lngScale
+    const dy = point.lat - center.lat
+
+    // Rotate
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    const rotatedX = dx * cos - dy * sin
+    const rotatedY = dx * sin + dy * cos
+
+    // Translate back and unscale
+    return {
+      lat: rotatedY + center.lat,
+      lng: rotatedX / lngScale + center.lng
+    }
+  }
+
+  const generateOptimizedFlightPath = (boundary: { lat: number; lng: number }[]): { coordinates: Waypoint[], photoIntervalMeters: number, estimatedPhotos: number } => {
+    // Calculate center of polygon
+    const centerLat = boundary.reduce((sum, p) => sum + p.lat, 0) / boundary.length
+    const centerLng = boundary.reduce((sum, p) => sum + p.lng, 0) / boundary.length
+    const center = { lat: centerLat, lng: centerLng }
+
+    // Find optimal flight angle (parallel to longest edge)
+    const flightAngle = findOptimalFlightAngle(boundary)
+
+    // Rotate boundary to align with axes (for easier grid generation)
+    const rotatedBoundary = boundary.map(p => rotatePoint(p, center, -flightAngle))
+
+    // Get bounds of rotated polygon
+    const rotatedLats = rotatedBoundary.map(p => p.lat)
+    const rotatedLngs = rotatedBoundary.map(p => p.lng)
+    const north = Math.max(...rotatedLats)
+    const south = Math.min(...rotatedLats)
+    const east = Math.max(...rotatedLngs)
+    const west = Math.min(...rotatedLngs)
+
+    const altitudeFt = parseInt(altitude) || 100
+    const altitudeM = altitudeFt * 0.3048
+    const horizontalFOV = 84
+    const verticalFOV = 55
     const overlapPercent = parseInt(overlap) || 80
 
-    // Calculate ground coverage (side overlap - for line spacing)
     const coverageWidth = 2 * altitudeM * Math.tan((horizontalFOV / 2) * Math.PI / 180)
     const lineSpacing = coverageWidth * (1 - overlapPercent / 100)
-
-    // Calculate forward ground coverage (for photo interval)
     const forwardCoverage = 2 * altitudeM * Math.tan((verticalFOV / 2) * Math.PI / 180)
     const photoIntervalMeters = forwardCoverage * (1 - overlapPercent / 100)
+    const lineSpacingDeg = lineSpacing / 111320
 
-    // Convert line spacing to degrees (approximate)
-    const lineSpacingDeg = lineSpacing / 111320 // meters to degrees
-
-    const flightPath: Waypoint[] = []
+    const allWaypoints: Waypoint[] = []
     let currentLat = south
     let lineNumber = 0
-    let totalPhotos = 0
 
-    // Generate lawnmower pattern with camera trigger waypoints
+    // Generate grid in rotated coordinate system
     while (currentLat <= north) {
       let lineStart: { lat: number; lng: number }
       let lineEnd: { lat: number; lng: number }
 
       if (lineNumber % 2 === 0) {
-        // Even lines: west to east
         lineStart = { lat: currentLat, lng: west }
         lineEnd = { lat: currentLat, lng: east }
       } else {
-        // Odd lines: east to west
         lineStart = { lat: currentLat, lng: east }
         lineEnd = { lat: currentLat, lng: west }
       }
 
-      // Generate camera trigger waypoints along this flight line
       const lineWaypoints = generateCameraTriggerWaypoints(
         lineStart.lat, lineStart.lng,
         lineEnd.lat, lineEnd.lng,
         photoIntervalMeters
       )
 
-      flightPath.push(...lineWaypoints)
-      totalPhotos += lineWaypoints.length
-
+      allWaypoints.push(...lineWaypoints)
       currentLat += lineSpacingDeg
       lineNumber++
     }
 
+    // Rotate waypoints back to original coordinate system
+    const rotatedWaypoints = allWaypoints.map(wp => {
+      const rotatedBack = rotatePoint(wp, center, flightAngle)
+      return { ...wp, lat: rotatedBack.lat, lng: rotatedBack.lng }
+    })
+
+    // Filter to only include points inside the original polygon
+    const filteredWaypoints = boundary.length >= 3
+      ? rotatedWaypoints.filter(wp => isPointInPolygon(wp, boundary))
+      : rotatedWaypoints
+
     return {
-      coordinates: flightPath,
+      coordinates: filteredWaypoints,
       photoIntervalMeters,
-      estimatedPhotos: totalPhotos
+      estimatedPhotos: filteredWaypoints.length
     }
   }
 
+  const generateCrossHatchFlightPath = (
+    boundary: { lat: number; lng: number }[],
+    gimbalAngles: number[] = [-90, -45]
+  ): { coordinates: Waypoint[], photoIntervalMeters: number, estimatedPhotos: number } => {
+    // Calculate center of polygon
+    const centerLat = boundary.reduce((sum, p) => sum + p.lat, 0) / boundary.length
+    const centerLng = boundary.reduce((sum, p) => sum + p.lng, 0) / boundary.length
+    const center = { lat: centerLat, lng: centerLng }
+
+    // Find optimal flight angle (parallel to longest edge)
+    const flightAngle = findOptimalFlightAngle(boundary)
+
+    // Rotate boundary to align with axes
+    const rotatedBoundary = boundary.map(p => rotatePoint(p, center, -flightAngle))
+
+    // Get bounds of rotated polygon
+    const rotatedLats = rotatedBoundary.map(p => p.lat)
+    const rotatedLngs = rotatedBoundary.map(p => p.lng)
+    const north = Math.max(...rotatedLats)
+    const south = Math.min(...rotatedLats)
+    const east = Math.max(...rotatedLngs)
+    const west = Math.min(...rotatedLngs)
+
+    const altitudeFt = parseInt(altitude) || 100
+    const altitudeM = altitudeFt * 0.3048
+    const horizontalFOV = 84
+    const verticalFOV = 55
+    const frontalOverlap = MISSION_PRESETS['3d-model'].frontalOverlap
+    const sideOverlap = MISSION_PRESETS['3d-model'].sideOverlap
+
+    const coverageWidth = 2 * altitudeM * Math.tan((horizontalFOV / 2) * Math.PI / 180)
+    const lineSpacing = coverageWidth * (1 - sideOverlap / 100)
+    const forwardCoverage = 2 * altitudeM * Math.tan((verticalFOV / 2) * Math.PI / 180)
+    const photoIntervalMeters = forwardCoverage * (1 - frontalOverlap / 100)
+    const lineSpacingDeg = lineSpacing / 111320
+    const lngSpacingDeg = lineSpacing / (111320 * Math.cos(centerLat * Math.PI / 180))
+
+    const allWaypoints: Waypoint[] = []
+
+    // Calculate heading offset based on flight angle (convert radians to degrees)
+    const headingOffset = flightAngle * 180 / Math.PI
+
+    const generateLineWaypoints = (
+      startLat: number, startLng: number,
+      endLat: number, endLng: number,
+      gimbalPitch: number,
+      baseDirection: 'primary' | 'primary-reverse' | 'perpendicular' | 'perpendicular-reverse'
+    ): Waypoint[] => {
+      let heading = 0
+      if (gimbalPitch > -90) {
+        // For oblique shots, heading follows flight direction (rotated)
+        switch (baseDirection) {
+          case 'primary': heading = 90 + headingOffset; break
+          case 'primary-reverse': heading = 270 + headingOffset; break
+          case 'perpendicular': heading = 0 + headingOffset; break
+          case 'perpendicular-reverse': heading = 180 + headingOffset; break
+        }
+        // Normalize heading to 0-360
+        heading = ((heading % 360) + 360) % 360
+      }
+
+      return generateCameraTriggerWaypoints(
+        startLat, startLng, endLat, endLng, photoIntervalMeters
+      ).map(wp => ({ ...wp, gimbalPitch, heading }))
+    }
+
+    gimbalAngles.forEach((gimbalPitch) => {
+      // Primary direction (along longest edge)
+      let currentLat = south
+      let lineNumber = 0
+
+      while (currentLat <= north) {
+        const goingEast = lineNumber % 2 === 0
+        const lineStart = goingEast
+          ? { lat: currentLat, lng: west }
+          : { lat: currentLat, lng: east }
+        const lineEnd = goingEast
+          ? { lat: currentLat, lng: east }
+          : { lat: currentLat, lng: west }
+
+        const lineWaypoints = generateLineWaypoints(
+          lineStart.lat, lineStart.lng,
+          lineEnd.lat, lineEnd.lng,
+          gimbalPitch,
+          goingEast ? 'primary' : 'primary-reverse'
+        )
+
+        allWaypoints.push(...lineWaypoints)
+        currentLat += lineSpacingDeg
+        lineNumber++
+      }
+
+      // Perpendicular direction
+      let currentLng = west
+      lineNumber = 0
+
+      while (currentLng <= east) {
+        const goingNorth = lineNumber % 2 === 0
+        const lineStart = goingNorth
+          ? { lat: south, lng: currentLng }
+          : { lat: north, lng: currentLng }
+        const lineEnd = goingNorth
+          ? { lat: north, lng: currentLng }
+          : { lat: south, lng: currentLng }
+
+        const lineWaypoints = generateLineWaypoints(
+          lineStart.lat, lineStart.lng,
+          lineEnd.lat, lineEnd.lng,
+          gimbalPitch,
+          goingNorth ? 'perpendicular' : 'perpendicular-reverse'
+        )
+
+        allWaypoints.push(...lineWaypoints)
+        currentLng += lngSpacingDeg
+        lineNumber++
+      }
+    })
+
+    // Rotate waypoints back to original coordinate system
+    const rotatedWaypoints = allWaypoints.map(wp => {
+      const rotatedBack = rotatePoint(wp, center, flightAngle)
+      return { ...wp, lat: rotatedBack.lat, lng: rotatedBack.lng }
+    })
+
+    // Filter to only include points inside the original polygon
+    const filteredWaypoints = boundary.length >= 3
+      ? rotatedWaypoints.filter(wp => isPointInPolygon(wp, boundary))
+      : rotatedWaypoints
+
+    return {
+      coordinates: filteredWaypoints,
+      photoIntervalMeters,
+      estimatedPhotos: filteredWaypoints.length
+    }
+  }
+
+  const generateFast3DFlightPath = (
+    boundary: { lat: number; lng: number }[]
+  ): { coordinates: Waypoint[], photoIntervalMeters: number, estimatedPhotos: number } => {
+    // Calculate center of polygon
+    const centerLat = boundary.reduce((sum, p) => sum + p.lat, 0) / boundary.length
+    const centerLng = boundary.reduce((sum, p) => sum + p.lng, 0) / boundary.length
+    const center = { lat: centerLat, lng: centerLng }
+
+    // Find optimal flight angle (parallel to longest edge)
+    const flightAngle = findOptimalFlightAngle(boundary)
+
+    // Rotate boundary to align with axes
+    const rotatedBoundary = boundary.map(p => rotatePoint(p, center, -flightAngle))
+
+    // Get bounds of rotated polygon
+    const rotatedLats = rotatedBoundary.map(p => p.lat)
+    const rotatedLngs = rotatedBoundary.map(p => p.lng)
+    const north = Math.max(...rotatedLats)
+    const south = Math.min(...rotatedLats)
+    const east = Math.max(...rotatedLngs)
+    const west = Math.min(...rotatedLngs)
+
+    const altitudeFt = parseInt(altitude) || 100
+    const altitudeM = altitudeFt * 0.3048
+    const horizontalFOV = 84
+    const verticalFOV = 55
+    const frontalOverlap = MISSION_PRESETS['3d-fast'].frontalOverlap
+    const sideOverlap = MISSION_PRESETS['3d-fast'].sideOverlap
+
+    const coverageWidth = 2 * altitudeM * Math.tan((horizontalFOV / 2) * Math.PI / 180)
+    const lineSpacing = coverageWidth * (1 - sideOverlap / 100)
+    const forwardCoverage = 2 * altitudeM * Math.tan((verticalFOV / 2) * Math.PI / 180)
+    const photoIntervalMeters = forwardCoverage * (1 - frontalOverlap / 100)
+    const lineSpacingDeg = lineSpacing / 111320
+    const lngSpacingDeg = lineSpacing / (111320 * Math.cos(centerLat * Math.PI / 180))
+
+    const allWaypoints: Waypoint[] = []
+
+    // Calculate heading offset based on flight angle (convert radians to degrees)
+    const headingOffset = flightAngle * 180 / Math.PI
+
+    const generateLineWaypoints = (
+      startLat: number, startLng: number,
+      endLat: number, endLng: number,
+      gimbalPitch: number,
+      baseDirection: 'primary' | 'primary-reverse' | 'perpendicular' | 'perpendicular-reverse'
+    ): Waypoint[] => {
+      let heading = 0
+      if (gimbalPitch > -90) {
+        switch (baseDirection) {
+          case 'primary': heading = 90 + headingOffset; break
+          case 'primary-reverse': heading = 270 + headingOffset; break
+          case 'perpendicular': heading = 0 + headingOffset; break
+          case 'perpendicular-reverse': heading = 180 + headingOffset; break
+        }
+        heading = ((heading % 360) + 360) % 360
+      }
+      return generateCameraTriggerWaypoints(
+        startLat, startLng, endLat, endLng, photoIntervalMeters
+      ).map(wp => ({ ...wp, gimbalPitch, heading }))
+    }
+
+    // PASS 1: Nadir single-grid (primary direction)
+    let currentLat = south
+    let lineNumber = 0
+    while (currentLat <= north) {
+      const goingEast = lineNumber % 2 === 0
+      const lineStart = goingEast ? { lat: currentLat, lng: west } : { lat: currentLat, lng: east }
+      const lineEnd = goingEast ? { lat: currentLat, lng: east } : { lat: currentLat, lng: west }
+
+      const lineWaypoints = generateLineWaypoints(
+        lineStart.lat, lineStart.lng, lineEnd.lat, lineEnd.lng,
+        -90, goingEast ? 'primary' : 'primary-reverse'
+      )
+      allWaypoints.push(...lineWaypoints)
+      currentLat += lineSpacingDeg
+      lineNumber++
+    }
+
+    // PASS 2: Oblique primary direction lines
+    currentLat = south
+    lineNumber = 0
+    while (currentLat <= north) {
+      const goingEast = lineNumber % 2 === 0
+      const lineStart = goingEast ? { lat: currentLat, lng: west } : { lat: currentLat, lng: east }
+      const lineEnd = goingEast ? { lat: currentLat, lng: east } : { lat: currentLat, lng: west }
+
+      const lineWaypoints = generateLineWaypoints(
+        lineStart.lat, lineStart.lng, lineEnd.lat, lineEnd.lng,
+        -45, goingEast ? 'primary' : 'primary-reverse'
+      )
+      allWaypoints.push(...lineWaypoints)
+      currentLat += lineSpacingDeg
+      lineNumber++
+    }
+
+    // PASS 3: Oblique perpendicular lines
+    let currentLng = west
+    lineNumber = 0
+    while (currentLng <= east) {
+      const goingNorth = lineNumber % 2 === 0
+      const lineStart = goingNorth ? { lat: south, lng: currentLng } : { lat: north, lng: currentLng }
+      const lineEnd = goingNorth ? { lat: north, lng: currentLng } : { lat: south, lng: currentLng }
+
+      const lineWaypoints = generateLineWaypoints(
+        lineStart.lat, lineStart.lng, lineEnd.lat, lineEnd.lng,
+        -45, goingNorth ? 'perpendicular' : 'perpendicular-reverse'
+      )
+      allWaypoints.push(...lineWaypoints)
+      currentLng += lngSpacingDeg
+      lineNumber++
+    }
+
+    // Rotate waypoints back to original coordinate system
+    const rotatedWaypoints = allWaypoints.map(wp => {
+      const rotatedBack = rotatePoint(wp, center, flightAngle)
+      return { ...wp, lat: rotatedBack.lat, lng: rotatedBack.lng }
+    })
+
+    // Filter to only include points inside the original polygon
+    const filteredWaypoints = boundary.length >= 3
+      ? rotatedWaypoints.filter(wp => isPointInPolygon(wp, boundary))
+      : rotatedWaypoints
+
+    return {
+      coordinates: filteredWaypoints,
+      photoIntervalMeters,
+      estimatedPhotos: filteredWaypoints.length
+    }
+  }
+
+  const generateFlightPath = (boundary: { lat: number; lng: number }[]): { coordinates: Waypoint[], photoIntervalMeters: number, estimatedPhotos: number } => {
+    if (missionType === '3d-model') {
+      return generateCrossHatchFlightPath(boundary, MISSION_PRESETS['3d-model'].gimbalAngles)
+    }
+    if (missionType === '3d-fast') {
+      return generateFast3DFlightPath(boundary)
+    }
+    const result = generateOptimizedFlightPath(boundary)
+    result.coordinates = result.coordinates.map(wp => ({ ...wp, gimbalPitch: -90 }))
+    return result
+  }
+
+  const handleAreaDrawn = useCallback((drawnArea: MapArea) => {
+    const boundary = drawnArea.points.map(p => ({ lat: p.lat, lng: p.lng }))
+
+    if (boundary.length < 3) {
+      setMapArea(drawnArea)
+      return
+    }
+
+    const { coordinates, photoIntervalMeters, estimatedPhotos } = generateFlightPath(boundary)
+
+    const newMapArea: MapArea = {
+      ...drawnArea,
+      coordinates,
+      photoIntervalMeters,
+      estimatedPhotos,
+      missionType,
+      gimbalAngles: MISSION_PRESETS[missionType].gimbalAngles
+    }
+
+    setMapArea(newMapArea)
+  }, [missionType, altitude, overlap])
+
+  // Regenerate flight path when mission type changes
+  useEffect(() => {
+    if (mapArea && mapArea.points && mapArea.points.length >= 3 && (!selectedPlot || selectedPlot === 'custom')) {
+      if (mapArea.missionType !== missionType) {
+        const boundary = mapArea.points.map(p => ({ lat: p.lat, lng: p.lng }))
+        const { coordinates, photoIntervalMeters, estimatedPhotos } = generateFlightPath(boundary)
+
+        setMapArea(prev => prev ? {
+          ...prev,
+          coordinates,
+          photoIntervalMeters,
+          estimatedPhotos,
+          missionType,
+          gimbalAngles: MISSION_PRESETS[missionType].gimbalAngles
+        } : null)
+      }
+    }
+  }, [missionType])
+
   useEffect(() => {
     if (isDemo) {
-      // Demo plots with actual boundary data
       const demoPlots = [
-        { 
-          id: '1', 
-          name: 'North Field A', 
-          area_acres: 2.5, 
+        {
+          id: '1',
+          name: 'North Field A',
+          area_acres: 2.5,
           boundaries: {
             coordinates: [[
               [-118.2439, 34.0524],
@@ -266,10 +698,10 @@ export default function FlightPlannerInterface() {
             ]]
           }
         },
-        { 
-          id: '2', 
-          name: 'Greenhouse Block B', 
-          area_acres: 1.8, 
+        {
+          id: '2',
+          name: 'Greenhouse Block B',
+          area_acres: 1.8,
           boundaries: {
             coordinates: [[
               [-118.2435, 34.0521],
@@ -280,10 +712,10 @@ export default function FlightPlannerInterface() {
             ]]
           }
         },
-        { 
-          id: '3', 
-          name: 'South Nursery', 
-          area_acres: 3.2, 
+        {
+          id: '3',
+          name: 'South Nursery',
+          area_acres: 3.2,
           boundaries: {
             coordinates: [[
               [-118.2440, 34.0519],
@@ -297,14 +729,13 @@ export default function FlightPlannerInterface() {
       ]
       setPlots(demoPlots)
       setLoading(false)
-      
-      // If editing, load demo data
+
       if (editId) {
         setName('Weekly Survey - North Field')
         setSelectedPlot('1')
         setDroneModel('DJI Mavic 3')
-        setAltitude('30')
-        setSpeed('5')
+        setAltitude('100')
+        setSpeed('16')
         setOverlap('80')
         setScheduledDate('2024-01-25')
       }
@@ -317,7 +748,6 @@ export default function FlightPlannerInterface() {
     if (!user) return
 
     try {
-      // Fetch plots
       const { data: plotsData, error: plotsError } = await supabase
         .from('plots')
         .select('*')
@@ -326,7 +756,6 @@ export default function FlightPlannerInterface() {
       if (plotsError) throw plotsError
       setPlots(plotsData || [])
 
-      // If editing, fetch the flight plan
       if (editId) {
         const { data: flightPlan, error: fpError } = await supabase
           .from('flight_plans')
@@ -341,15 +770,14 @@ export default function FlightPlannerInterface() {
           setName(flightPlan.name)
           setSelectedPlot(flightPlan.plot_id || 'custom')
           setDroneModel(flightPlan.drone_model)
-          setAltitude(flightPlan.altitude_m.toString())
-          setSpeed(flightPlan.speed_ms.toString())
+          setAltitude(Math.round(flightPlan.altitude_m * 3.28084).toString())
+          setSpeed(Math.round(flightPlan.speed_ms * 3.28084 * 10) / 10 + '')
           setOverlap(flightPlan.overlap_percent.toString())
           if (flightPlan.scheduled_for) {
             const date = new Date(flightPlan.scheduled_for)
             setScheduledDate(date.toISOString().slice(0, 16))
           }
           if (flightPlan.waypoints) {
-            // Convert waypoints to mapArea format
             setMapArea({
               id: Date.now(),
               points: [],
@@ -386,9 +814,7 @@ export default function FlightPlannerInterface() {
     }
 
     if (isDemo) {
-      // In demo mode, we need to ensure the flight plan appears in the list
       alert('Flight plan saved successfully! (Demo mode)')
-      // Navigate to the flight plans list where they can see their new plan
       router.push('/dashboard?tab=flights')
       return
     }
@@ -397,32 +823,35 @@ export default function FlightPlannerInterface() {
     setError('')
 
     try {
+      const altitudeFt = parseInt(altitude) || 100
+      const speedFtS = parseFloat(speed) || 16
+
       const flightPlanData = {
         user_id: user!.id,
         plot_id: selectedPlot === 'custom' ? null : selectedPlot,
         name,
         drone_model: droneModel,
-        altitude_m: parseInt(altitude),
-        speed_ms: parseFloat(speed),
+        altitude_m: Math.round(altitudeFt * 0.3048),
+        speed_ms: Math.round(speedFtS * 0.3048 * 10) / 10,
         overlap_percent: parseInt(overlap),
         waypoints: mapArea ? {
           type: 'LineString',
           coordinates: mapArea.coordinates.map((coord: Waypoint) => [coord.lng, coord.lat]),
           actions: mapArea.coordinates.map((coord: Waypoint) => coord.action),
+          gimbalPitches: mapArea.coordinates.map((coord: Waypoint) => coord.gimbalPitch || -90),
+          headings: mapArea.coordinates.map((coord: Waypoint) => coord.heading || 0),
           photoIntervalMeters: mapArea.photoIntervalMeters,
-          estimatedPhotos: mapArea.estimatedPhotos
+          estimatedPhotos: mapArea.estimatedPhotos,
+          missionType: mapArea.missionType || 'orthomosaic'
         } : null,
+        mission_type: missionType,
         estimated_duration_min: Math.round((mapArea?.coordinates.length || 0) * 0.3) || 15,
         scheduled_for: scheduledDate || new Date().toISOString(),
       }
 
-      console.log('Saving flight plan:', flightPlanData) // Debug log
-
       let dbError
-      let resultId = editId
-      
+
       if (editId) {
-        // Update existing flight plan
         const { error } = await supabase
           .from('flight_plans')
           .update(flightPlanData)
@@ -430,26 +859,16 @@ export default function FlightPlannerInterface() {
           .eq('user_id', user!.id)
         dbError = error
       } else {
-        // Insert new flight plan
-        const { data, error } = await supabase
+        const { error } = await supabase
           .from('flight_plans')
           .insert(flightPlanData)
           .select()
           .single()
         dbError = error
-        if (data) {
-          resultId = data.id
-        }
       }
 
-      if (dbError) {
-        console.error('Database error:', dbError) // Debug log
-        throw dbError
-      }
+      if (dbError) throw dbError
 
-      console.log('Flight plan saved successfully, navigating to dashboard...') // Debug log
-
-      // Navigate to the dashboard flight plans tab
       router.push('/dashboard?tab=flights')
     } catch (err: any) {
       setError(err.message || 'Failed to save flight plan')
@@ -458,254 +877,128 @@ export default function FlightPlannerInterface() {
     }
   }
 
+  // Get center for map
+  const getMapCenter = (): [number, number] | undefined => {
+    if (currentPlotBoundary && currentPlotBoundary.length > 0) {
+      return [currentPlotBoundary[0].lat, currentPlotBoundary[0].lng]
+    }
+    return undefined
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-700"></div>
+        <Loader2 className="h-8 w-8 animate-spin text-green-600" />
       </div>
     )
   }
 
+  const selectedPlotData = plots.find(p => p.id === selectedPlot)
+
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="h-[calc(100vh-64px)] flex flex-col">
       {/* Header */}
-      <header className="bg-white shadow-sm border-b">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center space-x-4">
+      <div className="flex-shrink-0 p-4 border-b bg-white">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div className="flex items-center gap-6">
             <Link href="/dashboard">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                Back to Dashboard
-              </Button>
+              <Image
+                src="/images/plnt-logo.svg"
+                alt="PLNT Logo"
+                width={120}
+                height={40}
+                className="h-10 w-auto"
+                priority
+              />
             </Link>
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">{editId ? 'Edit' : 'Create'} Flight Plan</h1>
-              <p className="text-sm text-gray-600">Configure your drone survey mission</p>
+              <h1 className="text-2xl font-bold text-gray-900">
+                {editId ? 'Edit' : 'Create'} Flight Plan
+              </h1>
+              <p className="text-gray-600">Configure your drone survey mission</p>
             </div>
           </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="container mx-auto px-4 py-8">
-        <div className="grid lg:grid-cols-3 gap-8">
-          {/* Map Section */}
-          <div className="lg:col-span-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Flight Area</CardTitle>
-                <CardDescription>
-                  Select an existing plot or draw a custom survey area
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="mb-4">
-                  <Label htmlFor="plot-select">Select Existing Plot (Optional)</Label>
-                  <Select value={selectedPlot} onValueChange={setSelectedPlot}>
-                    <SelectTrigger id="plot-select">
-                      <SelectValue placeholder="Choose a plot or draw custom area" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-white">
-                      <SelectItem value="custom">Custom Area (Draw on map)</SelectItem>
-                      {plots.map(plot => (
-                        <SelectItem key={plot.id} value={plot.id}>
-                          {plot.name} ({plot.area_acres} acres)
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                
-                {(!selectedPlot || selectedPlot === 'custom') && (
-                  <EnhancedSatelliteMap onAreaDrawn={setMapArea} />
-                )}
-                
-                {selectedPlot && selectedPlot !== 'custom' && (
-                  <div className="relative">
-                    <EnhancedSatelliteMap 
-                      onAreaDrawn={setMapArea}
-                      defaultCenter={
-                        currentPlotBoundary && currentPlotBoundary.length > 0
-                          ? [currentPlotBoundary[0].lat, currentPlotBoundary[0].lng]
-                          : undefined
-                      }
-                      existingBoundary={currentPlotBoundary}
-                    />
-                    <div className="absolute bottom-4 left-4 z-[1000] bg-white/95 backdrop-blur-sm border border-gray-200 rounded-lg shadow-lg p-3 max-w-xs">
-                      <div className="flex items-center space-x-2">
-                        <MapPin className="w-4 h-4 text-green-600 flex-shrink-0" />
-                        <div>
-                          <p className="text-sm font-semibold text-gray-800">
-                            {plots.find(p => p.id === selectedPlot)?.name}
-                          </p>
-                          <p className="text-xs text-gray-600">
-                            Flight path auto-generated • {plots.find(p => p.id === selectedPlot)?.area_acres} acres
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Configuration Section */}
-          <div className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Flight Configuration</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {error && (
-                  <Alert variant="destructive">
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
-                )}
-
-                <div>
-                  <Label htmlFor="plan-name">Flight Plan Name *</Label>
-                  <Input
-                    id="plan-name"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="e.g., Weekly Survey - North Field"
-                    required
-                  />
-                </div>
-
-                {selectedPlot === 'custom' && (
-                  <div>
-                    <Label htmlFor="plant-type">Plant Type</Label>
-                    <Input
-                      id="plant-type"
-                      value={plantType}
-                      onChange={(e) => setPlantType(e.target.value)}
-                      placeholder="e.g., Tomatoes, Peppers, Mixed"
-                    />
-                    <p className="text-xs text-gray-500 mt-1">Specify what's growing in this area</p>
-                  </div>
-                )}
-
-                <div>
-                  <Label htmlFor="drone-model">Drone Model</Label>
-                  <Select value={droneModel} onValueChange={setDroneModel}>
-                    <SelectTrigger id="drone-model">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="bg-white">
-                      <SelectItem value="DJI Mavic 3">DJI Mavic 3</SelectItem>
-                      <SelectItem value="DJI Air 2S">DJI Air 2S</SelectItem>
-                      <SelectItem value="DJI Mini 3 Pro">DJI Mini 3 Pro</SelectItem>
-                      <SelectItem value="DJI Phantom 4">DJI Phantom 4</SelectItem>
-                      <SelectItem value="Autel EVO II">Autel EVO II</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div>
-                  <Label htmlFor="altitude">Flight Altitude (meters)</Label>
-                  <Input
-                    id="altitude"
-                    type="number"
-                    value={altitude}
-                    onChange={(e) => setAltitude(e.target.value)}
-                    min="20"
-                    max="120"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Recommended: 30-50m for plant counting</p>
-                </div>
-
-                <div>
-                  <Label htmlFor="speed">Flight Speed (m/s)</Label>
-                  <Input
-                    id="speed"
-                    type="number"
-                    value={speed}
-                    onChange={(e) => setSpeed(e.target.value)}
-                    min="1"
-                    max="15"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Lower speeds improve image quality</p>
-                </div>
-
-                <div>
-                  <Label htmlFor="overlap">Image Overlap (%)</Label>
-                  <Input
-                    id="overlap"
-                    type="number"
-                    value={overlap}
-                    onChange={(e) => setOverlap(e.target.value)}
-                    min="60"
-                    max="90"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">80% recommended for accurate counting</p>
-                </div>
-
-                <div>
-                  <Label htmlFor="schedule">Schedule Date</Label>
-                  <Input
-                    id="schedule"
-                    type="datetime-local"
-                    value={scheduledDate}
-                    onChange={(e) => setScheduledDate(e.target.value)}
-                  />
-                </div>
-
-                {mapArea && (
-                  <div className="bg-green-50 p-4 rounded-lg">
-                    <h4 className="font-medium text-green-800 mb-2">Flight Summary</h4>
-                    <div className="space-y-1 text-sm text-green-700">
-                      <p>Area: {mapArea.area}</p>
-                      <p>Waypoints: {mapArea.coordinates.length}</p>
-                      <p>Estimated Photos: {mapArea.estimatedPhotos || mapArea.coordinates.length}</p>
-                      {mapArea.photoIntervalMeters && (
-                        <p className="font-medium">Photo Interval: {mapArea.photoIntervalMeters.toFixed(1)}m</p>
-                      )}
-                      <p>Est. Duration: {Math.round(mapArea.coordinates.length * 0.3)} min</p>
-                    </div>
-                    {mapArea.photoIntervalMeters && (
-                      <div className="mt-3 pt-3 border-t border-green-200">
-                        <p className="text-xs text-green-600">
-                          Export as Litchi CSV for Maven EVO - camera triggers included
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <Button
-                  onClick={handleSave}
-                  disabled={saving || !name || (selectedPlot === 'custom' && !mapArea)}
-                  className="w-full bg-green-700 hover:bg-green-800 text-white"
-                >
-                  {saving ? (
-                    <>Saving...</>
-                  ) : (
-                    <>
-                      <Save className="w-4 h-4 mr-2" />
-                      {editId ? 'Update' : 'Save'} Flight Plan
-                    </>
-                  )}
-                </Button>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Mission Tips</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2 text-sm text-gray-600">
-                <p>• Check weather conditions before flying</p>
-                <p>• Ensure batteries are fully charged</p>
-                <p>• Verify GPS signal strength</p>
-                <p>• Maintain visual line of sight</p>
-                <p>• Follow local drone regulations</p>
-              </CardContent>
-            </Card>
+          <div className="flex items-center gap-2">
+            {isDemo && (
+              <Badge variant="secondary" className="bg-amber-100 text-amber-800">
+                Demo Mode
+              </Badge>
+            )}
+            {!sidebarOpen && (
+              <Button
+                className="bg-green-600 hover:bg-green-700"
+                onClick={() => setSidebarOpen(true)}
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Configure
+              </Button>
+            )}
           </div>
         </div>
-      </main>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 relative overflow-hidden">
+        {/* Map */}
+        <div className="h-full">
+          {(!selectedPlot || selectedPlot === 'custom') ? (
+            <EnhancedSatelliteMap
+              onAreaDrawn={handleAreaDrawn}
+              altitude={Math.round((parseInt(altitude) || 100) * 0.3048)}
+            />
+          ) : (
+            <div className="h-full relative">
+              <EnhancedSatelliteMap
+                onAreaDrawn={handleAreaDrawn}
+                defaultCenter={getMapCenter()}
+                existingBoundary={currentPlotBoundary}
+                altitude={Math.round((parseInt(altitude) || 100) * 0.3048)}
+              />
+              {/* Plot info overlay */}
+              {selectedPlotData && (
+                <div className="absolute bottom-4 left-4 z-[1000] bg-white/95 backdrop-blur-sm border border-gray-200 rounded-lg shadow-lg p-3 max-w-xs">
+                  <div className="flex items-center space-x-2">
+                    <MapPin className="w-4 h-4 text-green-600 flex-shrink-0" />
+                    <div>
+                      <p className="text-sm font-semibold text-gray-800">
+                        {selectedPlotData.name}
+                      </p>
+                      <p className="text-xs text-gray-600">
+                        Flight path auto-generated | {selectedPlotData.area_acres} acres
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Sidebar */}
+        <FlightPlannerSidebar
+          isOpen={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+          isEditing={!!editId}
+          name={name}
+          setName={setName}
+          missionType={missionType}
+          setMissionType={setMissionType}
+          droneModel={droneModel}
+          setDroneModel={setDroneModel}
+          altitude={altitude}
+          setAltitude={setAltitude}
+          speed={speed}
+          setSpeed={setSpeed}
+          overlap={overlap}
+          setOverlap={setOverlap}
+          scheduledDate={scheduledDate}
+          setScheduledDate={setScheduledDate}
+          mapArea={mapArea}
+          onSave={handleSave}
+          saving={saving}
+          error={error}
+        />
+      </div>
     </div>
   )
 }
