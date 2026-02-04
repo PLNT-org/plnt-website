@@ -81,7 +81,3 @@ SUPABASE_SERVICE_ROLE_KEY     # Private server-side key (API routes only)
 - Build config ignores TypeScript and ESLint errors (`next.config.js`)
 - Image processing API (`/api/process-images`) is currently mocked
 - GeoJSON boundaries stored in `plots.boundaries` column
-
-NEXT_PUBLIC_SUPABASE_URL=https://tsshqdahthapvsprpozw.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRzc2hxZGFodGhhcHZzcHJwb3p3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIzNTI0NzYsImV4cCI6MjA2NzkyODQ3Nn0.6eXWE1VLAD5j7J_Ue409juxCFUg8IgDjDBVTy48fjJ8
-SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRzc2hxZGFodGhhcHZzcHJwb3p3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MjM1MjQ3NiwiZXhwIjoyMDY3OTI4NDc2fQ.GwO7AD79x4yy5rkRGAK7iP3AUXergT_dr0edo5v8sgk
