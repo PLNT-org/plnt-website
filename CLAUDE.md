@@ -71,43 +71,10 @@ src/
 ### Environment Variables
 
 ```
-# Supabase
 NEXT_PUBLIC_SUPABASE_URL      # Supabase project URL
 NEXT_PUBLIC_SUPABASE_ANON_KEY # Public browser key
 SUPABASE_SERVICE_ROLE_KEY     # Private server-side key (API routes only)
-
-# WebODM Lightning (cloud processing - recommended for production)
-WEBODM_LIGHTNING_HOST         # Lightning server host (default: spark1.webodm.net)
-WEBODM_LIGHTNING_TOKEN        # Your WebODM Lightning API token
-
-# WebODM Local (optional - for local Docker development)
-WEBODM_URL                    # Local WebODM URL (default: http://localhost:8000)
-WEBODM_TOKEN                  # Local WebODM JWT token
-
-# Feature flags
-NEXT_PUBLIC_USE_LIGHTNING     # Set to 'false' to use local WebODM instead of Lightning
 ```
-
-### Orthomosaic Processing
-
-PLNT supports two backends for drone image processing:
-
-**WebODM Lightning (Cloud - Recommended)**
-- No Docker required on user machines
-- Pay-per-job pricing via webodm.net
-- Processed orthomosaics are stored in Supabase Storage
-- Configure with `WEBODM_LIGHTNING_HOST` and `WEBODM_LIGHTNING_TOKEN`
-
-**WebODM Local (Self-hosted)**
-- Requires Docker running locally or on a server
-- Fixed monthly cost if self-hosted
-- Uses `WEBODM_URL` and `WEBODM_TOKEN`
-- Set `NEXT_PUBLIC_USE_LIGHTNING=false` to use local WebODM
-
-**Supabase Storage Buckets:**
-- `orthomosaics` - Stores processed orthophoto files
-- `orthomosaic-tiles` - Stores pre-generated tiles (if using tile pyramid)
-- `flight-images` - Stores uploaded drone images
 
 ### Notes
 

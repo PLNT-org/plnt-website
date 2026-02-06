@@ -1,14 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { webodm, isTaskComplete, isTaskFailed, getStatusLabel } from '@/lib/webodm/client'
-import {
-  LightningClient,
-  isLightningTaskComplete,
-  isLightningTaskFailed,
-  getLightningStatusLabel,
-} from '@/lib/webodm/lightning-client'
 import { WebODMStatusCode } from '@/lib/webodm/types'
-import { getOrthomosaicStorage } from '@/lib/supabase/storage'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -63,81 +56,7 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Check if this is a Lightning task
-    const isLightning = webodmProjectId === 'lightning'
-
-    if (isLightning) {
-      // Use Lightning client
-      const lightning = new LightningClient()
-      const taskResult = await lightning.getTaskStatus(webodmTaskId)
-
-      const isComplete = isLightningTaskComplete(taskResult.status)
-      const isFailed = isLightningTaskFailed(taskResult.status)
-
-      // If task completed, download and upload to Supabase Storage
-      if (isComplete && orthomosaicId) {
-        try {
-          // Download the orthophoto from Lightning
-          const orthophotoBuffer = await lightning.downloadOrthophoto(webodmTaskId)
-
-          // Upload to Supabase Storage
-          const storage = getOrthomosaicStorage()
-          const { url } = await storage.uploadOrthophoto(
-            orthomosaicId,
-            orthophotoBuffer,
-            'orthophoto.tif'
-          )
-
-          // Update orthomosaic record with Supabase URL
-          await supabaseAdmin
-            .from('orthomosaics')
-            .update({
-              status: 'completed',
-              orthomosaic_url: url,
-              completed_at: new Date().toISOString(),
-            })
-            .eq('id', orthomosaicId)
-        } catch (uploadError) {
-          console.error('Error uploading to Supabase:', uploadError)
-          // Still mark as complete but note the error
-          await supabaseAdmin
-            .from('orthomosaics')
-            .update({
-              status: 'completed',
-              orthomosaic_url: lightning.getOrthophotoUrl(webodmTaskId),
-              error_message: `Upload to storage failed: ${uploadError instanceof Error ? uploadError.message : 'Unknown error'}`,
-              completed_at: new Date().toISOString(),
-            })
-            .eq('id', orthomosaicId)
-        }
-      }
-
-      // If task failed, update database
-      if (isFailed && orthomosaicId) {
-        await supabaseAdmin
-          .from('orthomosaics')
-          .update({
-            status: 'failed',
-            error_message: taskResult.error || 'Processing failed',
-          })
-          .eq('id', orthomosaicId)
-      }
-
-      return NextResponse.json({
-        status: taskResult.status,
-        statusCode: taskResult.status,
-        statusLabel: getLightningStatusLabel(taskResult.status),
-        progress: taskResult.progress,
-        processingTime: taskResult.processingTime,
-        imagesCount: taskResult.imagesCount,
-        isComplete,
-        isFailed,
-        error: taskResult.error,
-        backend: 'lightning',
-      })
-    }
-
-    // Standard WebODM flow
+    // Get status from WebODM
     const taskStatus = await webodm.getTaskStatus(
       parseInt(webodmProjectId),
       webodmTaskId
