@@ -172,14 +172,32 @@ export default function OrthomosaicMap({
 
     // Orthophoto tile layer
     if (orthomosaic.orthomosaic_url) {
-      // Extract project and task IDs from the URL to build tiles URL
-      // URL format: http://localhost:8000/api/projects/{projectId}/tasks/{taskId}/download/orthophoto.tif
-      const urlMatch = orthomosaic.orthomosaic_url.match(/projects\/(\d+)\/tasks\/([^/]+)/)
+      // Check URL type to determine how to display
+      const url = orthomosaic.orthomosaic_url
 
-      if (urlMatch) {
-        const [, projectId, taskId] = urlMatch
-        const baseUrl = orthomosaic.orthomosaic_url.split('/api/')[0]
-        const tilesUrl = `${baseUrl}/api/projects/${projectId}/tasks/${taskId}/orthophoto/tiles/{z}/{x}/{y}`
+      // Check if it's a Supabase Storage URL (stored orthomosaic)
+      const isSupabaseUrl = url.includes('supabase.co/storage')
+
+      // Check if it's a WebODM URL with project/task format
+      const webodmMatch = url.match(/projects\/(\d+)\/tasks\/([^/]+)/)
+
+      if (isSupabaseUrl) {
+        // Supabase Storage - use image overlay for the full orthophoto
+        // Note: For large orthomosaics, we may want to generate tiles instead
+        const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
+        const imageLayer = L.imageOverlay(url, bounds, {
+          opacity: 0.9,
+        }) as any
+        imageLayer.addTo(map)
+        orthophotoLayerRef.current = imageLayer
+      } else if (webodmMatch) {
+        // WebODM URL - use tile layer
+        const [, projectId, taskId] = webodmMatch
+        const baseUrl = url.split('/api/')[0]
+
+        // Use the tile proxy API to avoid CORS issues
+        // Falls back to direct WebODM tiles if proxy not available
+        const tilesUrl = `/api/orthomosaic/tiles/${projectId}/${taskId}/{z}/{x}/{y}`
 
         const orthophotoLayer = L.tileLayer(tilesUrl, {
           maxZoom: 24,
@@ -189,10 +207,18 @@ export default function OrthomosaicMap({
         })
         orthophotoLayer.addTo(map)
         orthophotoLayerRef.current = orthophotoLayer
-      } else if (orthomosaic.orthomosaic_url.startsWith('/')) {
+      } else if (url.startsWith('/')) {
         // Demo mode with local image - use imageOverlay
         const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
-        const imageLayer = L.imageOverlay(orthomosaic.orthomosaic_url, bounds, {
+        const imageLayer = L.imageOverlay(url, bounds, {
+          opacity: 0.9,
+        }) as any
+        imageLayer.addTo(map)
+        orthophotoLayerRef.current = imageLayer
+      } else {
+        // Generic URL (could be any image URL) - try as image overlay
+        const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
+        const imageLayer = L.imageOverlay(url, bounds, {
           opacity: 0.9,
         }) as any
         imageLayer.addTo(map)
