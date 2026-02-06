@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { fetchWithWebODMAuth } from '@/lib/webodm/token-manager'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-const WEBODM_URL = process.env.WEBODM_URL || 'http://localhost:8000'
-const WEBODM_TOKEN = process.env.WEBODM_TOKEN || ''
+const WEBODM_URL = (process.env.WEBODM_URL || 'http://localhost:8000').replace(/\/$/, '')
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,9 +29,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Fetch task data from WebODM
-    const taskResponse = await fetch(
-      `${WEBODM_URL}/api/projects/${ortho.webodm_project_id}/tasks/${ortho.webodm_task_id}/`,
-      { headers: { Authorization: `JWT ${WEBODM_TOKEN}` } }
+    const taskResponse = await fetchWithWebODMAuth(
+      `${WEBODM_URL}/api/projects/${ortho.webodm_project_id}/tasks/${ortho.webodm_task_id}/`
     )
 
     if (!taskResponse.ok) {

@@ -3,6 +3,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import sharp from 'sharp'
+import { fetchWithWebODMAuth } from '@/lib/webodm/token-manager'
 
 // Initialize Supabase with service role for server-side operations
 const supabase = createClient(
@@ -28,14 +29,6 @@ interface RoboflowPrediction {
   confidence: number  // 0-1
   class: string       // class name
   points?: { x: number; y: number }[]  // polygon points for instance segmentation
-}
-
-interface RoboflowResponse {
-  predictions: RoboflowPrediction[]
-  image: {
-    width: number
-    height: number
-  }
 }
 
 interface Detection {
@@ -212,10 +205,7 @@ export async function POST(request: NextRequest) {
 
     // Download the orthomosaic image
     console.log('Downloading orthomosaic image...')
-    const webodmToken = process.env.WEBODM_TOKEN
-    const imageResponse = await fetch(orthomosaic.orthomosaic_url, {
-      headers: webodmToken ? { 'Authorization': `JWT ${webodmToken}` } : {},
-    })
+    const imageResponse = await fetchWithWebODMAuth(orthomosaic.orthomosaic_url)
     if (!imageResponse.ok) {
       throw new Error(`Failed to download orthomosaic: ${imageResponse.status}`)
     }

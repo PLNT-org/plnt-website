@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { PROCESSING_PRESETS } from '@/lib/webodm/types'
+import { fetchWithWebODMAuth } from '@/lib/webodm/token-manager'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -8,8 +9,7 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-const WEBODM_URL = process.env.WEBODM_URL || 'http://localhost:8000'
-const WEBODM_TOKEN = process.env.WEBODM_TOKEN || ''
+const WEBODM_URL = (process.env.WEBODM_URL || 'http://localhost:8000').replace(/\/$/, '')
 
 export async function POST(request: NextRequest) {
   try {
@@ -50,9 +50,7 @@ export async function POST(request: NextRequest) {
 
     // Check WebODM availability
     try {
-      const healthCheck = await fetch(`${WEBODM_URL}/api/projects/`, {
-        headers: { Authorization: `JWT ${WEBODM_TOKEN}` }
-      })
+      const healthCheck = await fetchWithWebODMAuth(`${WEBODM_URL}/api/projects/`)
       if (!healthCheck.ok) {
         throw new Error('WebODM not responding')
       }
@@ -64,10 +62,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Create project in WebODM
-    const projectResponse = await fetch(`${WEBODM_URL}/api/projects/`, {
+    const projectResponse = await fetchWithWebODMAuth(`${WEBODM_URL}/api/projects/`, {
       method: 'POST',
       headers: {
-        'Authorization': `JWT ${WEBODM_TOKEN}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -108,11 +105,8 @@ export async function POST(request: NextRequest) {
       taskFormData.append('images', image, image.name)
     }
 
-    const taskResponse = await fetch(`${WEBODM_URL}/api/projects/${project.id}/tasks/`, {
+    const taskResponse = await fetchWithWebODMAuth(`${WEBODM_URL}/api/projects/${project.id}/tasks/`, {
       method: 'POST',
-      headers: {
-        'Authorization': `JWT ${WEBODM_TOKEN}`,
-      },
       body: taskFormData,
     })
 

@@ -4,6 +4,14 @@ import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
+// Patch Leaflet's getPosition to guard against undefined elements
+// during React unmount/remount cycles
+const originalGetPosition = L.DomUtil.getPosition
+L.DomUtil.getPosition = function (el) {
+  if (!el) return new L.Point(0, 0)
+  return originalGetPosition.call(this, el)
+}
+
 // Add custom styles to fix focus outline on polygons
 const customStyles = `
   .leaflet-interactive:focus {
@@ -172,31 +180,12 @@ export default function OrthomosaicMap({
 
     // Orthophoto tile layer
     if (orthomosaic.orthomosaic_url) {
-      // Check URL type to determine how to display
-      const url = orthomosaic.orthomosaic_url
+      // Extract project and task IDs from the URL to build proxy tiles URL
+      // URL format: .../api/projects/{projectId}/tasks/{taskId}/download/orthophoto.tif
+      const urlMatch = orthomosaic.orthomosaic_url.match(/projects\/(\d+)\/tasks\/([^/]+)/)
 
-      // Check if it's a Supabase Storage URL (stored orthomosaic)
-      const isSupabaseUrl = url.includes('supabase.co/storage')
-
-      // Check if it's a WebODM URL with project/task format
-      const webodmMatch = url.match(/projects\/(\d+)\/tasks\/([^/]+)/)
-
-      if (isSupabaseUrl) {
-        // Supabase Storage - use image overlay for the full orthophoto
-        // Note: For large orthomosaics, we may want to generate tiles instead
-        const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
-        const imageLayer = L.imageOverlay(url, bounds, {
-          opacity: 0.9,
-        }) as any
-        imageLayer.addTo(map)
-        orthophotoLayerRef.current = imageLayer
-      } else if (webodmMatch) {
-        // WebODM URL - use tile layer
-        const [, projectId, taskId] = webodmMatch
-        const baseUrl = url.split('/api/')[0]
-
-        // Use the tile proxy API to avoid CORS issues
-        // Falls back to direct WebODM tiles if proxy not available
+      if (urlMatch) {
+        const [, projectId, taskId] = urlMatch
         const tilesUrl = `/api/orthomosaic/tiles/${projectId}/${taskId}/{z}/{x}/{y}`
 
         const orthophotoLayer = L.tileLayer(tilesUrl, {
@@ -250,8 +239,13 @@ export default function OrthomosaicMap({
     mapRef.current = map
 
     return () => {
+      map.off()
       map.remove()
       mapRef.current = null
+      orthophotoLayerRef.current = null
+      markersLayerRef.current = null
+      arucoLayerRef.current = null
+      plotsLayerRef.current = null
     }
   }, [orthomosaic])
 
@@ -548,7 +542,7 @@ export default function OrthomosaicMap({
   return (
     <div className="relative">
       {/* Map Container */}
-      <div ref={mapContainerRef} className="h-[600px] w-full" />
+      <div key={orthomosaic.id} ref={mapContainerRef} className="h-[600px] w-full" />
 
       {/* Layer Controls */}
       <div className="absolute top-4 right-4 bg-white rounded-lg shadow-lg p-3 z-[1000]">
