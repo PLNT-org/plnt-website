@@ -47,18 +47,16 @@ interface InventoryItem {
   scientific_name?: string
   category?: string
   count: number
-  barcode?: string
-  aruco_id?: number
   date_counted: string
   plot_name?: string
 }
 
 const DEMO_INVENTORY: InventoryItem[] = [
-  { id: '1', species_name: 'White Oak', scientific_name: 'Quercus alba', category: 'Tree', count: 1247, barcode: 'WO-2024-001', aruco_id: 42, date_counted: new Date(Date.now() - 86400000).toISOString(), plot_name: 'North Field A' },
-  { id: '2', species_name: 'Red Maple', scientific_name: 'Acer rubrum', category: 'Tree', count: 892, barcode: 'RM-2024-002', aruco_id: 15, date_counted: new Date(Date.now() - 172800000).toISOString(), plot_name: 'East Grove' },
-  { id: '3', species_name: 'Blue Hydrangea', scientific_name: 'Hydrangea macrophylla', category: 'Shrub', count: 456, barcode: 'BH-2024-003', date_counted: new Date(Date.now() - 259200000).toISOString(), plot_name: 'North Field A' },
-  { id: '4', species_name: 'Japanese Maple', scientific_name: 'Acer palmatum', category: 'Tree', count: 234, barcode: 'JM-2024-004', aruco_id: 78, date_counted: new Date(Date.now() - 345600000).toISOString(), plot_name: 'South Nursery' },
-  { id: '5', species_name: 'Boxwood', scientific_name: 'Buxus sempervirens', category: 'Shrub', count: 1890, barcode: 'BX-2024-005', date_counted: new Date(Date.now() - 432000000).toISOString(), plot_name: 'East Grove' },
+  { id: '1', species_name: 'White Oak', scientific_name: 'Quercus alba', category: 'Tree', count: 1247, date_counted: new Date(Date.now() - 86400000).toISOString(), plot_name: 'North Field A' },
+  { id: '2', species_name: 'Red Maple', scientific_name: 'Acer rubrum', category: 'Tree', count: 892, date_counted: new Date(Date.now() - 172800000).toISOString(), plot_name: 'East Grove' },
+  { id: '3', species_name: 'Blue Hydrangea', scientific_name: 'Hydrangea macrophylla', category: 'Shrub', count: 456, date_counted: new Date(Date.now() - 259200000).toISOString(), plot_name: 'North Field A' },
+  { id: '4', species_name: 'Japanese Maple', scientific_name: 'Acer palmatum', category: 'Tree', count: 234, date_counted: new Date(Date.now() - 345600000).toISOString(), plot_name: 'South Nursery' },
+  { id: '5', species_name: 'Boxwood', scientific_name: 'Buxus sempervirens', category: 'Shrub', count: 1890, date_counted: new Date(Date.now() - 432000000).toISOString(), plot_name: 'East Grove' },
 ]
 
 function DashboardContent() {
@@ -237,10 +235,57 @@ function DashboardContent() {
         plotsList: plotsRes.data || [],
         flightPlans: plansRes.data || []
       })
+
+      // Load inventory from plant detections
+      loadInventoryFromDetections()
     } catch (error) {
       console.error('Error loading dashboard:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadInventoryFromDetections = async () => {
+    try {
+      const listRes = await fetch('/api/orthomosaic/list')
+      if (!listRes.ok) return
+      const listData = await listRes.json()
+      const completed = (listData.orthomosaics || []).filter((o: any) => o.status === 'completed')
+      if (completed.length === 0) return
+
+      const firstOrtho = completed[0]
+      const aggRes = await fetch('/api/plant-detection/aggregate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orthomosaicId: firstOrtho.id, userId: user?.id }),
+      })
+      if (!aggRes.ok) return
+      const aggData = await aggRes.json()
+
+      const dateCounted = firstOrtho.created_at || new Date().toISOString()
+      const items: InventoryItem[] = (aggData.plotCounts || []).map((pc: any, idx: number) => ({
+        id: `plot-${pc.plotId}-${idx}`,
+        species_name: pc.speciesName || 'Unknown Species',
+        category: pc.category,
+        count: pc.totalCount,
+        date_counted: dateCounted,
+        plot_name: pc.plotName,
+      }))
+
+      if (aggData.unassignedCount > 0) {
+        items.push({
+          id: 'unassigned',
+          species_name: 'Unassigned',
+          count: aggData.unassignedCount,
+          date_counted: dateCounted,
+        })
+      }
+
+      if (items.length > 0) {
+        setInventory(items)
+      }
+    } catch (err) {
+      console.error('Error loading inventory from detections:', err)
     }
   }
 
@@ -471,7 +516,6 @@ function DashboardContent() {
                           <TableHead>Species</TableHead>
                           <TableHead>Type</TableHead>
                           <TableHead className="text-right">Count</TableHead>
-                          <TableHead>Barcode / ArUco</TableHead>
                           <TableHead>Date Counted</TableHead>
                           <TableHead>Plot</TableHead>
                         </TableRow>
@@ -481,7 +525,7 @@ function DashboardContent() {
                           .filter(item =>
                             item.species_name.toLowerCase().includes(inventorySearch.toLowerCase()) ||
                             item.scientific_name?.toLowerCase().includes(inventorySearch.toLowerCase()) ||
-                            item.barcode?.toLowerCase().includes(inventorySearch.toLowerCase())
+                            item.plot_name?.toLowerCase().includes(inventorySearch.toLowerCase())
                           )
                           .slice(0, 10)
                           .map((item) => (
@@ -501,14 +545,6 @@ function DashboardContent() {
                               </TableCell>
                               <TableCell className="text-right font-medium">
                                 {item.count.toLocaleString()}
-                              </TableCell>
-                              <TableCell>
-                                <div className="space-y-1">
-                                  {item.barcode && <div className="text-sm font-mono">{item.barcode}</div>}
-                                  {item.aruco_id !== undefined && (
-                                    <div className="text-xs text-gray-500">ArUco #{item.aruco_id}</div>
-                                  )}
-                                </div>
                               </TableCell>
                               <TableCell className="text-sm">
                                 {new Date(item.date_counted).toLocaleDateString()}
