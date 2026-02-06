@@ -94,7 +94,7 @@ export async function GET(
   } catch (error) {
     console.error('Tile proxy error:', error)
     return NextResponse.json(
-      { error: 'Failed to fetch tile' },
+      { error: 'Failed to fetch tile', detail: error instanceof Error ? error.message : String(error) },
       { status: 500 }
     )
   }
