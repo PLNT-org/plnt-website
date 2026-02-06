@@ -8,13 +8,7 @@ let tokenExpiresAt = 0
 let pendingFetch: Promise<string> | null = null
 
 function getBaseUrl(): string {
-  const url = process.env.WEBODM_URL
-  if (!url) {
-    console.error('[WebODM] WEBODM_URL is not set! Falling back to localhost:8000')
-  } else {
-    console.log('[WebODM] Using URL:', url)
-  }
-  return (url || 'http://localhost:8000').replace(/\/$/, '')
+  return (process.env.WEBODM_URL || 'http://localhost:8000').replace(/\/$/, '')
 }
 
 export async function getWebODMToken(): Promise<string> {
