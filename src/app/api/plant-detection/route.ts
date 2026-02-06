@@ -11,55 +11,60 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-// Roboflow API configuration
+// SAM3 API configuration
 const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY
-const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID // e.g., "plant-counting/1"
-const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
+const SAM3_API_URL = 'https://serverless.roboflow.com/sam3/concept_segment'
 
 // Tiling configuration
-const TILE_SIZE = 640        // Model input size
-const TILE_OVERLAP = 0.2     // 20% overlap between tiles
-const NMS_IOU_THRESHOLD = 0.5 // IoU threshold for removing duplicates
+const TILE_SIZE = 640
+const TILE_OVERLAP = 0.25      // 25% overlap between tiles (160px)
+const NMS_IOU_THRESHOLD = 0.3  // Tighter threshold for SAM3 polygon-derived boxes
 
-interface RoboflowPrediction {
-  x: number           // center x in pixels (relative to tile)
-  y: number           // center y in pixels (relative to tile)
-  width: number       // bounding box width
-  height: number      // bounding box height
-  confidence: number  // 0-1
-  class: string       // class name
-  points?: { x: number; y: number }[]  // polygon points for instance segmentation
+// SAM3-specific defaults
+const DEFAULT_PROMPT = 'individual plant'
+const DEFAULT_CONFIDENCE = 0.15
+const MIN_AREA_PX = 100        // Skip tiny detections (noise)
+const API_RATE_LIMIT_MS = 1000 // 1s delay between API calls
+const API_TIMEOUT_MS = 120_000 // 120s timeout per tile
+const JPEG_QUALITY = 95
+
+// SAM3 response types
+interface SAM3PolygonPoint {
+  x: number
+  y: number
 }
 
-interface Detection {
-  x: number           // center x in full image pixels
-  y: number           // center y in full image pixels
-  width: number
-  height: number
+interface SAM3Prediction {
   confidence: number
-  class: string
+  masks: (SAM3PolygonPoint[] | number[][])[] // Polygons: either {x,y} objects or [x,y] arrays
 }
 
-// Calculate IoU (Intersection over Union) between two boxes
+interface SAM3Response {
+  prompt_results: Array<{
+    predictions: SAM3Prediction[]
+  }>
+}
+
+// Detection in corner format (axis-aligned bounding box)
+interface Detection {
+  x1: number  // left
+  y1: number  // top
+  x2: number  // right
+  y2: number  // bottom
+  confidence: number
+  label: string
+}
+
+// Calculate IoU (Intersection over Union) between two corner-format boxes
 function calculateIoU(box1: Detection, box2: Detection): number {
-  const x1_1 = box1.x - box1.width / 2
-  const y1_1 = box1.y - box1.height / 2
-  const x2_1 = box1.x + box1.width / 2
-  const y2_1 = box1.y + box1.height / 2
-
-  const x1_2 = box2.x - box2.width / 2
-  const y1_2 = box2.y - box2.height / 2
-  const x2_2 = box2.x + box2.width / 2
-  const y2_2 = box2.y + box2.height / 2
-
-  const xA = Math.max(x1_1, x1_2)
-  const yA = Math.max(y1_1, y1_2)
-  const xB = Math.min(x2_1, x2_2)
-  const yB = Math.min(y2_1, y2_2)
+  const xA = Math.max(box1.x1, box2.x1)
+  const yA = Math.max(box1.y1, box2.y1)
+  const xB = Math.min(box1.x2, box2.x2)
+  const yB = Math.min(box1.y2, box2.y2)
 
   const intersection = Math.max(0, xB - xA) * Math.max(0, yB - yA)
-  const area1 = box1.width * box1.height
-  const area2 = box2.width * box2.height
+  const area1 = (box1.x2 - box1.x1) * (box1.y2 - box1.y1)
+  const area2 = (box2.x2 - box2.x1) * (box2.y2 - box2.y1)
   const union = area1 + area2 - intersection
 
   return union > 0 ? intersection / union : 0
@@ -101,341 +106,373 @@ function pixelToGPS(
   return { lat, lng }
 }
 
-// Run inference on a single tile
-async function runTileInference(
-  tileBuffer: Buffer,
-  confidenceThreshold: number
-): Promise<RoboflowPrediction[]> {
-  const roboflowUrl = `${ROBOFLOW_API_URL}/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}&confidence=${confidenceThreshold}`
-
-  // Create a Blob from the buffer and use FormData for file upload
-  const blob = new Blob([tileBuffer], { type: 'image/jpeg' })
-  const formData = new FormData()
-  formData.append('file', blob, 'tile.jpg')
-
-  const response = await fetch(roboflowUrl, {
-    method: 'POST',
-    body: formData,
-  })
-
-  if (!response.ok) {
-    const errorText = await response.text()
-    console.error('Roboflow API error:', errorText)
-    throw new Error(`Roboflow API error: ${response.status}`)
-  }
-
-  const data = await response.json()
-
-  // Log response for debugging
-  console.log('Roboflow response keys:', Object.keys(data))
-  if (data.predictions) {
-    console.log(`Predictions count: ${data.predictions.length}`)
-  }
-
-  return data.predictions || []
+// Sleep helper for rate limiting
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-// POST: Run plant detection on an orthomosaic with tiling
-export async function POST(request: NextRequest) {
+// Run SAM3 concept segmentation on a single tile
+async function runSAM3Inference(
+  tileBuffer: Buffer,
+  prompt: string,
+  confidenceThreshold: number
+): Promise<Detection[]> {
+  // Encode tile as base64 JPEG
+  const base64Image = tileBuffer.toString('base64')
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS)
+
   try {
-    const body = await request.json()
-    const {
-      orthomosaicId,
-      userId,
-      confidence_threshold = 0.5,
-      include_classes = ['plant', 'plants'],  // Only count these classes (case-insensitive)
-    } = body
-
-    // Normalize class names to lowercase for comparison
-    const allowedClasses = include_classes.map((c: string) => c.toLowerCase())
-
-    if (!orthomosaicId) {
-      return NextResponse.json(
-        { error: 'orthomosaicId is required' },
-        { status: 400 }
-      )
-    }
-
-    // Check for Roboflow configuration
-    if (!ROBOFLOW_API_KEY || !ROBOFLOW_MODEL_ID) {
-      return NextResponse.json(
-        { error: 'Roboflow API not configured. Please set ROBOFLOW_API_KEY and ROBOFLOW_MODEL_ID environment variables.' },
-        { status: 500 }
-      )
-    }
-
-    // Get orthomosaic details
-    const { data: orthomosaic, error: orthoError } = await supabase
-      .from('orthomosaics')
-      .select('*')
-      .eq('id', orthomosaicId)
-      .single()
-
-    if (orthoError || !orthomosaic) {
-      return NextResponse.json(
-        { error: 'Orthomosaic not found' },
-        { status: 404 }
-      )
-    }
-
-    if (orthomosaic.status !== 'completed') {
-      return NextResponse.json(
-        { error: 'Orthomosaic is not ready for processing' },
-        { status: 400 }
-      )
-    }
-
-    if (!orthomosaic.orthomosaic_url) {
-      return NextResponse.json(
-        { error: 'Orthomosaic image URL not found' },
-        { status: 400 }
-      )
-    }
-
-    if (!orthomosaic.bounds) {
-      return NextResponse.json(
-        { error: 'Orthomosaic bounds not available' },
-        { status: 400 }
-      )
-    }
-
-    console.log(`Starting plant detection for orthomosaic: ${orthomosaic.name}`)
-    console.log(`Confidence threshold: ${confidence_threshold}`)
-    console.log(`Filtering to classes: ${allowedClasses.join(', ')}`)
-
-    // Download the orthomosaic image
-    console.log('Downloading orthomosaic image...')
-    const imageResponse = await fetchWithWebODMAuth(orthomosaic.orthomosaic_url)
-    if (!imageResponse.ok) {
-      throw new Error(`Failed to download orthomosaic: ${imageResponse.status}`)
-    }
-    const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
-
-    // Get image dimensions
-    const image = sharp(imageBuffer)
-    const metadata = await image.metadata()
-    const imageWidth = metadata.width!
-    const imageHeight = metadata.height!
-
-    console.log(`Image dimensions: ${imageWidth}x${imageHeight}`)
-
-    // Calculate tile positions with overlap
-    const stride = Math.floor(TILE_SIZE * (1 - TILE_OVERLAP))
-    const tilesX = Math.ceil((imageWidth - TILE_SIZE) / stride) + 1
-    const tilesY = Math.ceil((imageHeight - TILE_SIZE) / stride) + 1
-    const totalTiles = tilesX * tilesY
-
-    console.log(`Tiling into ${tilesX}x${tilesY} = ${totalTiles} tiles (stride: ${stride}px)`)
-
-    // Process each tile
-    const allDetections: Detection[] = []
-    let processedTiles = 0
-
-    for (let ty = 0; ty < tilesY; ty++) {
-      for (let tx = 0; tx < tilesX; tx++) {
-        const tileX = Math.min(tx * stride, imageWidth - TILE_SIZE)
-        const tileY = Math.min(ty * stride, imageHeight - TILE_SIZE)
-
-        // Extract tile
-        const tileBuffer = await sharp(imageBuffer)
-          .extract({
-            left: Math.max(0, tileX),
-            top: Math.max(0, tileY),
-            width: Math.min(TILE_SIZE, imageWidth - tileX),
-            height: Math.min(TILE_SIZE, imageHeight - tileY),
-          })
-          .resize(TILE_SIZE, TILE_SIZE, {
-            fit: 'contain',
-            background: { r: 0, g: 0, b: 0 }
-          })
-          .jpeg({ quality: 90 })
-          .toBuffer()
-
-        // Run inference on tile
-        try {
-          const predictions = await runTileInference(tileBuffer, confidence_threshold)
-
-          if (predictions.length > 0) {
-            console.log(`Tile (${tx}, ${ty}): ${predictions.length} predictions - classes: ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
-          }
-
-          // Convert tile coordinates to full image coordinates
-          const tileWidth = Math.min(TILE_SIZE, imageWidth - tileX)
-          const tileHeight = Math.min(TILE_SIZE, imageHeight - tileY)
-          const scaleX = tileWidth / TILE_SIZE
-          const scaleY = tileHeight / TILE_SIZE
-
-          // Log first tile's predictions to see class names
-          if (processedTiles === 0 && predictions.length > 0) {
-            console.log('Sample predictions from first tile:', predictions.slice(0, 3).map(p => ({ class: p.class, confidence: p.confidence })))
-          }
-
-          for (const pred of predictions) {
-            // Filter by class - only include allowed classes
-            const predClass = (pred.class || 'plant').toLowerCase()
-            if (!allowedClasses.includes(predClass)) {
-              // Only log occasionally to avoid spam
-              if (Math.random() < 0.01) console.log(`Skipping detection with class: ${pred.class}`)
-              continue // Skip this detection (e.g., roadways, beds)
-            }
-
-            // Log that we're keeping a plant
-            if (Math.random() < 0.01) console.log(`KEEPING plant detection: ${pred.class} (confidence: ${pred.confidence})`)
-
-            allDetections.push({
-              x: tileX + pred.x * scaleX,
-              y: tileY + pred.y * scaleY,
-              width: pred.width * scaleX,
-              height: pred.height * scaleY,
-              confidence: pred.confidence,
-              class: pred.class,
-            })
-          }
-        } catch (err) {
-          console.error(`Error processing tile (${tx}, ${ty}):`, err)
-          // Continue with other tiles
-        }
-
-        processedTiles++
-        if (processedTiles % 10 === 0 || processedTiles === totalTiles) {
-          console.log(`Processed ${processedTiles}/${totalTiles} tiles, ${allDetections.length} detections so far`)
-        }
-      }
-    }
-
-    console.log(`Total detections before NMS: ${allDetections.length}`)
-
-    // Apply NMS to remove duplicate detections at tile boundaries
-    const finalDetections = applyNMS(allDetections, NMS_IOU_THRESHOLD)
-    console.log(`Detections after NMS: ${finalDetections.length}`)
-
-    // Delete existing AI labels for this orthomosaic
-    console.log('Deleting existing AI labels...')
-    const { error: deleteError, count: deleteCount } = await supabase
-      .from('plant_labels')
-      .delete()
-      .eq('orthomosaic_id', orthomosaicId)
-      .eq('source', 'ai')
-
-    if (deleteError) {
-      console.error('Error deleting existing labels:', deleteError)
-    } else {
-      console.log(`Deleted existing AI labels (count: ${deleteCount ?? 'unknown'})`)
-    }
-
-    // Convert detections to plant labels with GPS coordinates
-    console.log('Converting detections to GPS coordinates...')
-    const labels = finalDetections.map(det => {
-      const gps = pixelToGPS(
-        det.x,
-        det.y,
-        orthomosaic.bounds,
-        imageWidth,
-        imageHeight
-      )
-
-      return {
-        orthomosaic_id: orthomosaicId,
-        user_id: userId || null,
-        latitude: gps.lat,
-        longitude: gps.lng,
-        pixel_x: Math.round(det.x),
-        pixel_y: Math.round(det.y),
-        source: 'ai' as const,
-        confidence: det.confidence,
-        label: det.class || 'plant',
-        verified: false,
-      }
+    const response = await fetch(`${SAM3_API_URL}?api_key=${ROBOFLOW_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        format: 'polygon',
+        image: { type: 'base64', value: base64Image },
+        prompts: [{ type: 'text', text: prompt }],
+      }),
+      signal: controller.signal,
     })
 
-    // Insert all labels in batch with retry logic
-    console.log(`Starting batch insert of ${labels.length} labels...`)
-    if (labels.length > 0) {
-      const chunkSize = 250  // Smaller chunks for reliability
-      const maxRetries = 3
-      let successfulInserts = 0
-      let failedInserts = 0
-
-      for (let i = 0; i < labels.length; i += chunkSize) {
-        const chunk = labels.slice(i, i + chunkSize)
-        const chunkIndex = Math.floor(i / chunkSize) + 1
-        const totalChunks = Math.ceil(labels.length / chunkSize)
-
-        let success = false
-        let lastError = null
-
-        // Retry loop with exponential backoff
-        for (let attempt = 1; attempt <= maxRetries && !success; attempt++) {
-          const { error: insertError } = await supabase
-            .from('plant_labels')
-            .insert(chunk)
-
-          if (insertError) {
-            lastError = insertError
-            console.error(`Chunk ${chunkIndex}/${totalChunks} insert failed (attempt ${attempt}/${maxRetries}):`, insertError.message)
-
-            if (attempt < maxRetries) {
-              // Exponential backoff: 1s, 2s, 4s
-              const delay = Math.pow(2, attempt - 1) * 1000
-              await new Promise(resolve => setTimeout(resolve, delay))
-            }
-          } else {
-            success = true
-            successfulInserts += chunk.length
-          }
-        }
-
-        if (!success) {
-          failedInserts += chunk.length
-          console.error(`Chunk ${chunkIndex}/${totalChunks} failed after ${maxRetries} attempts. Labels lost: ${chunk.length}`)
-        }
-
-        // Log progress every 10 chunks
-        if (chunkIndex % 10 === 0 || chunkIndex === totalChunks) {
-          console.log(`Insert progress: ${chunkIndex}/${totalChunks} chunks (${successfulInserts} saved, ${failedInserts} failed)`)
-        }
-      }
-
-      console.log(`Batch insert complete: ${successfulInserts} labels saved, ${failedInserts} failed out of ${labels.length} total`)
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error('SAM3 API error:', errorText)
+      throw new Error(`SAM3 API error: ${response.status}`)
     }
 
-    // Get count of newly inserted labels (use count query for efficiency)
-    const { count: savedCount } = await supabase
-      .from('plant_labels')
-      .select('*', { count: 'exact', head: true })
-      .eq('orthomosaic_id', orthomosaicId)
-      .eq('source', 'ai')
+    const data = await response.json()
 
-    // Calculate summary statistics
-    const classCounts: Record<string, number> = {}
-    finalDetections.forEach(det => {
-      const className = det.class || 'plant'
-      classCounts[className] = (classCounts[className] || 0) + 1
-    })
+    // Parse predictions from first prompt result
+    const predictions = (data as SAM3Response).prompt_results?.[0]?.predictions || []
+    const detections: Detection[] = []
 
-    console.log(`Plant detection complete: ${finalDetections.length} detected, ${savedCount} saved to database`)
+    for (const pred of predictions) {
+      // Skip low-confidence predictions
+      if (pred.confidence < confidenceThreshold) continue
 
-    return NextResponse.json({
-      success: true,
-      orthomosaicId,
-      totalDetections: finalDetections.length,
-      savedCount: savedCount || 0,
-      tilesProcessed: totalTiles,
-      classCounts,
-      averageConfidence: finalDetections.length > 0
-        ? finalDetections.reduce((sum, d) => sum + d.confidence, 0) / finalDetections.length
-        : 0,
-      // Don't return all labels in response - too large. Client should fetch separately.
-      labelsCount: savedCount || 0,
-    })
+      // Skip if no masks
+      if (!pred.masks || pred.masks.length === 0) continue
 
-  } catch (error) {
-    console.error('Plant detection error:', error)
+      // Convert first polygon mask to axis-aligned bounding box
+      // SAM3 masks can be: array of {x,y} objects OR array of [x,y] arrays
+      const polygon = pred.masks[0]
+      if (!polygon || polygon.length === 0) continue
+
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const pt of polygon) {
+        const px = Array.isArray(pt) ? pt[0] : pt.x
+        const py = Array.isArray(pt) ? pt[1] : pt.y
+        if (px < minX) minX = px
+        if (py < minY) minY = py
+        if (px > maxX) maxX = px
+        if (py > maxY) maxY = py
+      }
+
+      const area = (maxX - minX) * (maxY - minY)
+      if (area < MIN_AREA_PX) continue
+
+      detections.push({
+        x1: minX,
+        y1: minY,
+        x2: maxX,
+        y2: maxY,
+        confidence: pred.confidence,
+        label: 'plant',
+      })
+    }
+
+    return detections
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+// POST: Run plant detection on an orthomosaic with tiling (streams NDJSON progress)
+export async function POST(request: NextRequest) {
+  // Parse body upfront so we can return errors as normal JSON
+  let body: Record<string, unknown>
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+
+  const {
+    orthomosaicId,
+    userId,
+    confidence_threshold = DEFAULT_CONFIDENCE,
+    prompt = DEFAULT_PROMPT,
+  } = body as {
+    orthomosaicId?: string
+    userId?: string
+    confidence_threshold?: number
+    prompt?: string
+  }
+
+  if (!orthomosaicId) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Detection failed' },
+      { error: 'orthomosaicId is required' },
+      { status: 400 }
+    )
+  }
+
+  if (!ROBOFLOW_API_KEY) {
+    return NextResponse.json(
+      { error: 'Roboflow API not configured. Please set ROBOFLOW_API_KEY environment variable.' },
       { status: 500 }
     )
   }
+
+  // Pre-flight: fetch orthomosaic metadata before starting the stream
+  const { data: orthomosaic, error: orthoError } = await supabase
+    .from('orthomosaics')
+    .select('*')
+    .eq('id', orthomosaicId)
+    .single()
+
+  if (orthoError || !orthomosaic) {
+    return NextResponse.json({ error: 'Orthomosaic not found' }, { status: 404 })
+  }
+  if (orthomosaic.status !== 'completed') {
+    return NextResponse.json({ error: 'Orthomosaic is not ready for processing' }, { status: 400 })
+  }
+  if (!orthomosaic.orthomosaic_url) {
+    return NextResponse.json({ error: 'Orthomosaic image URL not found' }, { status: 400 })
+  }
+  if (!orthomosaic.bounds) {
+    return NextResponse.json({ error: 'Orthomosaic bounds not available' }, { status: 400 })
+  }
+
+  // Stream NDJSON: each line is a JSON object followed by \n
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (obj: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'))
+      }
+
+      try {
+        send({ type: 'status', message: 'Downloading orthomosaic image...' })
+
+        // Download orthomosaic image
+        const imageResponse = await fetchWithWebODMAuth(orthomosaic.orthomosaic_url)
+        if (!imageResponse.ok) {
+          send({ type: 'error', error: `Failed to download orthomosaic: ${imageResponse.status}` })
+          controller.close()
+          return
+        }
+        const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
+
+        // Get image dimensions
+        const image = sharp(imageBuffer)
+        const metadata = await image.metadata()
+        const imageWidth = metadata.width!
+        const imageHeight = metadata.height!
+
+        // Calculate tile grid
+        const stride = Math.floor(TILE_SIZE * (1 - TILE_OVERLAP))
+        const tilesX = Math.ceil((imageWidth - TILE_SIZE) / stride) + 1
+        const tilesY = Math.ceil((imageHeight - TILE_SIZE) / stride) + 1
+        const totalTiles = tilesX * tilesY
+
+        console.log(`SAM3: ${imageWidth}x${imageHeight}, ${totalTiles} tiles (stride ${stride}px)`)
+
+        send({
+          type: 'progress',
+          processedTiles: 0,
+          totalTiles,
+          detectionsCount: 0,
+          phase: 'tiling',
+        })
+
+        // Process each tile
+        const allDetections: Detection[] = []
+        let processedTiles = 0
+
+        for (let ty = 0; ty < tilesY; ty++) {
+          for (let tx = 0; tx < tilesX; tx++) {
+            const tileLeft = Math.min(tx * stride, imageWidth - TILE_SIZE)
+            const tileTop = Math.min(ty * stride, imageHeight - TILE_SIZE)
+
+            const cropWidth = Math.min(TILE_SIZE, imageWidth - Math.max(0, tileLeft))
+            const cropHeight = Math.min(TILE_SIZE, imageHeight - Math.max(0, tileTop))
+
+            // Extract tile — crop only, no resize
+            const tileBuffer = await sharp(imageBuffer)
+              .extract({
+                left: Math.max(0, tileLeft),
+                top: Math.max(0, tileTop),
+                width: cropWidth,
+                height: cropHeight,
+              })
+              .jpeg({ quality: JPEG_QUALITY })
+              .toBuffer()
+
+            try {
+              const tileDetections = await runSAM3Inference(
+                tileBuffer,
+                prompt as string,
+                confidence_threshold as number,
+              )
+
+              if (tileDetections.length > 0) {
+                console.log(`Tile (${tx}, ${ty}): ${tileDetections.length} detections`)
+              }
+
+              // Remap tile coordinates to full image
+              for (const det of tileDetections) {
+                allDetections.push({
+                  x1: det.x1 + Math.max(0, tileLeft),
+                  y1: det.y1 + Math.max(0, tileTop),
+                  x2: det.x2 + Math.max(0, tileLeft),
+                  y2: det.y2 + Math.max(0, tileTop),
+                  confidence: det.confidence,
+                  label: det.label,
+                })
+              }
+            } catch (err) {
+              console.error(`Error processing tile (${tx}, ${ty}):`, err)
+            }
+
+            processedTiles++
+
+            // Send progress update after every tile
+            send({
+              type: 'progress',
+              processedTiles,
+              totalTiles,
+              detectionsCount: allDetections.length,
+              phase: 'tiling',
+            })
+
+            // Rate limit between API calls
+            if (processedTiles < totalTiles) {
+              await sleep(API_RATE_LIMIT_MS)
+            }
+          }
+        }
+
+        // NMS phase
+        send({ type: 'progress', processedTiles: totalTiles, totalTiles, detectionsCount: allDetections.length, phase: 'nms' })
+        console.log(`Total detections before NMS: ${allDetections.length}`)
+        const finalDetections = applyNMS(allDetections, NMS_IOU_THRESHOLD)
+        console.log(`Detections after NMS: ${finalDetections.length}`)
+
+        // Saving phase
+        send({ type: 'progress', processedTiles: totalTiles, totalTiles, detectionsCount: finalDetections.length, phase: 'saving' })
+
+        // Delete existing AI labels
+        const { error: deleteError, count: deleteCount } = await supabase
+          .from('plant_labels')
+          .delete()
+          .eq('orthomosaic_id', orthomosaicId)
+          .eq('source', 'ai')
+
+        if (deleteError) {
+          console.error('Error deleting existing labels:', deleteError)
+        } else {
+          console.log(`Deleted existing AI labels (count: ${deleteCount ?? 'unknown'})`)
+        }
+
+        // Convert to GPS labels
+        const labels = finalDetections.map(det => {
+          const centerX = (det.x1 + det.x2) / 2
+          const centerY = (det.y1 + det.y2) / 2
+          const gps = pixelToGPS(centerX, centerY, orthomosaic.bounds, imageWidth, imageHeight)
+          return {
+            orthomosaic_id: orthomosaicId,
+            user_id: userId || null,
+            latitude: gps.lat,
+            longitude: gps.lng,
+            pixel_x: Math.round(centerX),
+            pixel_y: Math.round(centerY),
+            source: 'ai' as const,
+            confidence: det.confidence,
+            label: 'plant',
+            verified: false,
+          }
+        })
+
+        // Batch insert
+        if (labels.length > 0) {
+          const chunkSize = 250
+          const maxRetries = 3
+          let successfulInserts = 0
+          let failedInserts = 0
+
+          for (let i = 0; i < labels.length; i += chunkSize) {
+            const chunk = labels.slice(i, i + chunkSize)
+            let success = false
+
+            for (let attempt = 1; attempt <= maxRetries && !success; attempt++) {
+              const { error: insertError } = await supabase
+                .from('plant_labels')
+                .insert(chunk)
+
+              if (insertError) {
+                console.error(`Chunk insert failed (attempt ${attempt}/${maxRetries}):`, insertError.message)
+                if (attempt < maxRetries) {
+                  await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt - 1) * 1000))
+                }
+              } else {
+                success = true
+                successfulInserts += chunk.length
+              }
+            }
+
+            if (!success) {
+              failedInserts += chunk.length
+            }
+          }
+
+          console.log(`Batch insert: ${successfulInserts} saved, ${failedInserts} failed of ${labels.length}`)
+        }
+
+        // Final count
+        const { count: savedCount } = await supabase
+          .from('plant_labels')
+          .select('*', { count: 'exact', head: true })
+          .eq('orthomosaic_id', orthomosaicId)
+          .eq('source', 'ai')
+
+        const classCounts: Record<string, number> = {}
+        finalDetections.forEach(det => {
+          classCounts[det.label || 'plant'] = (classCounts[det.label || 'plant'] || 0) + 1
+        })
+
+        console.log(`Plant detection complete: ${finalDetections.length} detected, ${savedCount} saved`)
+
+        // Final result event
+        send({
+          type: 'result',
+          success: true,
+          orthomosaicId,
+          totalDetections: finalDetections.length,
+          savedCount: savedCount || 0,
+          tilesProcessed: totalTiles,
+          classCounts,
+          averageConfidence: finalDetections.length > 0
+            ? finalDetections.reduce((sum, d) => sum + d.confidence, 0) / finalDetections.length
+            : 0,
+          labelsCount: savedCount || 0,
+        })
+      } catch (error) {
+        console.error('Plant detection error:', error)
+        send({ type: 'error', error: error instanceof Error ? error.message : 'Detection failed' })
+      } finally {
+        controller.close()
+      }
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'application/x-ndjson',
+      'Transfer-Encoding': 'chunked',
+      'Cache-Control': 'no-cache',
+    },
+  })
 }
 
 // GET: Get detection status/results for an orthomosaic
@@ -453,7 +490,7 @@ export async function GET(request: NextRequest) {
   try {
     // Fetch AI labels in batches to bypass Supabase's default 1000 row limit
     const batchSize = 1000
-    let allLabels: any[] = []
+    let allLabels: Record<string, unknown>[] = []
     let offset = 0
     let hasMore = true
 
@@ -489,9 +526,9 @@ export async function GET(request: NextRequest) {
     let totalConfidence = 0
 
     allLabels.forEach(label => {
-      const className = label.label || 'plant'
+      const className = (label.label as string) || 'plant'
       classCounts[className] = (classCounts[className] || 0) + 1
-      totalConfidence += label.confidence || 0
+      totalConfidence += (label.confidence as number) || 0
     })
 
     return NextResponse.json({

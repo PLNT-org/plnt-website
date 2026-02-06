@@ -151,7 +151,13 @@ export default function OrthomosaicViewerPage() {
     classCounts: Record<string, number>
     averageConfidence: number
   } | null>(null)
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.5)
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.15)
+  const [detectionProgress, setDetectionProgress] = useState<{
+    processedTiles: number
+    totalTiles: number
+    detectionsCount: number
+    phase: string
+  } | null>(null)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
   const [plotAggregation, setPlotAggregation] = useState<{
     plotCounts: Array<{
@@ -502,12 +508,13 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
-  // Handle plant detection with Roboflow
+  // Handle plant detection with SAM3 (reads streaming NDJSON progress)
   const handlePlantDetection = async () => {
     if (!selectedOrthomosaic || isDemo) return
 
     setPlantDetecting(true)
     setPlantDetectionResult(null)
+    setDetectionProgress(null)
     setPlotAggregation(null)
 
     try {
@@ -518,18 +525,65 @@ export default function OrthomosaicViewerPage() {
           orthomosaicId: selectedOrthomosaic.id,
           userId: user?.id,
           confidence_threshold: confidenceThreshold,
-          include_classes: ['plant', 'plants'],  // Only count plants, not roadways or beds
+          prompt: 'individual plant',
         }),
       })
 
-      const data = await response.json()
+      if (!response.ok) {
+        const errorData = await response.json()
+        console.error('Detection failed:', errorData.error)
+        alert(errorData.error || 'Plant detection failed')
+        return
+      }
 
-      if (data.success) {
+      // Read NDJSON stream line-by-line
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No response body')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finalResult: Record<string, unknown> | null = null
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        // Process complete lines
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || '' // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const event = JSON.parse(line)
+
+            if (event.type === 'progress') {
+              setDetectionProgress({
+                processedTiles: event.processedTiles,
+                totalTiles: event.totalTiles,
+                detectionsCount: event.detectionsCount,
+                phase: event.phase,
+              })
+            } else if (event.type === 'result') {
+              finalResult = event
+            } else if (event.type === 'error') {
+              console.error('Detection error:', event.error)
+              alert(event.error || 'Plant detection failed')
+            }
+          } catch {
+            // Skip malformed lines
+          }
+        }
+      }
+
+      if (finalResult && finalResult.success) {
         setPlantDetectionResult({
-          totalDetections: data.totalDetections,
-          savedCount: data.savedCount,
-          classCounts: data.classCounts,
-          averageConfidence: data.averageConfidence,
+          totalDetections: finalResult.totalDetections as number,
+          savedCount: finalResult.savedCount as number,
+          classCounts: finalResult.classCounts as Record<string, number>,
+          averageConfidence: finalResult.averageConfidence as number,
         })
 
         // Reload labels to include new AI detections
@@ -543,15 +597,13 @@ export default function OrthomosaicViewerPage() {
 
         // Automatically aggregate by plot
         await handleAggregateByPlot()
-      } else {
-        console.error('Detection failed:', data.error)
-        alert(data.error || 'Plant detection failed')
       }
     } catch (err) {
       console.error('Error running plant detection:', err)
       alert('Failed to run plant detection. Check console for details.')
     } finally {
       setPlantDetecting(false)
+      setDetectionProgress(null)
     }
   }
 
@@ -926,7 +978,7 @@ export default function OrthomosaicViewerPage() {
             </CardContent>
           </Card>
 
-          {/* Plant Detection with Roboflow */}
+          {/* Plant Detection with SAM3 */}
           <Card>
             <CardContent className="py-4">
               <div className="flex items-center justify-between flex-wrap gap-4">
@@ -995,6 +1047,43 @@ export default function OrthomosaicViewerPage() {
                 </div>
               </div>
 
+              {/* Progress Bar */}
+              {plantDetecting && detectionProgress && (
+                <div className="mt-4 p-4 bg-green-50 rounded-lg border border-green-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-green-600" />
+                      <span className="text-sm font-medium text-green-800">
+                        {detectionProgress.phase === 'tiling' && 'Analyzing tiles...'}
+                        {detectionProgress.phase === 'nms' && 'Removing duplicates...'}
+                        {detectionProgress.phase === 'saving' && 'Saving to database...'}
+                      </span>
+                    </div>
+                    <div className="text-sm text-green-700 font-mono">
+                      {detectionProgress.processedTiles}/{detectionProgress.totalTiles} tiles
+                      {detectionProgress.detectionsCount > 0 && (
+                        <span className="ml-2">({detectionProgress.detectionsCount} plants found)</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="h-3 bg-green-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-green-600 rounded-full transition-all duration-300"
+                      style={{
+                        width: `${detectionProgress.totalTiles > 0
+                          ? Math.round((detectionProgress.processedTiles / detectionProgress.totalTiles) * 100)
+                          : 0}%`
+                      }}
+                    />
+                  </div>
+                  <div className="text-xs text-green-600 mt-1 text-right">
+                    {detectionProgress.totalTiles > 0
+                      ? Math.round((detectionProgress.processedTiles / detectionProgress.totalTiles) * 100)
+                      : 0}%
+                  </div>
+                </div>
+              )}
+
               {/* Detection Settings */}
               {showDetectionSettings && (
                 <div className="mt-4 p-4 bg-gray-50 rounded-lg border">
@@ -1006,8 +1095,8 @@ export default function OrthomosaicViewerPage() {
                       </label>
                       <input
                         type="range"
-                        min="0.1"
-                        max="0.9"
+                        min="0.05"
+                        max="0.5"
                         step="0.05"
                         value={confidenceThreshold}
                         onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))}
@@ -1018,12 +1107,12 @@ export default function OrthomosaicViewerPage() {
                       </p>
                     </div>
                     <div>
-                      <label className="text-sm text-gray-600 block mb-1">Classes to detect:</label>
+                      <label className="text-sm text-gray-600 block mb-1">Detection Prompt:</label>
                       <p className="text-sm font-mono bg-white px-2 py-1 rounded border inline-block">
-                        plant, plants
+                        individual plant
                       </p>
                       <p className="text-xs text-gray-500 mt-1">
-                        Roadways and beds are filtered out
+                        SAM3 concept segmentation — text-prompted plant detection
                       </p>
                     </div>
                   </div>
@@ -1049,7 +1138,7 @@ export default function OrthomosaicViewerPage() {
                     Plant Counts by Plot
                   </h4>
 
-                  {plotAggregation.speciesSummary.length > 0 && (
+                  {plotAggregation.speciesSummary?.length > 0 && (
                     <div className="mb-4">
                       <p className="text-sm text-gray-600 mb-2">Species Summary:</p>
                       <div className="flex flex-wrap gap-2">
