@@ -4,6 +4,14 @@ import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
+// Patch Leaflet's getPosition to guard against undefined elements
+// during React unmount/remount cycles
+const originalGetPosition = L.DomUtil.getPosition
+L.DomUtil.getPosition = function (el) {
+  if (!el) return new L.Point(0, 0)
+  return originalGetPosition.call(this, el)
+}
+
 // Add custom styles to fix focus outline on polygons
 const customStyles = `
   .leaflet-interactive:focus {
@@ -172,14 +180,13 @@ export default function OrthomosaicMap({
 
     // Orthophoto tile layer
     if (orthomosaic.orthomosaic_url) {
-      // Extract project and task IDs from the URL to build tiles URL
-      // URL format: http://localhost:8000/api/projects/{projectId}/tasks/{taskId}/download/orthophoto.tif
+      // Extract project and task IDs from the URL to build proxy tiles URL
+      // URL format: .../api/projects/{projectId}/tasks/{taskId}/download/orthophoto.tif
       const urlMatch = orthomosaic.orthomosaic_url.match(/projects\/(\d+)\/tasks\/([^/]+)/)
 
       if (urlMatch) {
         const [, projectId, taskId] = urlMatch
-        const baseUrl = orthomosaic.orthomosaic_url.split('/api/')[0]
-        const tilesUrl = `${baseUrl}/api/projects/${projectId}/tasks/${taskId}/orthophoto/tiles/{z}/{x}/{y}`
+        const tilesUrl = `/api/orthomosaic/tiles/${projectId}/${taskId}/{z}/{x}/{y}`
 
         const orthophotoLayer = L.tileLayer(tilesUrl, {
           maxZoom: 24,
@@ -224,8 +231,13 @@ export default function OrthomosaicMap({
     mapRef.current = map
 
     return () => {
+      map.off()
       map.remove()
       mapRef.current = null
+      orthophotoLayerRef.current = null
+      markersLayerRef.current = null
+      arucoLayerRef.current = null
+      plotsLayerRef.current = null
     }
   }, [orthomosaic])
 
@@ -522,7 +534,7 @@ export default function OrthomosaicMap({
   return (
     <div className="relative">
       {/* Map Container */}
-      <div ref={mapContainerRef} className="h-[600px] w-full" />
+      <div key={orthomosaic.id} ref={mapContainerRef} className="h-[600px] w-full" />
 
       {/* Layer Controls */}
       <div className="absolute top-4 right-4 bg-white rounded-lg shadow-lg p-3 z-[1000]">

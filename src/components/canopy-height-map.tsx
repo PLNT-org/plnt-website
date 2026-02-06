@@ -110,9 +110,8 @@ export default function CanopyHeightMap({
       imageOverlay.addTo(map)
       chmLayerRef.current = imageOverlay
     } else if (orthomosaic.webodm_project_id && orthomosaic.webodm_task_id) {
-      // Real WebODM DSM tiles
-      const baseUrl = process.env.NEXT_PUBLIC_WEBODM_URL || 'http://localhost:8000'
-      const dsmTilesUrl = `${baseUrl}/api/projects/${orthomosaic.webodm_project_id}/tasks/${orthomosaic.webodm_task_id}/dsm/tiles/{z}/{x}/{y}.png`
+      // DSM tiles via server-side proxy
+      const dsmTilesUrl = `/api/orthomosaic/dsm-tiles/${orthomosaic.webodm_project_id}/${orthomosaic.webodm_task_id}/{z}/{x}/{y}`
 
       const tileLayer = L.tileLayer(dsmTilesUrl, {
         maxZoom: 24,

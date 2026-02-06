@@ -10,17 +10,15 @@ import {
   TaskStatusResponse,
   OrthomosaicMetadata,
   WebODMBounds,
-  WebODMProcessingOptions,
   PROCESSING_PRESETS,
 } from './types'
+import { getWebODMToken, invalidateToken } from './token-manager'
 
 export class WebODMClient {
   private baseUrl: string
-  private token: string
 
-  constructor(baseUrl?: string, token?: string) {
+  constructor(baseUrl?: string) {
     this.baseUrl = baseUrl || process.env.WEBODM_URL || 'http://localhost:8000'
-    this.token = token || process.env.WEBODM_TOKEN || ''
 
     // Remove trailing slash
     this.baseUrl = this.baseUrl.replace(/\/$/, '')
@@ -31,8 +29,9 @@ export class WebODMClient {
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`
+    const token = await getWebODMToken()
     const headers: HeadersInit = {
-      Authorization: `JWT ${this.token}`,
+      Authorization: `JWT ${token}`,
       ...options.headers,
     }
 
@@ -41,10 +40,18 @@ export class WebODMClient {
       headers['Content-Type'] = 'application/json'
     }
 
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       ...options,
       headers,
     })
+
+    // Retry once on 401 with a fresh token
+    if (response.status === 401) {
+      invalidateToken()
+      const freshToken = await getWebODMToken()
+      headers.Authorization = `JWT ${freshToken}`
+      response = await fetch(url, { ...options, headers })
+    }
 
     if (!response.ok) {
       const error = await response.text()
@@ -130,22 +137,17 @@ export class WebODMClient {
       `/api/projects/${projectId}/tasks/${taskId}/`
     )
 
-    // Get more detailed info
-    const info = await this.request<any>(
-      `/api/projects/${projectId}/tasks/${taskId}/info/`
-    ).catch(() => null)
-
     // Handle both status formats: integer or {code: integer}
     const statusCode = typeof task.status === 'number' ? task.status : task.status?.code
 
     return {
       id: task.id,
       status: statusCode,
-      progress: info?.progress || 0,
-      processingTime: info?.processingTime || 0,
+      progress: (task.running_progress ?? 0) * 100,
+      processingTime: task.processing_time || 0,
       imagesCount: task.images_count,
       availableAssets: task.available_assets,
-      error: statusCode === WebODMStatusCode.FAILED ? info?.error : undefined,
+      error: statusCode === WebODMStatusCode.FAILED ? (task.last_error || 'Processing failed') : undefined,
     }
   }
 
@@ -284,33 +286,6 @@ export class WebODMClient {
     }
   }
 
-  /**
-   * Get processing node status
-   */
-  async getNodeStatus(): Promise<{
-    available: boolean
-    version?: string
-    maxImages?: number
-    queueCount?: number
-  }> {
-    try {
-      // Check NodeODM directly
-      const nodeUrl = this.baseUrl.replace(':8000', ':3001')
-      const response = await fetch(`${nodeUrl}/info`)
-      if (!response.ok) {
-        return { available: false }
-      }
-      const info = await response.json()
-      return {
-        available: true,
-        version: info.version,
-        maxImages: info.maxImages,
-        queueCount: info.taskQueueCount,
-      }
-    } catch {
-      return { available: false }
-    }
-  }
 }
 
 // Export singleton instance for use in API routes

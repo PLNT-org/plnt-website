@@ -182,24 +182,19 @@ export default function OrthomosaicUploadPage() {
                     View Progress
                   </Button>
                 </Link>
-                <a href="http://localhost:8000" target="_blank" rel="noopener noreferrer">
-                  <Button variant="outline">
-                    Open WebODM Dashboard
-                  </Button>
-                </a>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setSuccess(false)
+                    setImages([])
+                    setProjectName('')
+                    setTaskInfo(null)
+                  }}
+                >
+                  Create Another
+                </Button>
               </div>
 
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setSuccess(false)
-                  setImages([])
-                  setProjectName('')
-                  setTaskInfo(null)
-                }}
-              >
-                Create Another Orthomosaic
-              </Button>
             </div>
           </CardContent>
         </Card>

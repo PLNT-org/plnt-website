@@ -25,8 +25,8 @@ function setCachedTile(key: string, data: ArrayBuffer) {
   tileCache.set(key, { data, timestamp: Date.now() })
 }
 
-// Tile proxy for WebODM orthomosaic tiles
-// Route: /api/orthomosaic/tiles/[projectId]/[taskId]/[z]/[x]/[y]
+// DSM tile proxy for WebODM
+// Route: /api/orthomosaic/dsm-tiles/[projectId]/[taskId]/[z]/[x]/[y]
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ params: string[] }> }
@@ -45,7 +45,7 @@ export async function GET(
     const [projectId, taskId, z, x, y] = pathParams
 
     // Check cache first
-    const cacheKey = `ortho-${projectId}-${taskId}-${z}-${x}-${y}`
+    const cacheKey = `dsm-${projectId}-${taskId}-${z}-${x}-${y}`
     const cached = getCachedTile(cacheKey)
     if (cached) {
       return new NextResponse(cached, {
@@ -60,13 +60,13 @@ export async function GET(
 
     const webodmUrl = (process.env.WEBODM_URL || 'http://localhost:8000').replace(/\/$/, '')
 
-    // Fetch tile from WebODM
-    const tileUrl = `${webodmUrl}/api/projects/${projectId}/tasks/${taskId}/orthophoto/tiles/${z}/${x}/${y}`
+    // Fetch DSM tile from WebODM
+    const tileUrl = `${webodmUrl}/api/projects/${projectId}/tasks/${taskId}/dsm/tiles/${z}/${x}/${y}.png`
 
     const response = await fetchWithWebODMAuth(tileUrl)
 
     if (!response.ok) {
-      // Return transparent tile for 404 (tile doesn't exist at this location)
+      // Return empty response for 404 (tile doesn't exist at this location)
       if (response.status === 404) {
         return new NextResponse(null, { status: 204 })
       }
@@ -92,9 +92,9 @@ export async function GET(
       },
     })
   } catch (error) {
-    console.error('Tile proxy error:', error)
+    console.error('DSM tile proxy error:', error)
     return NextResponse.json(
-      { error: 'Failed to fetch tile' },
+      { error: 'Failed to fetch DSM tile' },
       { status: 500 }
     )
   }
