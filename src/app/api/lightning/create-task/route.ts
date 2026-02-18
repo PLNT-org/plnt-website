@@ -22,10 +22,16 @@ export async function POST(request: NextRequest) {
 
   try {
     // --- Parse request body ---
-    const { flightId, name, quality } = await request.json()
+    // Supports two modes:
+    //   1. { flightId } — looks up images from aerial_images table
+    //   2. { storagePaths } — uses provided Supabase Storage paths directly
+    const { flightId, storagePaths, name, quality } = await request.json()
 
-    if (!flightId) {
-      return NextResponse.json({ error: 'flightId is required' }, { status: 400 })
+    if (!flightId && (!storagePaths || storagePaths.length === 0)) {
+      return NextResponse.json(
+        { error: 'Either flightId or storagePaths is required' },
+        { status: 400 }
+      )
     }
 
     // --- Authenticate user ---
@@ -44,28 +50,41 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // --- Look up images for this flight ---
-    const { data: imageRows, error: imgError } = await supabaseAdmin
-      .from('aerial_images')
-      .select('id, image_url')
-      .eq('flight_id', flightId)
-      .order('created_at', { ascending: true })
+    // --- Resolve image paths ---
+    let imagePaths: { id: string; image_url: string }[]
 
-    if (imgError) {
-      console.error('Error fetching images:', imgError)
-      return NextResponse.json({ error: 'Failed to look up flight images' }, { status: 500 })
+    if (flightId) {
+      // Mode 1: Look up images from aerial_images table
+      const { data: imageRows, error: imgError } = await supabaseAdmin
+        .from('aerial_images')
+        .select('id, image_url')
+        .eq('flight_id', flightId)
+        .order('created_at', { ascending: true })
+
+      if (imgError) {
+        console.error('Error fetching images:', imgError)
+        return NextResponse.json({ error: 'Failed to look up flight images' }, { status: 500 })
+      }
+
+      imagePaths = imageRows || []
+    } else {
+      // Mode 2: Use provided storage paths directly
+      imagePaths = (storagePaths as string[]).map((p: string, i: number) => ({
+        id: String(i),
+        image_url: p,
+      }))
     }
 
-    if (!imageRows || imageRows.length < 3) {
+    if (imagePaths.length < 3) {
       return NextResponse.json(
-        { error: `At least 3 images are required (found ${imageRows?.length ?? 0})` },
+        { error: `At least 3 images are required (found ${imagePaths.length})` },
         { status: 400 }
       )
     }
 
-    if (imageRows.length > LIGHTNING_MAX_IMAGES) {
+    if (imagePaths.length > LIGHTNING_MAX_IMAGES) {
       return NextResponse.json(
-        { error: `Lightning supports up to ${LIGHTNING_MAX_IMAGES} images (found ${imageRows.length})` },
+        { error: `Lightning supports up to ${LIGHTNING_MAX_IMAGES} images (found ${imagePaths.length})` },
         { status: 400 }
       )
     }
@@ -89,7 +108,7 @@ export async function POST(request: NextRequest) {
     const taskName = name || `Orthomosaic - ${new Date().toLocaleDateString()}`
 
     // --- Step 1: Initialize Lightning task ---
-    console.log(`[Lightning] Initializing task "${taskName}" with ${imageRows.length} images...`)
+    console.log(`[Lightning] Initializing task "${taskName}" with ${imagePaths.length} images...`)
 
     const optionsArray = Object.entries(options).map(([key, value]) => ({
       name: key,
@@ -115,10 +134,10 @@ export async function POST(request: NextRequest) {
     console.log(`[Lightning] Task initialized: ${lightningUuid}`)
 
     // --- Step 2: Download from Supabase + upload to Lightning in batches ---
-    for (let i = 0; i < imageRows.length; i += BATCH_SIZE) {
-      const batch = imageRows.slice(i, i + BATCH_SIZE)
+    for (let i = 0; i < imagePaths.length; i += BATCH_SIZE) {
+      const batch = imagePaths.slice(i, i + BATCH_SIZE)
       const batchNum = Math.floor(i / BATCH_SIZE) + 1
-      const totalBatches = Math.ceil(imageRows.length / BATCH_SIZE)
+      const totalBatches = Math.ceil(imagePaths.length / BATCH_SIZE)
       console.log(`[Lightning] Uploading batch ${batchNum}/${totalBatches} (${batch.length} images)...`)
 
       // Download all images in this batch from Supabase concurrently
@@ -173,7 +192,7 @@ export async function POST(request: NextRequest) {
     const { data: orthomosaic, error: orthoError } = await supabaseAdmin
       .from('orthomosaics')
       .insert({
-        flight_id: flightId,
+        flight_id: flightId || null,
         user_id: user?.id || null,
         name: taskName,
         webodm_task_id: lightningUuid,
@@ -195,7 +214,7 @@ export async function POST(request: NextRequest) {
       success: true,
       uuid: lightningUuid,
       orthomosaicId: orthomosaic?.id,
-      imagesCount: imageRows.length,
+      imagesCount: imagePaths.length,
     })
   } catch (error) {
     console.error('Error creating Lightning task:', error)

@@ -3,6 +3,7 @@
 import { useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
+import { supabase } from '@/lib/supabase/client'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -104,22 +105,34 @@ export default function OrthomosaicUploadPage() {
         return
       }
 
-      // Create FormData with images
-      const formData = new FormData()
-      formData.append('name', projectName)
-      formData.append('quality', quality)
+      // Step 1: Upload images to Supabase Storage
+      const storagePaths: string[] = []
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i]
+        const fileExt = img.file.name.split('.').pop()
+        const filePath = `${user?.id || 'anon'}/orthomosaic/${Date.now()}_${i}.${fileExt}`
 
-      images.forEach((img, index) => {
-        formData.append('images', img.file)
-        setUploadProgress(((index + 1) / images.length) * 90)
-      })
+        const { error: uploadError } = await supabase.storage
+          .from('flight-images')
+          .upload(filePath, img.file)
+
+        if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`)
+
+        storagePaths.push(filePath)
+        setUploadProgress(((i + 1) / images.length) * 90)
+      }
 
       setUploadProgress(95)
 
-      // Send directly to WebODM API
-      const response = await fetch('/api/orthomosaic/create', {
+      // Step 2: Send storage paths to Lightning API (no large payload)
+      const response = await fetch('/api/lightning/create-task', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storagePaths,
+          name: projectName,
+          quality,
+        }),
       })
 
       const data = await response.json()
@@ -133,8 +146,8 @@ export default function OrthomosaicUploadPage() {
       setProcessing(true)
 
       setTaskInfo({
-        taskId: data.taskId,
-        projectId: data.projectId,
+        taskId: data.uuid,
+        projectId: 0,
         orthomosaicId: data.orthomosaicId
       })
 
