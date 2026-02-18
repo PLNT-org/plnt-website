@@ -228,16 +228,26 @@ export default function ImageUploadPage() {
         return
       }
 
-      const response = await fetch('/api/webodm/create-task', {
+      // Use Lightning API for cloud processing (no local Docker required)
+      // Falls back to local WebODM if Lightning is not configured
+      const useLightning = process.env.NEXT_PUBLIC_USE_LIGHTNING !== 'false'
+      const apiEndpoint = useLightning ? '/api/lightning/create-task' : '/api/webodm/create-task'
+
+      // Build form data with images for Lightning
+      const formData = new FormData()
+      formData.append('name', processingType === '3d'
+        ? `3D Height Map - ${new Date().toLocaleDateString()}`
+        : `Orthomosaic - ${new Date().toLocaleDateString()}`)
+      formData.append('quality', processingType === '3d' ? 'height-mapping' : 'balanced')
+
+      // Add images from the current upload
+      for (const img of images) {
+        formData.append('images', img.file)
+      }
+
+      const response = await fetch(apiEndpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          flightId: selectedFlight,
-          name: processingType === '3d'
-            ? `3D Height Map - ${new Date().toLocaleDateString()}`
-            : `Orthomosaic - ${new Date().toLocaleDateString()}`,
-          quality: processingType === '3d' ? 'height-mapping' : 'balanced',
-        }),
+        body: formData,
       })
 
       const data = await response.json()

@@ -196,10 +196,18 @@ export default function OrthomosaicMap({
         })
         orthophotoLayer.addTo(map)
         orthophotoLayerRef.current = orthophotoLayer
-      } else if (orthomosaic.orthomosaic_url.startsWith('/')) {
+      } else if (url.startsWith('/')) {
         // Demo mode with local image - use imageOverlay
         const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
-        const imageLayer = L.imageOverlay(orthomosaic.orthomosaic_url, bounds, {
+        const imageLayer = L.imageOverlay(url, bounds, {
+          opacity: 0.9,
+        }) as any
+        imageLayer.addTo(map)
+        orthophotoLayerRef.current = imageLayer
+      } else {
+        // Generic URL (could be any image URL) - try as image overlay
+        const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
+        const imageLayer = L.imageOverlay(url, bounds, {
           opacity: 0.9,
         }) as any
         imageLayer.addTo(map)
