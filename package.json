@@ -29,6 +29,7 @@
     "clsx": "^2.0.0",
     "date-fns": "^4.1.0",
     "exifreader": "^4.34.0",
+    "geotiff": "^3.0.3",
     "html5-qrcode": "^2.3.8",
     "js-aruco": "^0.1.0",
     "leaflet": "^1.9.4",

@@ -10,6 +10,7 @@ import {
   isLightningTaskFailed,
 } from '@/lib/webodm/lightning-client'
 import { getOrthomosaicStorage, BUCKETS } from '@/lib/supabase/storage'
+import { fromArrayBuffer } from 'geotiff'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -75,6 +76,33 @@ export async function POST(request: NextRequest) {
         console.log(`Downloading orthophoto for task ${taskId}...`)
         const orthophotoBuffer = await lightning.downloadOrthophoto(taskId)
 
+        // Extract geo bounds from the GeoTIFF before uploading
+        try {
+          console.log('Extracting bounds from GeoTIFF...')
+          const tiff = await fromArrayBuffer(orthophotoBuffer)
+          const image = await tiff.getImage()
+          const bbox = image.getBoundingBox() // [west, south, east, north]
+          const width = image.getWidth()
+          const height = image.getHeight()
+          const [resX] = image.getResolution() // meters per pixel
+
+          updateData.bounds = {
+            west: bbox[0],
+            south: bbox[1],
+            east: bbox[2],
+            north: bbox[3],
+          }
+          updateData.image_width = width
+          updateData.image_height = height
+          // Resolution in cm/pixel (GeoTIFF resolution is in CRS units, usually meters)
+          updateData.resolution_cm = Math.abs(resX) * 100
+
+          console.log(`Bounds: ${JSON.stringify(updateData.bounds)}, ${width}x${height}, ${updateData.resolution_cm.toFixed(1)} cm/px`)
+        } catch (boundsError) {
+          console.error('Could not extract GeoTIFF bounds:', boundsError)
+          // Continue without bounds — the viewer has a fallback
+        }
+
         // Upload to Supabase Storage
         const storage = getOrthomosaicStorage()
         const { url } = await storage.uploadOrthophoto(
@@ -88,11 +116,6 @@ export async function POST(request: NextRequest) {
         // Update with Supabase URL
         updateData.orthomosaic_url = url
         updateData.completed_at = new Date().toISOString()
-
-        // Try to get bounds from the task info
-        // Note: Lightning/NodeODM doesn't provide bounds in the same way as WebODM
-        // We'll need to extract bounds from the GeoTIFF itself or estimate from images
-        // For now, we'll leave bounds as null and handle it in the frontend
 
       } catch (uploadError) {
         console.error('Error uploading to Supabase:', uploadError)
