@@ -233,21 +233,17 @@ export default function ImageUploadPage() {
       const useLightning = process.env.NEXT_PUBLIC_USE_LIGHTNING !== 'false'
       const apiEndpoint = useLightning ? '/api/lightning/create-task' : '/api/webodm/create-task'
 
-      // Build form data with images for Lightning
-      const formData = new FormData()
-      formData.append('name', processingType === '3d'
-        ? `3D Height Map - ${new Date().toLocaleDateString()}`
-        : `Orthomosaic - ${new Date().toLocaleDateString()}`)
-      formData.append('quality', processingType === '3d' ? 'height-mapping' : 'balanced')
-
-      // Add images from the current upload
-      for (const img of images) {
-        formData.append('images', img.file)
-      }
-
+      // Images are already in Supabase Storage — just send flight ID as JSON
       const response = await fetch(apiEndpoint, {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          flightId: selectedFlight,
+          name: processingType === '3d'
+            ? `3D Height Map - ${new Date().toLocaleDateString()}`
+            : `Orthomosaic - ${new Date().toLocaleDateString()}`,
+          quality: processingType === '3d' ? 'height-mapping' : 'balanced',
+        }),
       })
 
       const data = await response.json()
