@@ -863,7 +863,45 @@ export default function OrthomosaicViewerPage() {
         </Card>
       )}
 
-      {/* Main Content */}
+      {/* Completed but no bounds — show download/image view */}
+      {selectedOrthomosaic && selectedOrthomosaic.status === 'completed' && !selectedOrthomosaic.bounds && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Orthomosaic Ready</CardTitle>
+            <CardDescription>
+              Processing is complete. Geo bounds were not extracted so the map overlay is unavailable,
+              but you can view or download the orthophoto directly.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {selectedOrthomosaic.orthomosaic_url && (
+              <>
+                <div className="rounded-lg overflow-hidden border bg-gray-100 max-h-[600px]">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={selectedOrthomosaic.orthomosaic_url}
+                    alt={selectedOrthomosaic.name}
+                    className="w-full h-auto object-contain max-h-[600px]"
+                  />
+                </div>
+                <a
+                  href={selectedOrthomosaic.orthomosaic_url}
+                  download
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <Button>
+                    <Download className="h-4 w-4 mr-2" />
+                    Download Orthophoto
+                  </Button>
+                </a>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Main Content — map view (requires bounds) */}
       {selectedOrthomosaic && selectedOrthomosaic.status === 'completed' && selectedOrthomosaic.bounds && (
         <>
           {/* Controls */}
