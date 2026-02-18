@@ -313,21 +313,73 @@ export default function OrthomosaicViewerPage() {
     loadArucoData()
   }, [selectedOrthomosaic, isDemo, user])
 
-  // Poll for processing status if orthomosaic is processing
+  // Poll for processing status if orthomosaic is processing/syncing
   useEffect(() => {
-    if (!selectedOrthomosaic || selectedOrthomosaic.status !== 'processing') return
+    if (!selectedOrthomosaic) return
+    if (selectedOrthomosaic.status !== 'processing' && selectedOrthomosaic.status !== 'syncing') return
     if (isDemo) return
+
+    let syncing = false
 
     const pollStatus = async () => {
       try {
+        // If already syncing (downloading orthophoto), just check DB for completion
+        if (selectedOrthomosaic.status === 'syncing' || syncing) {
+          const { data: updated } = await supabase
+            .from('orthomosaics')
+            .select('*')
+            .eq('id', selectedOrthomosaic.id)
+            .single()
+          if (updated && updated.status === 'completed') {
+            setSelectedOrthomosaic(updated)
+            setOrthomosaics(prev =>
+              prev.map(o => o.id === updated.id ? updated : o)
+            )
+          }
+          return
+        }
+
         const response = await fetch(
           `/api/webodm/task-status?orthomosaicId=${selectedOrthomosaic.id}`
         )
         const data = await response.json()
         setProcessingStatus(data)
 
-        if (data.isComplete) {
-          // Reload orthomosaic to get updated data
+        if (data.needsSync && !syncing) {
+          // Lightning task is done — trigger the sync route to download the orthophoto.
+          // This runs in the background; we keep polling the DB until status flips.
+          syncing = true
+          setProcessingStatus((prev: any) => ({
+            ...prev,
+            statusLabel: 'Downloading orthophoto...',
+          }))
+
+          fetch('/api/lightning/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+          })
+            .then(async (syncRes) => {
+              const syncData = await syncRes.json()
+              if (syncData.success) {
+                // Reload from DB
+                const { data: updated } = await supabase
+                  .from('orthomosaics')
+                  .select('*')
+                  .eq('id', selectedOrthomosaic.id)
+                  .single()
+                if (updated) {
+                  setSelectedOrthomosaic(updated)
+                  setOrthomosaics(prev =>
+                    prev.map(o => o.id === updated.id ? updated : o)
+                  )
+                }
+              }
+            })
+            .catch((err) => console.error('Sync error:', err))
+            .finally(() => { syncing = false })
+        } else if (data.isComplete && !data.needsSync) {
+          // Non-Lightning task completed directly
           const { data: updated } = await supabase
             .from('orthomosaics')
             .select('*')
@@ -346,7 +398,7 @@ export default function OrthomosaicViewerPage() {
     }
 
     pollStatus()
-    const interval = setInterval(pollStatus, 5000) // Poll every 5 seconds
+    const interval = setInterval(pollStatus, 5000)
     return () => clearInterval(interval)
   }, [selectedOrthomosaic, isDemo])
 
@@ -838,7 +890,7 @@ export default function OrthomosaicViewerPage() {
       )}
 
       {/* Processing Status */}
-      {selectedOrthomosaic?.status === 'processing' && processingStatus && (
+      {(selectedOrthomosaic?.status === 'processing' || selectedOrthomosaic?.status === 'syncing') && processingStatus && (
         <Card className="border-blue-200 bg-blue-50">
           <CardContent className="py-4">
             <div className="flex items-center gap-4">

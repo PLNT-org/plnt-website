@@ -74,42 +74,15 @@ export async function GET(request: NextRequest) {
       const isComplete = isLightningTaskComplete(taskResult.status)
       const isFailed = isLightningTaskFailed(taskResult.status)
 
-      // If task completed, download and upload to Supabase Storage
+      // If task completed, DON'T download inline (too slow for a polling GET).
+      // Just return needsSync=true so the frontend can trigger /api/lightning/sync
+      // which has maxDuration=300 to handle the large file download.
       if (isComplete && orthomosaicId) {
-        try {
-          // Download the orthophoto from Lightning
-          const orthophotoBuffer = await lightning.downloadOrthophoto(webodmTaskId)
-
-          // Upload to Supabase Storage
-          const storage = getOrthomosaicStorage()
-          const { url } = await storage.uploadOrthophoto(
-            orthomosaicId,
-            orthophotoBuffer,
-            'orthophoto.tif'
-          )
-
-          // Update orthomosaic record with Supabase URL
-          await supabaseAdmin
-            .from('orthomosaics')
-            .update({
-              status: 'completed',
-              orthomosaic_url: url,
-              completed_at: new Date().toISOString(),
-            })
-            .eq('id', orthomosaicId)
-        } catch (uploadError) {
-          console.error('Error uploading to Supabase:', uploadError)
-          // Still mark as complete but note the error
-          await supabaseAdmin
-            .from('orthomosaics')
-            .update({
-              status: 'completed',
-              orthomosaic_url: lightning.getOrthophotoUrl(webodmTaskId),
-              error_message: `Upload to storage failed: ${uploadError instanceof Error ? uploadError.message : 'Unknown error'}`,
-              completed_at: new Date().toISOString(),
-            })
-            .eq('id', orthomosaicId)
-        }
+        // Quick DB update to note Lightning is done
+        await supabaseAdmin
+          .from('orthomosaics')
+          .update({ status: 'syncing' })
+          .eq('id', orthomosaicId)
       }
 
       // If task failed, update database
@@ -132,6 +105,7 @@ export async function GET(request: NextRequest) {
         imagesCount: taskResult.imagesCount,
         isComplete,
         isFailed,
+        needsSync: isComplete,
         error: taskResult.error,
         backend: 'lightning',
       })

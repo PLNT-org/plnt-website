@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+
+// Allow up to 5 minutes for large orthophoto downloads
+export const maxDuration = 300
 import {
   LightningClient,
   LightningStatusCode,
