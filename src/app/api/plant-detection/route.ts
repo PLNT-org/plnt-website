@@ -16,10 +16,13 @@ const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY
 const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID // e.g., "my-first-project-8qm2b/15"
 const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
 
-// Tiling configuration
-const TILE_SIZE = 640        // Model input size
-const TILE_OVERLAP = 0.2     // 20% overlap between tiles
-const NMS_IOU_THRESHOLD = 0.05 // IoU threshold for removing duplicates
+// Tiling configuration — matches Roboflow training pipeline
+// Training images were 4000x2250, tiled 8x8 → 500x281 crops → resized to 640 wide → padded to 640x640
+const TRAINING_TILE_WIDTH = 500   // 4000 / 8
+const TRAINING_TILE_HEIGHT = 281  // Math.round(2250 / 8)
+const MODEL_INPUT_SIZE = 640      // YOLOv11 input size
+const TILE_OVERLAP = 0.1          // 10% overlap so NMS can catch edge plants
+const NMS_IOU_THRESHOLD = 0.05    // IoU threshold for removing duplicates
 const DEFAULT_CONFIDENCE = 0.2
 const JPEG_QUALITY = 90
 
@@ -217,14 +220,16 @@ export async function POST(request: NextRequest) {
         const imageWidth = metadata.width!
         const imageHeight = metadata.height!
 
-        // Calculate tile grid
-        const stride = Math.floor(TILE_SIZE * (1 - TILE_OVERLAP))
-        const tilesX = Math.ceil((imageWidth - TILE_SIZE) / stride) + 1
-        const tilesY = Math.ceil((imageHeight - TILE_SIZE) / stride) + 1
+        // Calculate tile grid — same pixel density as training (500x281 crops)
+        const strideX = Math.floor(TRAINING_TILE_WIDTH * (1 - TILE_OVERLAP))
+        const strideY = Math.floor(TRAINING_TILE_HEIGHT * (1 - TILE_OVERLAP))
+        const tilesX = Math.max(1, Math.ceil((imageWidth - TRAINING_TILE_WIDTH) / strideX) + 1)
+        const tilesY = Math.max(1, Math.ceil((imageHeight - TRAINING_TILE_HEIGHT) / strideY) + 1)
         const totalTiles = tilesX * tilesY
 
-        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${totalTiles} tiles (stride ${stride}px)`)
-        console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, confidence: ${confidence_threshold}`)
+        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${tilesX}x${tilesY}=${totalTiles} tiles`)
+        console.log(`[Detection] Tile crop: ${TRAINING_TILE_WIDTH}x${TRAINING_TILE_HEIGHT}px, stride: ${strideX}x${strideY}px, overlap: ${TILE_OVERLAP * 100}%`)
+        console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, input: ${MODEL_INPUT_SIZE}x${MODEL_INPUT_SIZE}, confidence: ${confidence_threshold}`)
         console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
 
         send({
@@ -241,26 +246,34 @@ export async function POST(request: NextRequest) {
 
         for (let ty = 0; ty < tilesY; ty++) {
           for (let tx = 0; tx < tilesX; tx++) {
-            const tileX = Math.min(tx * stride, imageWidth - TILE_SIZE)
-            const tileY = Math.min(ty * stride, imageHeight - TILE_SIZE)
+            // Calculate crop position (clamp last tiles to stay within image)
+            const cropLeft = Math.max(0, Math.min(tx * strideX, imageWidth - TRAINING_TILE_WIDTH))
+            const cropTop = Math.max(0, Math.min(ty * strideY, imageHeight - TRAINING_TILE_HEIGHT))
+            const cropWidth = Math.min(TRAINING_TILE_WIDTH, imageWidth - cropLeft)
+            const cropHeight = Math.min(TRAINING_TILE_HEIGHT, imageHeight - cropTop)
 
-            const cropWidth = Math.min(TILE_SIZE, imageWidth - Math.max(0, tileX))
-            const cropHeight = Math.min(TILE_SIZE, imageHeight - Math.max(0, tileY))
-
-            // Extract tile and resize to model input size
+            // Extract tile crop and resize to 640x640 matching training pipeline:
+            // 500x281 → resize to 640 wide (maintaining aspect ratio) → pad to 640x640 with black
             const tileBuffer = await sharp(imageBuffer)
               .extract({
-                left: Math.max(0, tileX),
-                top: Math.max(0, tileY),
+                left: cropLeft,
+                top: cropTop,
                 width: cropWidth,
                 height: cropHeight,
               })
-              .resize(TILE_SIZE, TILE_SIZE, {
+              .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
                 fit: 'contain',
-                background: { r: 0, g: 0, b: 0 }
+                background: { r: 0, g: 0, b: 0 },
               })
               .jpeg({ quality: JPEG_QUALITY })
               .toBuffer()
+
+            // Calculate coordinate mapping (account for resize + padding)
+            const resizeScale = Math.min(MODEL_INPUT_SIZE / cropWidth, MODEL_INPUT_SIZE / cropHeight)
+            const resizedW = cropWidth * resizeScale
+            const resizedH = cropHeight * resizeScale
+            const padLeft = (MODEL_INPUT_SIZE - resizedW) / 2
+            const padTop = (MODEL_INPUT_SIZE - resizedH) / 2
 
             try {
               const predictions = await runTileInference(
@@ -277,20 +290,24 @@ export async function POST(request: NextRequest) {
                 console.log(`[Detection] Tile (${tx}, ${ty}): ${predictions.length} predictions - classes: ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
               }
 
-              // Convert tile coordinates to full image coordinates
-              const scaleX = cropWidth / TILE_SIZE
-              const scaleY = cropHeight / TILE_SIZE
-
               for (const pred of predictions) {
+                // Skip predictions in the padding area
+                if (pred.x < padLeft || pred.x > padLeft + resizedW) continue
+                if (pred.y < padTop || pred.y > padTop + resizedH) continue
+
                 // Filter by class
                 const predClass = (pred.class || 'plant').toLowerCase()
                 if (!allowedClasses.includes(predClass)) continue
 
+                // Map from 640x640 model space → crop space → full image space
+                const cropX = (pred.x - padLeft) / resizeScale
+                const cropY = (pred.y - padTop) / resizeScale
+
                 allDetections.push({
-                  x: tileX + pred.x * scaleX,
-                  y: tileY + pred.y * scaleY,
-                  width: pred.width * scaleX,
-                  height: pred.height * scaleY,
+                  x: cropLeft + cropX,
+                  y: cropTop + cropY,
+                  width: pred.width / resizeScale,
+                  height: pred.height / resizeScale,
                   confidence: pred.confidence,
                   class: pred.class,
                 })
