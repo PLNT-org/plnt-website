@@ -166,7 +166,7 @@ export default function OrthomosaicViewerPage() {
     classCounts: Record<string, number>
     averageConfidence: number
   } | null>(null)
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.15)
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.5)
   const [detectionProgress, setDetectionProgress] = useState<{
     processedTiles: number
     totalTiles: number
@@ -583,7 +583,7 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
-  // Handle plant detection with SAM3 (reads streaming NDJSON progress)
+  // Handle plant detection with YOLOv11 (reads streaming NDJSON progress)
   const handlePlantDetection = async () => {
     if (!selectedOrthomosaic || isDemo) return
 
@@ -1290,7 +1290,7 @@ export default function OrthomosaicViewerPage() {
                         individual plant
                       </p>
                       <p className="text-xs text-gray-500 mt-1">
-                        SAM3 concept segmentation — text-prompted plant detection
+                        YOLOv11 object detection — custom-trained plant model
                       </p>
                     </div>
                   </div>
