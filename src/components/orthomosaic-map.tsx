@@ -184,6 +184,8 @@ export default function OrthomosaicMap({
       // URL format: .../api/projects/{projectId}/tasks/{taskId}/download/orthophoto.tif
       const urlMatch = orthomosaic.orthomosaic_url.match(/projects\/(\d+)\/tasks\/([^/]+)/)
 
+      const orthoUrl = orthomosaic.orthomosaic_url!
+
       if (urlMatch) {
         const [, projectId, taskId] = urlMatch
         const tilesUrl = `/api/orthomosaic/tiles/${projectId}/${taskId}/{z}/{x}/{y}`
@@ -196,18 +198,10 @@ export default function OrthomosaicMap({
         })
         orthophotoLayer.addTo(map)
         orthophotoLayerRef.current = orthophotoLayer
-      } else if (url.startsWith('/')) {
-        // Demo mode with local image - use imageOverlay
-        const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
-        const imageLayer = L.imageOverlay(url, bounds, {
-          opacity: 0.9,
-        }) as any
-        imageLayer.addTo(map)
-        orthophotoLayerRef.current = imageLayer
       } else {
-        // Generic URL (could be any image URL) - try as image overlay
+        // Direct image overlay (Supabase Storage URL, demo image, etc.)
         const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
-        const imageLayer = L.imageOverlay(url, bounds, {
+        const imageLayer = L.imageOverlay(orthoUrl, bounds, {
           opacity: 0.9,
         }) as any
         imageLayer.addTo(map)
