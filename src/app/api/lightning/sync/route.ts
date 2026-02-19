@@ -104,12 +104,20 @@ export async function POST(request: NextRequest) {
           // Continue without bounds — the viewer has a fallback
         }
 
-        // Upload to Supabase Storage
+        // Convert GeoTIFF to JPEG for web display (browsers can't render .tif)
+        console.log('Converting GeoTIFF to JPEG for web display...')
+        const sharp = (await import('sharp')).default
+        const jpegBuffer = await sharp(Buffer.from(orthophotoBuffer))
+          .jpeg({ quality: 90 })
+          .toBuffer()
+        console.log(`Converted: ${(orthophotoBuffer.byteLength / 1024 / 1024).toFixed(1)} MB TIF → ${(jpegBuffer.byteLength / 1024 / 1024).toFixed(1)} MB JPEG`)
+
+        // Upload JPEG to Supabase Storage
         const storage = getOrthomosaicStorage()
         const { url } = await storage.uploadOrthophoto(
           orthomosaicId,
-          orthophotoBuffer,
-          'orthophoto.tif'
+          jpegBuffer,
+          'orthophoto.jpg'
         )
 
         console.log(`Uploaded orthophoto to: ${url}`)

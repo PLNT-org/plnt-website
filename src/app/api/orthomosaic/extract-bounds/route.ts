@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { fromArrayBuffer } from 'geotiff'
 import { convertBoundsToWGS84 } from '@/lib/geo/convert-bounds'
+import { getOrthomosaicStorage } from '@/lib/supabase/storage'
 
 export const maxDuration = 300
 
@@ -82,6 +83,31 @@ export async function POST(request: NextRequest) {
 
     console.log(`WGS84 bounds: ${JSON.stringify(bounds)}, ${width}x${height}, ${resolution_cm.toFixed(1)} cm/px`)
 
+    // If the stored file is a .tif, convert to JPEG and re-upload
+    // (browsers can't display GeoTIFF)
+    let newUrl: string | undefined
+    if (ortho.orthomosaic_url.endsWith('.tif')) {
+      try {
+        console.log('Converting GeoTIFF to JPEG for web display...')
+        const sharp = (await import('sharp')).default
+        const jpegBuffer = await sharp(Buffer.from(buffer))
+          .jpeg({ quality: 90 })
+          .toBuffer()
+        console.log(`Converted: ${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB TIF → ${(jpegBuffer.byteLength / 1024 / 1024).toFixed(1)} MB JPEG`)
+
+        const storage = getOrthomosaicStorage()
+        const { url } = await storage.uploadOrthophoto(
+          orthomosaicId,
+          jpegBuffer,
+          'orthophoto.jpg'
+        )
+        newUrl = url
+        console.log(`Uploaded JPEG to: ${url}`)
+      } catch (convertError) {
+        console.error('JPEG conversion failed, keeping .tif URL:', convertError)
+      }
+    }
+
     // Update the database record
     const { error: updateError } = await supabaseAdmin
       .from('orthomosaics')
@@ -90,6 +116,7 @@ export async function POST(request: NextRequest) {
         image_width: width,
         image_height: height,
         resolution_cm,
+        ...(newUrl ? { orthomosaic_url: newUrl } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq('id', orthomosaicId)
