@@ -199,8 +199,9 @@ export async function POST(request: NextRequest) {
         const t0 = Date.now()
         send({ type: 'status', message: 'Downloading orthomosaic image...' })
 
-        // Download orthomosaic image
-        const orthoUrl = orthomosaic.orthomosaic_url
+        // Prefer original TIF (full quality) over WebP (lossy) for detection
+        const orthoUrl = orthomosaic.original_tif_url || orthomosaic.orthomosaic_url
+        console.log(`[Detection] Using ${orthomosaic.original_tif_url ? 'original TIF' : 'WebP'}: ${orthoUrl}`)
         const isWebODMUrl = orthoUrl.includes('/api/projects/') || orthoUrl.includes('localhost:8000') || orthoUrl.includes('webodm')
         const imageResponse = isWebODMUrl
           ? await fetchWithWebODMAuth(orthoUrl)

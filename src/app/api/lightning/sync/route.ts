@@ -104,7 +104,22 @@ export async function POST(request: NextRequest) {
           // Continue without bounds — the viewer has a fallback
         }
 
-        // Convert GeoTIFF to WebP with transparency (black no-data → transparent)
+        // Upload original GeoTIFF for full-quality plant detection
+        console.log('Uploading original GeoTIFF for detection...')
+        const storage = getOrthomosaicStorage()
+        try {
+          const { url: tifUrl } = await storage.uploadOrthophoto(
+            orthomosaicId,
+            orthophotoBuffer,
+            'orthophoto.tif'
+          )
+          updateData.original_tif_url = tifUrl
+          console.log(`Uploaded original TIF: ${tifUrl} (${(orthophotoBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`)
+        } catch (tifUploadError) {
+          console.error('Failed to upload original TIF (non-fatal):', tifUploadError)
+        }
+
+        // Convert GeoTIFF to WebP with transparency (black no-data → transparent) for map display
         console.log('Converting GeoTIFF to WebP with transparency...')
         const sharp = (await import('sharp')).default
         const img = sharp(Buffer.from(orthophotoBuffer))
@@ -138,8 +153,7 @@ export async function POST(request: NextRequest) {
 
         console.log(`Converted: ${(orthophotoBuffer.byteLength / 1024 / 1024).toFixed(1)} MB TIF → ${(webpBuffer.byteLength / 1024 / 1024).toFixed(1)} MB WebP`)
 
-        // Upload WebP to Supabase Storage
-        const storage = getOrthomosaicStorage()
+        // Upload WebP to Supabase Storage (for map display)
         const { url } = await storage.uploadOrthophoto(
           orthomosaicId,
           webpBuffer,
