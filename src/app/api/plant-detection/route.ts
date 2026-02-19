@@ -214,13 +214,21 @@ export async function POST(request: NextRequest) {
           controller.close()
           return
         }
-        const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
-        console.log(`[Detection] Download: ${((Date.now() - t0) / 1000).toFixed(1)}s, ${(imageBuffer.length / 1024 / 1024).toFixed(1)}MB`)
+        const compressedBuffer = Buffer.from(await imageResponse.arrayBuffer())
+        console.log(`[Detection] Download: ${((Date.now() - t0) / 1000).toFixed(1)}s, ${(compressedBuffer.length / 1024 / 1024).toFixed(1)}MB`)
 
-        // Get image dimensions
-        const metadata = await sharp(imageBuffer).metadata()
-        const imageWidth = metadata.width!
-        const imageHeight = metadata.height!
+        // Decode image to raw pixels ONCE — avoids re-decoding for every tile
+        send({ type: 'status', message: 'Decoding image...' })
+        const t1 = Date.now()
+        const { data: rawPixels, info: rawInfo } = await sharp(compressedBuffer)
+          .ensureAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true })
+
+        const imageWidth = rawInfo.width
+        const imageHeight = rawInfo.height
+        const channels = rawInfo.channels
+        console.log(`[Detection] Decoded to raw: ${((Date.now() - t1) / 1000).toFixed(1)}s, ${imageWidth}x${imageHeight}x${channels}, ${(rawPixels.length / 1024 / 1024).toFixed(1)}MB`)
 
         // Calculate tile grid — same pixel density as training (500x281 crops)
         const strideX = Math.floor(TRAINING_TILE_WIDTH * (1 - TILE_OVERLAP))
@@ -234,33 +242,15 @@ export async function POST(request: NextRequest) {
         console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, input: ${MODEL_INPUT_SIZE}x${MODEL_INPUT_SIZE}, confidence: ${confidence_threshold}`)
         console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
 
-        // --- Phase 1: Pre-extract all tile buffers ---
-        const t1 = Date.now()
-
-        interface TileData {
-          tx: number
-          ty: number
-          cropLeft: number
-          cropTop: number
-          cropWidth: number
-          cropHeight: number
-          buffer: Buffer
-          resizeScale: number
-          resizedW: number
-          resizedH: number
-          padLeft: number
-          padTop: number
+        // Build tile job list
+        interface TileJob {
+          tx: number; ty: number
+          cropLeft: number; cropTop: number
+          cropWidth: number; cropHeight: number
+          resizeScale: number; resizedW: number; resizedH: number
+          padLeft: number; padTop: number
         }
-
-        const tiles: TileData[] = []
-        let extracted = 0
-        send({
-          type: 'progress',
-          processedTiles: 0,
-          totalTiles,
-          detectionsCount: 0,
-          phase: 'extracting',
-        })
+        const tileJobs: TileJob[] = []
 
         for (let ty = 0; ty < tilesY; ty++) {
           for (let tx = 0; tx < tilesX; tx++) {
@@ -268,46 +258,17 @@ export async function POST(request: NextRequest) {
             const cropTop = Math.max(0, Math.min(ty * strideY, imageHeight - TRAINING_TILE_HEIGHT))
             const cropWidth = Math.min(TRAINING_TILE_WIDTH, imageWidth - cropLeft)
             const cropHeight = Math.min(TRAINING_TILE_HEIGHT, imageHeight - cropTop)
-
-            const buffer = await sharp(imageBuffer)
-              .extract({ left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight })
-              .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
-                fit: 'contain',
-                background: { r: 0, g: 0, b: 0 },
-              })
-              .jpeg({ quality: JPEG_QUALITY })
-              .toBuffer()
-
             const resizeScale = Math.min(MODEL_INPUT_SIZE / cropWidth, MODEL_INPUT_SIZE / cropHeight)
             const resizedW = cropWidth * resizeScale
             const resizedH = cropHeight * resizeScale
-
-            tiles.push({
-              tx, ty, cropLeft, cropTop, cropWidth, cropHeight, buffer,
+            tileJobs.push({
+              tx, ty, cropLeft, cropTop, cropWidth, cropHeight,
               resizeScale, resizedW, resizedH,
               padLeft: (MODEL_INPUT_SIZE - resizedW) / 2,
               padTop: (MODEL_INPUT_SIZE - resizedH) / 2,
             })
-
-            extracted++
-            // Send progress every 10 tiles during extraction
-            if (extracted % 10 === 0 || extracted === totalTiles) {
-              send({
-                type: 'progress',
-                processedTiles: extracted,
-                totalTiles,
-                detectionsCount: 0,
-                phase: 'extracting',
-              })
-            }
           }
         }
-
-        console.log(`[Detection] Tile extraction: ${((Date.now() - t1) / 1000).toFixed(1)}s for ${tiles.length} tiles`)
-
-        // Free the original image buffer to reduce memory pressure
-        // @ts-ignore - intentional nullification
-        // imageBuffer is still referenced but we hint GC
 
         send({
           type: 'progress',
@@ -317,42 +278,59 @@ export async function POST(request: NextRequest) {
           phase: 'tiling',
         })
 
-        // --- Phase 2: Run inference in parallel batches ---
+        // Process tiles: extract from raw pixels + inference in parallel batches
         const t2 = Date.now()
         const allDetections: Detection[] = []
         let processedTiles = 0
         let loggedFirst = false
 
-        for (let i = 0; i < tiles.length; i += CONCURRENT_TILES) {
-          const batch = tiles.slice(i, i + CONCURRENT_TILES)
+        for (let i = 0; i < tileJobs.length; i += CONCURRENT_TILES) {
+          const batch = tileJobs.slice(i, i + CONCURRENT_TILES)
 
           const batchResults = await Promise.allSettled(
-            batch.map(async (tile) => {
+            batch.map(async (job) => {
+              // Extract from raw pixels (fast — no image decode needed)
+              const tileBuffer = await sharp(rawPixels, {
+                raw: { width: imageWidth, height: imageHeight, channels },
+              })
+                .extract({
+                  left: job.cropLeft,
+                  top: job.cropTop,
+                  width: job.cropWidth,
+                  height: job.cropHeight,
+                })
+                .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
+                  fit: 'contain',
+                  background: { r: 0, g: 0, b: 0, alpha: 1 },
+                })
+                .jpeg({ quality: JPEG_QUALITY })
+                .toBuffer()
+
               const predictions = await runTileInference(
-                tile.buffer,
+                tileBuffer,
                 confidence_threshold as number,
               )
 
               if (predictions.length > 0) {
-                console.log(`[Detection] Tile (${tile.tx}, ${tile.ty}): ${predictions.length} preds - ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
+                console.log(`[Detection] Tile (${job.tx}, ${job.ty}): ${predictions.length} preds - ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
               }
 
               const detections: Detection[] = []
               for (const pred of predictions) {
-                if (pred.x < tile.padLeft || pred.x > tile.padLeft + tile.resizedW) continue
-                if (pred.y < tile.padTop || pred.y > tile.padTop + tile.resizedH) continue
+                if (pred.x < job.padLeft || pred.x > job.padLeft + job.resizedW) continue
+                if (pred.y < job.padTop || pred.y > job.padTop + job.resizedH) continue
 
                 const predClass = (pred.class || 'plant').toLowerCase()
                 if (!allowedClasses.includes(predClass)) continue
 
-                const cropX = (pred.x - tile.padLeft) / tile.resizeScale
-                const cropY = (pred.y - tile.padTop) / tile.resizeScale
+                const cropX = (pred.x - job.padLeft) / job.resizeScale
+                const cropY = (pred.y - job.padTop) / job.resizeScale
 
                 detections.push({
-                  x: tile.cropLeft + cropX,
-                  y: tile.cropTop + cropY,
-                  width: pred.width / tile.resizeScale,
-                  height: pred.height / tile.resizeScale,
+                  x: job.cropLeft + cropX,
+                  y: job.cropTop + cropY,
+                  width: pred.width / job.resizeScale,
+                  height: pred.height / job.resizeScale,
                   confidence: pred.confidence,
                   class: pred.class,
                 })
