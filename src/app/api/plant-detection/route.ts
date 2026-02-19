@@ -1,8 +1,9 @@
-'use server'
-
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import sharp from 'sharp'
+
+// Allow up to 5 minutes for large orthomosaics
+export const maxDuration = 300
 import { fetchWithWebODMAuth } from '@/lib/webodm/token-manager'
 
 // Initialize Supabase with service role for server-side operations
@@ -25,6 +26,7 @@ const TILE_OVERLAP = 0.1          // 10% overlap so NMS can catch edge plants
 const NMS_IOU_THRESHOLD = 0.05    // IoU threshold for removing duplicates
 const DEFAULT_CONFIDENCE = 0.2
 const JPEG_QUALITY = 90
+const CONCURRENT_TILES = 10   // Process 10 tiles in parallel to stay within timeout
 
 interface RoboflowPrediction {
   x: number           // center x in pixels (relative to tile)
@@ -240,56 +242,73 @@ export async function POST(request: NextRequest) {
           phase: 'tiling',
         })
 
-        // Process each tile
-        const allDetections: Detection[] = []
-        let processedTiles = 0
+        // Build list of all tile jobs
+        interface TileJob {
+          tx: number
+          ty: number
+          cropLeft: number
+          cropTop: number
+          cropWidth: number
+          cropHeight: number
+        }
+        const tileJobs: TileJob[] = []
 
         for (let ty = 0; ty < tilesY; ty++) {
           for (let tx = 0; tx < tilesX; tx++) {
-            // Calculate crop position (clamp last tiles to stay within image)
             const cropLeft = Math.max(0, Math.min(tx * strideX, imageWidth - TRAINING_TILE_WIDTH))
             const cropTop = Math.max(0, Math.min(ty * strideY, imageHeight - TRAINING_TILE_HEIGHT))
             const cropWidth = Math.min(TRAINING_TILE_WIDTH, imageWidth - cropLeft)
             const cropHeight = Math.min(TRAINING_TILE_HEIGHT, imageHeight - cropTop)
+            tileJobs.push({ tx, ty, cropLeft, cropTop, cropWidth, cropHeight })
+          }
+        }
 
-            // Extract tile crop and resize to 640x640 matching training pipeline:
-            // 500x281 → resize to 640 wide (maintaining aspect ratio) → pad to 640x640 with black
-            const tileBuffer = await sharp(imageBuffer)
-              .extract({
-                left: cropLeft,
-                top: cropTop,
-                width: cropWidth,
-                height: cropHeight,
-              })
-              .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
-                fit: 'contain',
-                background: { r: 0, g: 0, b: 0 },
-              })
-              .jpeg({ quality: JPEG_QUALITY })
-              .toBuffer()
+        // Process tiles in parallel batches of CONCURRENT_TILES
+        const allDetections: Detection[] = []
+        let processedTiles = 0
+        let loggedFirst = false
 
-            // Calculate coordinate mapping (account for resize + padding)
-            const resizeScale = Math.min(MODEL_INPUT_SIZE / cropWidth, MODEL_INPUT_SIZE / cropHeight)
-            const resizedW = cropWidth * resizeScale
-            const resizedH = cropHeight * resizeScale
-            const padLeft = (MODEL_INPUT_SIZE - resizedW) / 2
-            const padTop = (MODEL_INPUT_SIZE - resizedH) / 2
+        for (let i = 0; i < tileJobs.length; i += CONCURRENT_TILES) {
+          const batch = tileJobs.slice(i, i + CONCURRENT_TILES)
 
-            try {
+          const batchResults = await Promise.allSettled(
+            batch.map(async (job) => {
+              const { tx, ty, cropLeft, cropTop, cropWidth, cropHeight } = job
+
+              // Extract tile crop and resize to 640x640 matching training pipeline:
+              // 500x281 → resize to 640 wide (maintaining aspect ratio) → pad to 640x640 with black
+              const tileBuffer = await sharp(imageBuffer)
+                .extract({
+                  left: cropLeft,
+                  top: cropTop,
+                  width: cropWidth,
+                  height: cropHeight,
+                })
+                .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
+                  fit: 'contain',
+                  background: { r: 0, g: 0, b: 0 },
+                })
+                .jpeg({ quality: JPEG_QUALITY })
+                .toBuffer()
+
+              // Calculate coordinate mapping (account for resize + padding)
+              const resizeScale = Math.min(MODEL_INPUT_SIZE / cropWidth, MODEL_INPUT_SIZE / cropHeight)
+              const resizedW = cropWidth * resizeScale
+              const resizedH = cropHeight * resizeScale
+              const padLeft = (MODEL_INPUT_SIZE - resizedW) / 2
+              const padTop = (MODEL_INPUT_SIZE - resizedH) / 2
+
               const predictions = await runTileInference(
                 tileBuffer,
                 confidence_threshold as number,
               )
 
-              // Log first tile's predictions to debug class names
-              if (processedTiles === 0 && predictions.length > 0) {
-                console.log('[Detection] Sample predictions from first tile:', predictions.slice(0, 3).map(p => ({ class: p.class, confidence: p.confidence })))
-              }
-
               if (predictions.length > 0) {
                 console.log(`[Detection] Tile (${tx}, ${ty}): ${predictions.length} predictions - classes: ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
               }
 
+              // Map predictions to full image coordinates
+              const detections: Detection[] = []
               for (const pred of predictions) {
                 // Skip predictions in the padding area
                 if (pred.x < padLeft || pred.x > padLeft + resizedW) continue
@@ -303,7 +322,7 @@ export async function POST(request: NextRequest) {
                 const cropX = (pred.x - padLeft) / resizeScale
                 const cropY = (pred.y - padTop) / resizeScale
 
-                allDetections.push({
+                detections.push({
                   x: cropLeft + cropX,
                   y: cropTop + cropY,
                   width: pred.width / resizeScale,
@@ -312,21 +331,34 @@ export async function POST(request: NextRequest) {
                   class: pred.class,
                 })
               }
-            } catch (err) {
-              console.error(`[Detection] Error processing tile (${tx}, ${ty}):`, err)
-            }
 
-            processedTiles++
-
-            // Send progress update after every tile
-            send({
-              type: 'progress',
-              processedTiles,
-              totalTiles,
-              detectionsCount: allDetections.length,
-              phase: 'tiling',
+              return { predictions, detections }
             })
+          )
+
+          // Collect results from batch
+          for (const result of batchResults) {
+            if (result.status === 'fulfilled') {
+              if (!loggedFirst && result.value.predictions.length > 0) {
+                console.log('[Detection] Sample predictions from first tile with results:', result.value.predictions.slice(0, 3).map(p => ({ class: p.class, confidence: p.confidence })))
+                loggedFirst = true
+              }
+              allDetections.push(...result.value.detections)
+            } else {
+              console.error('[Detection] Tile error:', result.reason)
+            }
           }
+
+          processedTiles += batch.length
+
+          // Send progress update after each batch
+          send({
+            type: 'progress',
+            processedTiles,
+            totalTiles,
+            detectionsCount: allDetections.length,
+            phase: 'tiling',
+          })
         }
 
         // NMS phase
