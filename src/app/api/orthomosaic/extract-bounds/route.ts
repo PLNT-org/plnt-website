@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { fromArrayBuffer } from 'geotiff'
 
-export const maxDuration = 120
+export const maxDuration = 300
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -10,9 +10,9 @@ const supabaseAdmin = createClient(
 )
 
 /**
- * POST: Extract geo bounds from an already-uploaded orthophoto in Supabase Storage.
- * Downloads the file via the Supabase admin SDK (handles auth properly),
- * then parses GeoTIFF metadata for bounds, dimensions, and resolution.
+ * POST: Extract geo bounds from an orthophoto.
+ * Downloads from wherever the file is hosted (Supabase Storage or Lightning),
+ * parses the GeoTIFF, and saves bounds to the database.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -46,25 +46,23 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Download the file via Supabase Storage SDK (handles auth, avoids CORS/range issues)
-    const storagePath = `${orthomosaicId}/orthophoto.tif`
-    console.log(`Downloading orthophoto via Supabase SDK: ${storagePath}`)
+    // Download from the stored URL (could be Lightning or Supabase Storage)
+    console.log(`Downloading orthophoto from: ${ortho.orthomosaic_url}`)
 
-    const { data: fileData, error: downloadError } = await supabaseAdmin.storage
-      .from('orthomosaics')
-      .download(storagePath)
-
-    if (downloadError || !fileData) {
-      console.error('Supabase download error:', downloadError)
+    const response = await fetch(ortho.orthomosaic_url)
+    if (!response.ok) {
+      console.error(`Download failed: ${response.status} ${response.statusText}`)
       return NextResponse.json(
-        { error: `Failed to download from storage: ${downloadError?.message || 'No data'}` },
+        { error: `Failed to download orthophoto: HTTP ${response.status}` },
         { status: 500 }
       )
     }
 
-    // Convert Blob to ArrayBuffer and parse
-    console.log(`Downloaded ${(fileData.size / 1024 / 1024).toFixed(1)} MB, extracting bounds...`)
-    const buffer = await fileData.arrayBuffer()
+    const contentLength = response.headers.get('content-length')
+    console.log(`Download started, size: ${contentLength ? `${(parseInt(contentLength) / 1024 / 1024).toFixed(1)} MB` : 'unknown'}`)
+
+    const buffer = await response.arrayBuffer()
+    console.log(`Downloaded ${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB, parsing GeoTIFF...`)
 
     const tiff = await fromArrayBuffer(buffer)
     const image = await tiff.getImage()
