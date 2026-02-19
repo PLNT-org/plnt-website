@@ -506,40 +506,42 @@ export default function OrthomosaicMap({
           opacity: 0.9,
           fillColor: color,
           fillOpacity: 0.1,
-          bubblingMouseEvents: true, // Allow clicks to propagate for manual labeling
+          interactive: !labelMode, // Non-interactive in label mode so clicks reach the map
         })
 
-        const popupContent = `
-          <div style="min-width: 140px;">
-            <div style="font-weight: bold; font-size: 14px; margin-bottom: 4px;">
-              ${plot.name}
+        if (!labelMode) {
+          const popupContent = `
+            <div style="min-width: 140px;">
+              <div style="font-weight: bold; font-size: 14px; margin-bottom: 4px;">
+                ${plot.name}
+              </div>
+              ${plot.species_name ? `
+                <div style="font-size: 12px; color: #666; margin-bottom: 4px;">
+                  Species: ${plot.species_name}
+                </div>
+              ` : ''}
+              ${plot.plant_count !== undefined ? `
+                <div style="font-size: 12px; color: #22c55e; font-weight: 500;">
+                  ${plot.plant_count} plants detected
+                </div>
+              ` : ''}
             </div>
-            ${plot.species_name ? `
-              <div style="font-size: 12px; color: #666; margin-bottom: 4px;">
-                Species: ${plot.species_name}
-              </div>
-            ` : ''}
-            ${plot.plant_count !== undefined ? `
-              <div style="font-size: 12px; color: #22c55e; font-weight: 500;">
-                ${plot.plant_count} plants detected
-              </div>
-            ` : ''}
-          </div>
-        `
+          `
 
-        polygon.bindPopup(popupContent)
-        polygon.bindTooltip(plot.name, {
-          permanent: false,
-          direction: 'center',
-          className: 'plot-label'
-        })
+          polygon.bindPopup(popupContent)
+          polygon.bindTooltip(plot.name, {
+            permanent: false,
+            direction: 'center',
+            className: 'plot-label'
+          })
+        }
 
         plotsLayerRef.current?.addLayer(polygon)
       } catch (e) {
         console.error('Error rendering plot boundary:', e)
       }
     })
-  }, [plots, showPlots])
+  }, [plots, showPlots, labelMode])
 
   return (
     <div className="relative">
