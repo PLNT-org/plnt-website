@@ -19,8 +19,8 @@ const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.rob
 // Tiling configuration
 const TILE_SIZE = 640        // Model input size
 const TILE_OVERLAP = 0.2     // 20% overlap between tiles
-const NMS_IOU_THRESHOLD = 0.5 // IoU threshold for removing duplicates
-const DEFAULT_CONFIDENCE = 0.5
+const NMS_IOU_THRESHOLD = 0.05 // IoU threshold for removing duplicates
+const DEFAULT_CONFIDENCE = 0.2
 const JPEG_QUALITY = 90
 
 interface RoboflowPrediction {
