@@ -312,28 +312,35 @@ export default function PlotBoundaryMap({
     const ortho = orthomosaics.find((o) => o.id === selectedOrthomosaicId)
     if (!ortho?.bounds) return
 
-    // Need webodm_project_id and webodm_task_id for tile URL
-    if (!ortho.webodm_project_id || !ortho.webodm_task_id) {
-      console.warn('Orthomosaic missing WebODM project/task IDs')
-      return
-    }
-
-    // Use our tile proxy API (handles WebODM authentication)
-    const tileUrl = `/api/orthomosaic/tiles/${ortho.webodm_project_id}/${ortho.webodm_task_id}/{z}/{x}/{y}`
-
     const bounds = L.latLngBounds(
       [ortho.bounds.south, ortho.bounds.west],
       [ortho.bounds.north, ortho.bounds.east]
     )
 
-    const tileLayer = L.tileLayer(tileUrl, {
-      bounds,
-      opacity: 0.9,
-      maxZoom: 24,
-      maxNativeZoom: 22,
-    })
-    tileLayer.addTo(mapRef.current)
-    orthomosaicLayerRef.current = tileLayer
+    // Check if this is a self-hosted WebODM ortho with tile proxy support
+    const isLocalWebODM = ortho.webodm_project_id
+      && ortho.webodm_project_id !== 'lightning'
+      && ortho.webodm_task_id
+
+    if (isLocalWebODM) {
+      // Use tile proxy API (handles WebODM authentication)
+      const tileUrl = `/api/orthomosaic/tiles/${ortho.webodm_project_id}/${ortho.webodm_task_id}/{z}/{x}/{y}`
+      const tileLayer = L.tileLayer(tileUrl, {
+        bounds,
+        opacity: 0.9,
+        maxZoom: 24,
+        maxNativeZoom: 22,
+      })
+      tileLayer.addTo(mapRef.current)
+      orthomosaicLayerRef.current = tileLayer
+    } else if (ortho.orthomosaic_url) {
+      // Direct image overlay (Lightning orthos stored in Supabase Storage)
+      const imageLayer = L.imageOverlay(ortho.orthomosaic_url, bounds, {
+        opacity: 0.9,
+      }) as any
+      imageLayer.addTo(mapRef.current)
+      orthomosaicLayerRef.current = imageLayer
+    }
 
     // Fit map to orthomosaic bounds
     mapRef.current.fitBounds(bounds, { padding: [20, 20] })

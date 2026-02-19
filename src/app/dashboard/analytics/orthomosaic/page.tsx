@@ -126,7 +126,7 @@ interface ArUcoStatus {
 }
 
 export default function OrthomosaicViewerPage() {
-  const { user, isDemo } = useAuth()
+  const { user, session, isDemo, loading: authLoading } = useAuth()
   const searchParams = useSearchParams()
   const orthomosaicId = searchParams.get('id')
 
@@ -201,6 +201,8 @@ export default function OrthomosaicViewerPage() {
   // Load orthomosaics
   useEffect(() => {
     async function loadOrthomosaics() {
+      if (authLoading) return
+
       if (isDemo) {
         setOrthomosaics([DEMO_ORTHOMOSAIC as Orthomosaic])
         setSelectedOrthomosaic(DEMO_ORTHOMOSAIC as Orthomosaic)
@@ -209,7 +211,7 @@ export default function OrthomosaicViewerPage() {
         return
       }
 
-      if (!user) {
+      if (!session?.access_token) {
         setLoading(false)
         return
       }
@@ -242,7 +244,7 @@ export default function OrthomosaicViewerPage() {
     }
 
     loadOrthomosaics()
-  }, [user, isDemo, orthomosaicId])
+  }, [session, isDemo, authLoading, orthomosaicId])
 
   // Load labels when orthomosaic is selected
   useEffect(() => {
