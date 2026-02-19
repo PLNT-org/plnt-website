@@ -176,6 +176,8 @@ export class OrthomosaicStorage {
       case 'jpg':
       case 'jpeg':
         return 'image/jpeg'
+      case 'webp':
+        return 'image/webp'
       default:
         return 'application/octet-stream'
     }

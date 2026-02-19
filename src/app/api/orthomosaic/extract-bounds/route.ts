@@ -83,28 +83,52 @@ export async function POST(request: NextRequest) {
 
     console.log(`WGS84 bounds: ${JSON.stringify(bounds)}, ${width}x${height}, ${resolution_cm.toFixed(1)} cm/px`)
 
-    // If the stored file is a .tif, convert to JPEG and re-upload
-    // (browsers can't display GeoTIFF)
+    // If the stored file is a .tif or .jpg (no transparency), convert to WebP
+    // with black no-data pixels made transparent
     let newUrl: string | undefined
-    if (ortho.orthomosaic_url.endsWith('.tif')) {
+    if (ortho.orthomosaic_url.endsWith('.tif') || ortho.orthomosaic_url.endsWith('.jpg')) {
       try {
-        console.log('Converting GeoTIFF to JPEG for web display...')
+        console.log('Converting to WebP with transparency...')
         const sharp = (await import('sharp')).default
-        const jpegBuffer = await sharp(Buffer.from(buffer))
-          .jpeg({ quality: 90 })
-          .toBuffer()
-        console.log(`Converted: ${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB TIF → ${(jpegBuffer.byteLength / 1024 / 1024).toFixed(1)} MB JPEG`)
+        const img = sharp(Buffer.from(buffer))
+        const metadata = await img.metadata()
+
+        let webpBuffer: Buffer
+        if (metadata.channels && metadata.channels >= 4) {
+          webpBuffer = await sharp(Buffer.from(buffer))
+            .webp({ quality: 85 })
+            .toBuffer()
+        } else {
+          const { data, info } = await sharp(Buffer.from(buffer))
+            .ensureAlpha()
+            .raw()
+            .toBuffer({ resolveWithObject: true })
+
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i] <= 10 && data[i + 1] <= 10 && data[i + 2] <= 10) {
+              data[i + 3] = 0
+            }
+          }
+
+          webpBuffer = await sharp(data, {
+            raw: { width: info.width, height: info.height, channels: 4 },
+          })
+            .webp({ quality: 85 })
+            .toBuffer()
+        }
+
+        console.log(`Converted: ${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB → ${(webpBuffer.byteLength / 1024 / 1024).toFixed(1)} MB WebP`)
 
         const storage = getOrthomosaicStorage()
         const { url } = await storage.uploadOrthophoto(
           orthomosaicId,
-          jpegBuffer,
-          'orthophoto.jpg'
+          webpBuffer,
+          'orthophoto.webp'
         )
         newUrl = url
-        console.log(`Uploaded JPEG to: ${url}`)
+        console.log(`Uploaded WebP to: ${url}`)
       } catch (convertError) {
-        console.error('JPEG conversion failed, keeping .tif URL:', convertError)
+        console.error('WebP conversion failed:', convertError)
       }
     }
 

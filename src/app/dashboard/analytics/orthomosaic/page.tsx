@@ -698,19 +698,20 @@ export default function OrthomosaicViewerPage() {
       Math.abs(selectedOrthomosaic.bounds.west) > 180 ||
       Math.abs(selectedOrthomosaic.bounds.south) > 90
     )
-    // Also re-extract if URL is still a .tif (needs JPEG conversion for browser display)
-    const needsJpegConversion = selectedOrthomosaic.orthomosaic_url.endsWith('.tif')
-    if (!needsBounds && !hasUtmBounds && !needsJpegConversion) return
+    // Re-extract if URL is .tif or .jpg (needs WebP with transparency)
+    const needsWebpConversion = selectedOrthomosaic.orthomosaic_url.endsWith('.tif')
+      || selectedOrthomosaic.orthomosaic_url.endsWith('.jpg')
+    if (!needsBounds && !hasUtmBounds && !needsWebpConversion) return
 
     const extractBounds = async () => {
       setExtractingBounds(true)
       try {
-        const reason = hasUtmBounds ? 'UTM bounds' : needsJpegConversion ? 'TIF→JPEG conversion' : 'missing bounds'
+        const reason = hasUtmBounds ? 'UTM bounds' : needsWebpConversion ? 'WebP conversion' : 'missing bounds'
         console.log(`Auto-extracting (${reason}) for orthomosaic:`, selectedOrthomosaic.id)
         const res = await fetch('/api/orthomosaic/extract-bounds', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds || needsJpegConversion }),
+          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds || needsWebpConversion }),
         })
         const data = await res.json()
         if (data.success && data.bounds) {

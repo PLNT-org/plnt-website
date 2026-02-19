@@ -104,20 +104,46 @@ export async function POST(request: NextRequest) {
           // Continue without bounds — the viewer has a fallback
         }
 
-        // Convert GeoTIFF to JPEG for web display (browsers can't render .tif)
-        console.log('Converting GeoTIFF to JPEG for web display...')
+        // Convert GeoTIFF to WebP with transparency (black no-data → transparent)
+        console.log('Converting GeoTIFF to WebP with transparency...')
         const sharp = (await import('sharp')).default
-        const jpegBuffer = await sharp(Buffer.from(orthophotoBuffer))
-          .jpeg({ quality: 90 })
-          .toBuffer()
-        console.log(`Converted: ${(orthophotoBuffer.byteLength / 1024 / 1024).toFixed(1)} MB TIF → ${(jpegBuffer.byteLength / 1024 / 1024).toFixed(1)} MB JPEG`)
+        const img = sharp(Buffer.from(orthophotoBuffer))
+        const metadata = await img.metadata()
 
-        // Upload JPEG to Supabase Storage
+        let webpBuffer: Buffer
+        if (metadata.channels && metadata.channels >= 4) {
+          // Already has alpha channel — just convert
+          webpBuffer = await sharp(Buffer.from(orthophotoBuffer))
+            .webp({ quality: 85 })
+            .toBuffer()
+        } else {
+          // Add alpha, make near-black pixels transparent
+          const { data, info } = await sharp(Buffer.from(orthophotoBuffer))
+            .ensureAlpha()
+            .raw()
+            .toBuffer({ resolveWithObject: true })
+
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i] <= 10 && data[i + 1] <= 10 && data[i + 2] <= 10) {
+              data[i + 3] = 0
+            }
+          }
+
+          webpBuffer = await sharp(data, {
+            raw: { width: info.width, height: info.height, channels: 4 },
+          })
+            .webp({ quality: 85 })
+            .toBuffer()
+        }
+
+        console.log(`Converted: ${(orthophotoBuffer.byteLength / 1024 / 1024).toFixed(1)} MB TIF → ${(webpBuffer.byteLength / 1024 / 1024).toFixed(1)} MB WebP`)
+
+        // Upload WebP to Supabase Storage
         const storage = getOrthomosaicStorage()
         const { url } = await storage.uploadOrthophoto(
           orthomosaicId,
-          jpegBuffer,
-          'orthophoto.jpg'
+          webpBuffer,
+          'orthophoto.webp'
         )
 
         console.log(`Uploaded orthophoto to: ${url}`)
