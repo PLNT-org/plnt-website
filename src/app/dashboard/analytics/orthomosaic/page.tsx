@@ -685,12 +685,17 @@ export default function OrthomosaicViewerPage() {
   }
 
   // Auto-extract bounds for completed orthomosaics that are missing them
+  // Skip if the orthophoto URL points to Lightning (ephemeral) or has a known download error
   useEffect(() => {
     if (!selectedOrthomosaic || isDemo) return
     if (selectedOrthomosaic.status !== 'completed') return
     if (selectedOrthomosaic.bounds) return
     if (!selectedOrthomosaic.orthomosaic_url) return
     if (extractingBounds) return
+    // Don't retry on orthomosaics with dead URLs (Lightning cleanup, failed downloads)
+    if (selectedOrthomosaic.error_message?.includes('404') || selectedOrthomosaic.error_message?.includes('Failed to download')) return
+    // Don't try Lightning URLs — they expire quickly
+    if (selectedOrthomosaic.orthomosaic_url.includes('spark1.webodm.net')) return
 
     const extractBounds = async () => {
       setExtractingBounds(true)
@@ -931,21 +936,37 @@ export default function OrthomosaicViewerPage() {
         </Card>
       )}
 
-      {/* Completed but no bounds — auto-extracting */}
+      {/* Completed but no bounds */}
       {selectedOrthomosaic && selectedOrthomosaic.status === 'completed' && !selectedOrthomosaic.bounds && (
-        <Card className="border-blue-200 bg-blue-50">
-          <CardContent className="py-4">
-            <div className="flex items-center gap-4">
-              <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
-              <div className="flex-1">
-                <div className="font-medium text-blue-900">Extracting Map Bounds</div>
-                <div className="text-sm text-blue-700">
-                  Reading geo data from the orthophoto to enable the interactive map...
+        (selectedOrthomosaic.error_message?.includes('404') || selectedOrthomosaic.error_message?.includes('Failed to download') || selectedOrthomosaic.orthomosaic_url?.includes('spark1.webodm.net')) ? (
+          <Card className="border-amber-200 bg-amber-50">
+            <CardContent className="py-4">
+              <div className="flex items-center gap-4">
+                <AlertCircle className="h-6 w-6 text-amber-600" />
+                <div className="flex-1">
+                  <div className="font-medium text-amber-900">Orthophoto Unavailable</div>
+                  <div className="text-sm text-amber-700">
+                    The orthophoto file has expired on the processing server. Please reprocess this orthomosaic to view it on the map.
+                  </div>
                 </div>
               </div>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card className="border-blue-200 bg-blue-50">
+            <CardContent className="py-4">
+              <div className="flex items-center gap-4">
+                <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+                <div className="flex-1">
+                  <div className="font-medium text-blue-900">Extracting Map Bounds</div>
+                  <div className="text-sm text-blue-700">
+                    Reading geo data from the orthophoto to enable the interactive map...
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )
       )}
 
       {/* Main Content — map view (requires bounds) */}
