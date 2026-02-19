@@ -21,7 +21,7 @@ const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.rob
 const TILE_SIZE = 400             // 400x400 square tiles (same as Colab SAHI)
 const TILE_OVERLAP_PX = 100      // 25% overlap = 100px (same as Colab)
 const NMS_IOU_THRESHOLD = 0.5    // IoU threshold for removing duplicates
-const DEFAULT_CONFIDENCE = 0.4   // Match Colab confidence
+const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 25      // Process 25 tiles in parallel
 
 interface RoboflowPrediction {
