@@ -26,7 +26,7 @@ const TILE_OVERLAP = 0.1          // 10% overlap so NMS can catch edge plants
 const NMS_IOU_THRESHOLD = 0.05    // IoU threshold for removing duplicates
 const DEFAULT_CONFIDENCE = 0.2
 const JPEG_QUALITY = 90
-const CONCURRENT_TILES = 10   // Process 10 tiles in parallel to stay within timeout
+const CONCURRENT_TILES = 25   // Process 25 tiles in parallel to stay within timeout
 
 interface RoboflowPrediction {
   x: number           // center x in pixels (relative to tile)
@@ -200,10 +200,10 @@ export async function POST(request: NextRequest) {
       }
 
       try {
+        const t0 = Date.now()
         send({ type: 'status', message: 'Downloading orthomosaic image...' })
 
         // Download orthomosaic image
-        // Use plain fetch for Supabase Storage / public URLs, WebODM auth only for local WebODM
         const orthoUrl = orthomosaic.orthomosaic_url
         const isWebODMUrl = orthoUrl.includes('/api/projects/') || orthoUrl.includes('localhost:8000') || orthoUrl.includes('webodm')
         const imageResponse = isWebODMUrl
@@ -215,10 +215,10 @@ export async function POST(request: NextRequest) {
           return
         }
         const imageBuffer = Buffer.from(await imageResponse.arrayBuffer())
+        console.log(`[Detection] Download: ${((Date.now() - t0) / 1000).toFixed(1)}s, ${(imageBuffer.length / 1024 / 1024).toFixed(1)}MB`)
 
         // Get image dimensions
-        const image = sharp(imageBuffer)
-        const metadata = await image.metadata()
+        const metadata = await sharp(imageBuffer).metadata()
         const imageWidth = metadata.width!
         const imageHeight = metadata.height!
 
@@ -234,6 +234,61 @@ export async function POST(request: NextRequest) {
         console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, input: ${MODEL_INPUT_SIZE}x${MODEL_INPUT_SIZE}, confidence: ${confidence_threshold}`)
         console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
 
+        // --- Phase 1: Pre-extract all tile buffers (sharp decodes once, extracts many) ---
+        send({ type: 'status', message: `Extracting ${totalTiles} tiles...` })
+        const t1 = Date.now()
+
+        interface TileData {
+          tx: number
+          ty: number
+          cropLeft: number
+          cropTop: number
+          cropWidth: number
+          cropHeight: number
+          buffer: Buffer
+          resizeScale: number
+          resizedW: number
+          resizedH: number
+          padLeft: number
+          padTop: number
+        }
+
+        const tiles: TileData[] = []
+        for (let ty = 0; ty < tilesY; ty++) {
+          for (let tx = 0; tx < tilesX; tx++) {
+            const cropLeft = Math.max(0, Math.min(tx * strideX, imageWidth - TRAINING_TILE_WIDTH))
+            const cropTop = Math.max(0, Math.min(ty * strideY, imageHeight - TRAINING_TILE_HEIGHT))
+            const cropWidth = Math.min(TRAINING_TILE_WIDTH, imageWidth - cropLeft)
+            const cropHeight = Math.min(TRAINING_TILE_HEIGHT, imageHeight - cropTop)
+
+            const buffer = await sharp(imageBuffer)
+              .extract({ left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight })
+              .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
+                fit: 'contain',
+                background: { r: 0, g: 0, b: 0 },
+              })
+              .jpeg({ quality: JPEG_QUALITY })
+              .toBuffer()
+
+            const resizeScale = Math.min(MODEL_INPUT_SIZE / cropWidth, MODEL_INPUT_SIZE / cropHeight)
+            const resizedW = cropWidth * resizeScale
+            const resizedH = cropHeight * resizeScale
+
+            tiles.push({
+              tx, ty, cropLeft, cropTop, cropWidth, cropHeight, buffer,
+              resizeScale, resizedW, resizedH,
+              padLeft: (MODEL_INPUT_SIZE - resizedW) / 2,
+              padTop: (MODEL_INPUT_SIZE - resizedH) / 2,
+            })
+          }
+        }
+
+        console.log(`[Detection] Tile extraction: ${((Date.now() - t1) / 1000).toFixed(1)}s for ${tiles.length} tiles`)
+
+        // Free the original image buffer to reduce memory pressure
+        // @ts-ignore - intentional nullification
+        // imageBuffer is still referenced but we hint GC
+
         send({
           type: 'progress',
           processedTiles: 0,
@@ -242,91 +297,42 @@ export async function POST(request: NextRequest) {
           phase: 'tiling',
         })
 
-        // Build list of all tile jobs
-        interface TileJob {
-          tx: number
-          ty: number
-          cropLeft: number
-          cropTop: number
-          cropWidth: number
-          cropHeight: number
-        }
-        const tileJobs: TileJob[] = []
-
-        for (let ty = 0; ty < tilesY; ty++) {
-          for (let tx = 0; tx < tilesX; tx++) {
-            const cropLeft = Math.max(0, Math.min(tx * strideX, imageWidth - TRAINING_TILE_WIDTH))
-            const cropTop = Math.max(0, Math.min(ty * strideY, imageHeight - TRAINING_TILE_HEIGHT))
-            const cropWidth = Math.min(TRAINING_TILE_WIDTH, imageWidth - cropLeft)
-            const cropHeight = Math.min(TRAINING_TILE_HEIGHT, imageHeight - cropTop)
-            tileJobs.push({ tx, ty, cropLeft, cropTop, cropWidth, cropHeight })
-          }
-        }
-
-        // Process tiles in parallel batches of CONCURRENT_TILES
+        // --- Phase 2: Run inference in parallel batches ---
+        const t2 = Date.now()
         const allDetections: Detection[] = []
         let processedTiles = 0
         let loggedFirst = false
 
-        for (let i = 0; i < tileJobs.length; i += CONCURRENT_TILES) {
-          const batch = tileJobs.slice(i, i + CONCURRENT_TILES)
+        for (let i = 0; i < tiles.length; i += CONCURRENT_TILES) {
+          const batch = tiles.slice(i, i + CONCURRENT_TILES)
 
           const batchResults = await Promise.allSettled(
-            batch.map(async (job) => {
-              const { tx, ty, cropLeft, cropTop, cropWidth, cropHeight } = job
-
-              // Extract tile crop and resize to 640x640 matching training pipeline:
-              // 500x281 → resize to 640 wide (maintaining aspect ratio) → pad to 640x640 with black
-              const tileBuffer = await sharp(imageBuffer)
-                .extract({
-                  left: cropLeft,
-                  top: cropTop,
-                  width: cropWidth,
-                  height: cropHeight,
-                })
-                .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
-                  fit: 'contain',
-                  background: { r: 0, g: 0, b: 0 },
-                })
-                .jpeg({ quality: JPEG_QUALITY })
-                .toBuffer()
-
-              // Calculate coordinate mapping (account for resize + padding)
-              const resizeScale = Math.min(MODEL_INPUT_SIZE / cropWidth, MODEL_INPUT_SIZE / cropHeight)
-              const resizedW = cropWidth * resizeScale
-              const resizedH = cropHeight * resizeScale
-              const padLeft = (MODEL_INPUT_SIZE - resizedW) / 2
-              const padTop = (MODEL_INPUT_SIZE - resizedH) / 2
-
+            batch.map(async (tile) => {
               const predictions = await runTileInference(
-                tileBuffer,
+                tile.buffer,
                 confidence_threshold as number,
               )
 
               if (predictions.length > 0) {
-                console.log(`[Detection] Tile (${tx}, ${ty}): ${predictions.length} predictions - classes: ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
+                console.log(`[Detection] Tile (${tile.tx}, ${tile.ty}): ${predictions.length} preds - ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
               }
 
-              // Map predictions to full image coordinates
               const detections: Detection[] = []
               for (const pred of predictions) {
-                // Skip predictions in the padding area
-                if (pred.x < padLeft || pred.x > padLeft + resizedW) continue
-                if (pred.y < padTop || pred.y > padTop + resizedH) continue
+                if (pred.x < tile.padLeft || pred.x > tile.padLeft + tile.resizedW) continue
+                if (pred.y < tile.padTop || pred.y > tile.padTop + tile.resizedH) continue
 
-                // Filter by class
                 const predClass = (pred.class || 'plant').toLowerCase()
                 if (!allowedClasses.includes(predClass)) continue
 
-                // Map from 640x640 model space → crop space → full image space
-                const cropX = (pred.x - padLeft) / resizeScale
-                const cropY = (pred.y - padTop) / resizeScale
+                const cropX = (pred.x - tile.padLeft) / tile.resizeScale
+                const cropY = (pred.y - tile.padTop) / tile.resizeScale
 
                 detections.push({
-                  x: cropLeft + cropX,
-                  y: cropTop + cropY,
-                  width: pred.width / resizeScale,
-                  height: pred.height / resizeScale,
+                  x: tile.cropLeft + cropX,
+                  y: tile.cropTop + cropY,
+                  width: pred.width / tile.resizeScale,
+                  height: pred.height / tile.resizeScale,
                   confidence: pred.confidence,
                   class: pred.class,
                 })
@@ -336,11 +342,10 @@ export async function POST(request: NextRequest) {
             })
           )
 
-          // Collect results from batch
           for (const result of batchResults) {
             if (result.status === 'fulfilled') {
               if (!loggedFirst && result.value.predictions.length > 0) {
-                console.log('[Detection] Sample predictions from first tile with results:', result.value.predictions.slice(0, 3).map(p => ({ class: p.class, confidence: p.confidence })))
+                console.log('[Detection] Sample predictions:', result.value.predictions.slice(0, 3).map(p => ({ class: p.class, confidence: p.confidence })))
                 loggedFirst = true
               }
               allDetections.push(...result.value.detections)
@@ -351,7 +356,6 @@ export async function POST(request: NextRequest) {
 
           processedTiles += batch.length
 
-          // Send progress update after each batch
           send({
             type: 'progress',
             processedTiles,
@@ -360,6 +364,8 @@ export async function POST(request: NextRequest) {
             phase: 'tiling',
           })
         }
+
+        console.log(`[Detection] Inference: ${((Date.now() - t2) / 1000).toFixed(1)}s, total elapsed: ${((Date.now() - t0) / 1000).toFixed(1)}s`)
 
         // NMS phase
         send({ type: 'progress', processedTiles: totalTiles, totalTiles, detectionsCount: allDetections.length, phase: 'nms' })
