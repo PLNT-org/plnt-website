@@ -77,7 +77,7 @@ export async function POST(request: NextRequest) {
     console.log(`Raw bbox: [${bbox.join(', ')}]`)
 
     // Convert from native CRS (usually UTM) to WGS84 lat/lng for Leaflet
-    const bounds = await convertBoundsToWGS84(bbox, geoKeys)
+    const bounds = convertBoundsToWGS84(bbox, geoKeys)
     const resolution_cm = Math.abs(resX) * 100
 
     console.log(`WGS84 bounds: ${JSON.stringify(bounds)}, ${width}x${height}, ${resolution_cm.toFixed(1)} cm/px`)

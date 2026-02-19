@@ -92,7 +92,7 @@ export async function POST(request: NextRequest) {
           console.log(`Raw bbox: [${bbox.join(', ')}]`)
 
           // Convert from native CRS (usually UTM) to WGS84 lat/lng for Leaflet
-          updateData.bounds = await convertBoundsToWGS84(bbox, geoKeys)
+          updateData.bounds = convertBoundsToWGS84(bbox, geoKeys)
           updateData.image_width = width
           updateData.image_height = height
           // Resolution in cm/pixel (GeoTIFF resolution is in CRS units, usually meters)
