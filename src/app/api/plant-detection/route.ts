@@ -17,16 +17,12 @@ const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY
 const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID // e.g., "my-first-project-8qm2b/15"
 const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
 
-// Tiling configuration — matches Roboflow training pipeline
-// Training images were 4000x2250, tiled 8x8 → 500x281 crops → resized to 640 wide → padded to 640x640
-const TRAINING_TILE_WIDTH = 500   // 4000 / 8
-const TRAINING_TILE_HEIGHT = 281  // Math.round(2250 / 8)
-const MODEL_INPUT_SIZE = 640      // YOLOv11 input size
-const TILE_OVERLAP = 0.1          // 10% overlap so NMS can catch edge plants
-const NMS_IOU_THRESHOLD = 0.5     // IoU threshold for removing duplicates
-const DEFAULT_CONFIDENCE = 0.2
-const JPEG_QUALITY = 90
-const CONCURRENT_TILES = 25   // Process 25 tiles in parallel to stay within timeout
+// Tiling configuration — matches Colab inference pipeline exactly
+const TILE_SIZE = 400             // 400x400 square tiles (same as Colab SAHI)
+const TILE_OVERLAP_PX = 100      // 25% overlap = 100px (same as Colab)
+const NMS_IOU_THRESHOLD = 0.5    // IoU threshold for removing duplicates
+const DEFAULT_CONFIDENCE = 0.4   // Match Colab confidence
+const CONCURRENT_TILES = 25      // Process 25 tiles in parallel
 
 interface RoboflowPrediction {
   x: number           // center x in pixels (relative to tile)
@@ -113,9 +109,9 @@ async function runTileInference(
 ): Promise<RoboflowPrediction[]> {
   const roboflowUrl = `${ROBOFLOW_API_URL}/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}&confidence=${confidenceThreshold}`
 
-  const blob = new Blob([tileBuffer], { type: 'image/jpeg' })
+  const blob = new Blob([tileBuffer], { type: 'image/png' })
   const formData = new FormData()
-  formData.append('file', blob, 'tile.jpg')
+  formData.append('file', blob, 'tile.png')
 
   const response = await fetch(roboflowUrl, {
     method: 'POST',
@@ -230,45 +226,28 @@ export async function POST(request: NextRequest) {
         const channels = rawInfo.channels
         console.log(`[Detection] Decoded to raw: ${((Date.now() - t1) / 1000).toFixed(1)}s, ${imageWidth}x${imageHeight}x${channels}, ${(rawPixels.length / 1024 / 1024).toFixed(1)}MB`)
 
-        // Calculate tile grid — same pixel density as training (500x281 crops)
-        const strideX = Math.floor(TRAINING_TILE_WIDTH * (1 - TILE_OVERLAP))
-        const strideY = Math.floor(TRAINING_TILE_HEIGHT * (1 - TILE_OVERLAP))
-        const tilesX = Math.max(1, Math.ceil((imageWidth - TRAINING_TILE_WIDTH) / strideX) + 1)
-        const tilesY = Math.max(1, Math.ceil((imageHeight - TRAINING_TILE_HEIGHT) / strideY) + 1)
-        const totalTiles = tilesX * tilesY
+        // Calculate tile grid — matches Colab: 400x400 tiles, 100px overlap, stride 300
+        const stride = TILE_SIZE - TILE_OVERLAP_PX  // 300
 
-        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${tilesX}x${tilesY}=${totalTiles} tiles`)
-        console.log(`[Detection] Tile crop: ${TRAINING_TILE_WIDTH}x${TRAINING_TILE_HEIGHT}px, stride: ${strideX}x${strideY}px, overlap: ${TILE_OVERLAP * 100}%`)
-        console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, input: ${MODEL_INPUT_SIZE}x${MODEL_INPUT_SIZE}, confidence: ${confidence_threshold}`)
-        console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
-
-        // Build tile job list
+        // Build tile job list (same loop structure as Colab)
         interface TileJob {
-          tx: number; ty: number
-          cropLeft: number; cropTop: number
+          x: number; y: number
           cropWidth: number; cropHeight: number
-          resizeScale: number; resizedW: number; resizedH: number
-          padLeft: number; padTop: number
         }
         const tileJobs: TileJob[] = []
 
-        for (let ty = 0; ty < tilesY; ty++) {
-          for (let tx = 0; tx < tilesX; tx++) {
-            const cropLeft = Math.max(0, Math.min(tx * strideX, imageWidth - TRAINING_TILE_WIDTH))
-            const cropTop = Math.max(0, Math.min(ty * strideY, imageHeight - TRAINING_TILE_HEIGHT))
-            const cropWidth = Math.min(TRAINING_TILE_WIDTH, imageWidth - cropLeft)
-            const cropHeight = Math.min(TRAINING_TILE_HEIGHT, imageHeight - cropTop)
-            const resizeScale = Math.min(MODEL_INPUT_SIZE / cropWidth, MODEL_INPUT_SIZE / cropHeight)
-            const resizedW = cropWidth * resizeScale
-            const resizedH = cropHeight * resizeScale
-            tileJobs.push({
-              tx, ty, cropLeft, cropTop, cropWidth, cropHeight,
-              resizeScale, resizedW, resizedH,
-              padLeft: (MODEL_INPUT_SIZE - resizedW) / 2,
-              padTop: (MODEL_INPUT_SIZE - resizedH) / 2,
-            })
+        for (let y = 0; y < imageHeight; y += stride) {
+          for (let x = 0; x < imageWidth; x += stride) {
+            const cropWidth = Math.min(TILE_SIZE, imageWidth - x)
+            const cropHeight = Math.min(TILE_SIZE, imageHeight - y)
+            tileJobs.push({ x, y, cropWidth, cropHeight })
           }
         }
+
+        const totalTiles = tileJobs.length
+        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${totalTiles} tiles (${TILE_SIZE}x${TILE_SIZE}, stride ${stride}, overlap ${TILE_OVERLAP_PX}px)`)
+        console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, confidence: ${confidence_threshold}`)
+        console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
 
         send({
           type: 'progress',
@@ -278,7 +257,7 @@ export async function POST(request: NextRequest) {
           phase: 'tiling',
         })
 
-        // Process tiles: extract from raw pixels + inference in parallel batches
+        // Process tiles: extract from raw pixels as PNG + send to Roboflow (no manual resize)
         const t2 = Date.now()
         const allDetections: Detection[] = []
         let processedTiles = 0
@@ -289,21 +268,18 @@ export async function POST(request: NextRequest) {
 
           const batchResults = await Promise.allSettled(
             batch.map(async (job) => {
-              // Extract from raw pixels (fast — no image decode needed)
+              // Extract tile from raw pixels as PNG (no resize — Roboflow handles it)
               const tileBuffer = await sharp(rawPixels, {
                 raw: { width: imageWidth, height: imageHeight, channels },
               })
                 .extract({
-                  left: job.cropLeft,
-                  top: job.cropTop,
+                  left: job.x,
+                  top: job.y,
                   width: job.cropWidth,
                   height: job.cropHeight,
                 })
-                .resize(MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, {
-                  fit: 'contain',
-                  background: { r: 0, g: 0, b: 0, alpha: 1 },
-                })
-                .jpeg({ quality: JPEG_QUALITY })
+                .removeAlpha()
+                .png()
                 .toBuffer()
 
               const predictions = await runTileInference(
@@ -312,25 +288,20 @@ export async function POST(request: NextRequest) {
               )
 
               if (predictions.length > 0) {
-                console.log(`[Detection] Tile (${job.tx}, ${job.ty}): ${predictions.length} preds - ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
+                console.log(`[Detection] Tile (${job.x}, ${job.y}): ${predictions.length} preds - ${[...new Set(predictions.map(p => p.class))].join(', ')}`)
               }
 
+              // Map tile coordinates to full image coordinates (same as Colab: pred.x += x)
               const detections: Detection[] = []
               for (const pred of predictions) {
-                if (pred.x < job.padLeft || pred.x > job.padLeft + job.resizedW) continue
-                if (pred.y < job.padTop || pred.y > job.padTop + job.resizedH) continue
-
                 const predClass = (pred.class || 'plant').toLowerCase()
                 if (!allowedClasses.includes(predClass)) continue
 
-                const cropX = (pred.x - job.padLeft) / job.resizeScale
-                const cropY = (pred.y - job.padTop) / job.resizeScale
-
                 detections.push({
-                  x: job.cropLeft + cropX,
-                  y: job.cropTop + cropY,
-                  width: pred.width / job.resizeScale,
-                  height: pred.height / job.resizeScale,
+                  x: job.x + pred.x,
+                  y: job.y + pred.y,
+                  width: pred.width,
+                  height: pred.height,
                   confidence: pred.confidence,
                   class: pred.class,
                 })
