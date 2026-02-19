@@ -234,8 +234,7 @@ export async function POST(request: NextRequest) {
         console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, input: ${MODEL_INPUT_SIZE}x${MODEL_INPUT_SIZE}, confidence: ${confidence_threshold}`)
         console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
 
-        // --- Phase 1: Pre-extract all tile buffers (sharp decodes once, extracts many) ---
-        send({ type: 'status', message: `Extracting ${totalTiles} tiles...` })
+        // --- Phase 1: Pre-extract all tile buffers ---
         const t1 = Date.now()
 
         interface TileData {
@@ -254,6 +253,15 @@ export async function POST(request: NextRequest) {
         }
 
         const tiles: TileData[] = []
+        let extracted = 0
+        send({
+          type: 'progress',
+          processedTiles: 0,
+          totalTiles,
+          detectionsCount: 0,
+          phase: 'extracting',
+        })
+
         for (let ty = 0; ty < tilesY; ty++) {
           for (let tx = 0; tx < tilesX; tx++) {
             const cropLeft = Math.max(0, Math.min(tx * strideX, imageWidth - TRAINING_TILE_WIDTH))
@@ -280,6 +288,18 @@ export async function POST(request: NextRequest) {
               padLeft: (MODEL_INPUT_SIZE - resizedW) / 2,
               padTop: (MODEL_INPUT_SIZE - resizedH) / 2,
             })
+
+            extracted++
+            // Send progress every 10 tiles during extraction
+            if (extracted % 10 === 0 || extracted === totalTiles) {
+              send({
+                type: 'progress',
+                processedTiles: extracted,
+                totalTiles,
+                detectionsCount: 0,
+                phase: 'extracting',
+              })
+            }
           }
         }
 

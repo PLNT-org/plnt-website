@@ -1232,7 +1232,8 @@ export default function OrthomosaicViewerPage() {
                     <div className="flex items-center gap-2">
                       <Loader2 className="h-4 w-4 animate-spin text-green-600" />
                       <span className="text-sm font-medium text-green-800">
-                        {detectionProgress.phase === 'tiling' && 'Analyzing tiles...'}
+                        {detectionProgress.phase === 'extracting' && 'Extracting tiles...'}
+                        {detectionProgress.phase === 'tiling' && 'Running inference...'}
                         {detectionProgress.phase === 'nms' && 'Removing duplicates...'}
                         {detectionProgress.phase === 'saving' && 'Saving to database...'}
                       </span>
