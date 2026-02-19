@@ -201,8 +201,6 @@ export default function OrthomosaicViewerPage() {
   // Load orthomosaics
   useEffect(() => {
     async function loadOrthomosaics() {
-      if (authLoading) return
-
       if (isDemo) {
         setOrthomosaics([DEMO_ORTHOMOSAIC as Orthomosaic])
         setSelectedOrthomosaic(DEMO_ORTHOMOSAIC as Orthomosaic)
@@ -211,15 +209,10 @@ export default function OrthomosaicViewerPage() {
         return
       }
 
-      if (!session?.access_token) {
-        setLoading(false)
-        return
-      }
-
       try {
-        setError(null) // Clear any previous errors
+        setError(null)
 
-        // Fetch orthomosaics via API (uses service role to bypass RLS)
+        // Fetch orthomosaics via API (uses service role — no auth needed)
         const response = await fetch('/api/orthomosaic/list')
         if (!response.ok) {
           throw new Error('Failed to fetch orthomosaics')
@@ -244,7 +237,7 @@ export default function OrthomosaicViewerPage() {
     }
 
     loadOrthomosaics()
-  }, [session, isDemo, authLoading, orthomosaicId])
+  }, [isDemo, orthomosaicId])
 
   // Load labels when orthomosaic is selected
   useEffect(() => {
