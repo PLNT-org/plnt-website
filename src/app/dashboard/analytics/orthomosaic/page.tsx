@@ -685,11 +685,11 @@ export default function OrthomosaicViewerPage() {
   }
 
   // Auto-extract bounds for completed orthomosaics that are missing them
+  // or have invalid UTM bounds (coordinates in meters instead of lat/lng degrees)
   // Skip if the orthophoto URL points to Lightning (ephemeral) or has a known download error
   useEffect(() => {
     if (!selectedOrthomosaic || isDemo) return
     if (selectedOrthomosaic.status !== 'completed') return
-    if (selectedOrthomosaic.bounds) return
     if (!selectedOrthomosaic.orthomosaic_url) return
     if (extractingBounds) return
     // Don't retry on orthomosaics with dead URLs (Lightning cleanup, failed downloads)
@@ -697,14 +697,25 @@ export default function OrthomosaicViewerPage() {
     // Don't try Lightning URLs — they expire quickly
     if (selectedOrthomosaic.orthomosaic_url.includes('spark1.webodm.net')) return
 
+    // Check if bounds need extraction or re-extraction (UTM values are > 180)
+    const needsBounds = !selectedOrthomosaic.bounds
+    const hasUtmBounds = selectedOrthomosaic.bounds && (
+      Math.abs(selectedOrthomosaic.bounds.west) > 180 ||
+      Math.abs(selectedOrthomosaic.bounds.south) > 90
+    )
+    if (!needsBounds && !hasUtmBounds) return
+
     const extractBounds = async () => {
       setExtractingBounds(true)
       try {
-        console.log('Auto-extracting bounds for orthomosaic:', selectedOrthomosaic.id)
+        console.log(hasUtmBounds
+          ? 'Re-extracting bounds (UTM detected) for orthomosaic:'
+          : 'Auto-extracting bounds for orthomosaic:',
+          selectedOrthomosaic.id)
         const res = await fetch('/api/orthomosaic/extract-bounds', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds }),
         })
         const data = await res.json()
         if (data.success && data.bounds) {

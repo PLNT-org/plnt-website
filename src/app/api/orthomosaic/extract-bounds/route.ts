@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { fromArrayBuffer } from 'geotiff'
+import { convertBoundsToWGS84 } from '@/lib/geo/convert-bounds'
 
 export const maxDuration = 300
 
@@ -16,7 +17,7 @@ const supabaseAdmin = createClient(
  */
 export async function POST(request: NextRequest) {
   try {
-    const { orthomosaicId } = await request.json()
+    const { orthomosaicId, force } = await request.json()
 
     if (!orthomosaicId) {
       return NextResponse.json({ error: 'orthomosaicId required' }, { status: 400 })
@@ -37,8 +38,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No orthophoto URL found' }, { status: 400 })
     }
 
-    // Already has bounds — nothing to do
-    if (ortho.bounds) {
+    // Already has bounds — skip unless force re-extract requested
+    if (ortho.bounds && !force) {
       return NextResponse.json({
         success: true,
         bounds: ortho.bounds,
@@ -66,20 +67,20 @@ export async function POST(request: NextRequest) {
 
     const tiff = await fromArrayBuffer(buffer)
     const image = await tiff.getImage()
-    const bbox = image.getBoundingBox() // [west, south, east, north]
+    const bbox = image.getBoundingBox() // [west, south, east, north] in native CRS
+    const geoKeys = image.getGeoKeys()
     const width = image.getWidth()
     const height = image.getHeight()
     const [resX] = image.getResolution()
 
-    const bounds = {
-      west: bbox[0],
-      south: bbox[1],
-      east: bbox[2],
-      north: bbox[3],
-    }
+    console.log(`GeoTIFF CRS: EPSG:${geoKeys.ProjectedCSTypeGeoKey || geoKeys.GeographicTypeGeoKey || 'unknown'}`)
+    console.log(`Raw bbox: [${bbox.join(', ')}]`)
+
+    // Convert from native CRS (usually UTM) to WGS84 lat/lng for Leaflet
+    const bounds = convertBoundsToWGS84(bbox, geoKeys)
     const resolution_cm = Math.abs(resX) * 100
 
-    console.log(`Extracted bounds: ${JSON.stringify(bounds)}, ${width}x${height}, ${resolution_cm.toFixed(1)} cm/px`)
+    console.log(`WGS84 bounds: ${JSON.stringify(bounds)}, ${width}x${height}, ${resolution_cm.toFixed(1)} cm/px`)
 
     // Update the database record
     const { error: updateError } = await supabaseAdmin

@@ -11,6 +11,7 @@ import {
 } from '@/lib/webodm/lightning-client'
 import { getOrthomosaicStorage, BUCKETS } from '@/lib/supabase/storage'
 import { fromArrayBuffer } from 'geotiff'
+import { convertBoundsToWGS84 } from '@/lib/geo/convert-bounds'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -81,17 +82,17 @@ export async function POST(request: NextRequest) {
           console.log('Extracting bounds from GeoTIFF...')
           const tiff = await fromArrayBuffer(orthophotoBuffer)
           const image = await tiff.getImage()
-          const bbox = image.getBoundingBox() // [west, south, east, north]
+          const bbox = image.getBoundingBox() // [west, south, east, north] in native CRS
+          const geoKeys = image.getGeoKeys()
           const width = image.getWidth()
           const height = image.getHeight()
           const [resX] = image.getResolution() // meters per pixel
 
-          updateData.bounds = {
-            west: bbox[0],
-            south: bbox[1],
-            east: bbox[2],
-            north: bbox[3],
-          }
+          console.log(`GeoTIFF CRS: EPSG:${geoKeys.ProjectedCSTypeGeoKey || geoKeys.GeographicTypeGeoKey || 'unknown'}`)
+          console.log(`Raw bbox: [${bbox.join(', ')}]`)
+
+          // Convert from native CRS (usually UTM) to WGS84 lat/lng for Leaflet
+          updateData.bounds = convertBoundsToWGS84(bbox, geoKeys)
           updateData.image_width = width
           updateData.image_height = height
           // Resolution in cm/pixel (GeoTIFF resolution is in CRS units, usually meters)
