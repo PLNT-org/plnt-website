@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { fromUrl } from 'geotiff'
+import { fromArrayBuffer } from 'geotiff'
+
+export const maxDuration = 120
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -9,8 +11,8 @@ const supabaseAdmin = createClient(
 
 /**
  * POST: Extract geo bounds from an already-uploaded orthophoto in Supabase Storage.
- * Uses HTTP range requests (fromUrl) to read only the GeoTIFF header/metadata
- * without downloading the entire multi-hundred-MB file into memory.
+ * Downloads the file via the Supabase admin SDK (handles auth properly),
+ * then parses GeoTIFF metadata for bounds, dimensions, and resolution.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -44,10 +46,27 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Use fromUrl to read only the GeoTIFF metadata via HTTP range requests.
-    // This avoids downloading the entire file (which can be hundreds of MB).
-    console.log(`Extracting bounds via range requests from: ${ortho.orthomosaic_url}`)
-    const tiff = await fromUrl(ortho.orthomosaic_url)
+    // Download the file via Supabase Storage SDK (handles auth, avoids CORS/range issues)
+    const storagePath = `${orthomosaicId}/orthophoto.tif`
+    console.log(`Downloading orthophoto via Supabase SDK: ${storagePath}`)
+
+    const { data: fileData, error: downloadError } = await supabaseAdmin.storage
+      .from('orthomosaics')
+      .download(storagePath)
+
+    if (downloadError || !fileData) {
+      console.error('Supabase download error:', downloadError)
+      return NextResponse.json(
+        { error: `Failed to download from storage: ${downloadError?.message || 'No data'}` },
+        { status: 500 }
+      )
+    }
+
+    // Convert Blob to ArrayBuffer and parse
+    console.log(`Downloaded ${(fileData.size / 1024 / 1024).toFixed(1)} MB, extracting bounds...`)
+    const buffer = await fileData.arrayBuffer()
+
+    const tiff = await fromArrayBuffer(buffer)
     const image = await tiff.getImage()
     const bbox = image.getBoundingBox() // [west, south, east, north]
     const width = image.getWidth()
