@@ -134,15 +134,16 @@ export default function OrthomosaicViewerPage() {
   const [orthomosaics, setOrthomosaics] = useState<Orthomosaic[]>([])
   const [selectedOrthomosaic, setSelectedOrthomosaic] = useState<Orthomosaic | null>(null)
 
-  // Reload a single orthomosaic via the API (bypasses RLS)
+  // Reload orthomosaics list and update selected ortho
   const reloadOrthomosaic = async (id: string) => {
     const response = await fetch('/api/orthomosaic/list')
     if (!response.ok) return null
     const { orthomosaics: data } = await response.json()
+    // Refresh the full list so new orthos appear in the dropdown
+    if (data) setOrthomosaics(data)
     const updated = data?.find((o: Orthomosaic) => o.id === id)
     if (updated) {
       setSelectedOrthomosaic(updated)
-      setOrthomosaics(prev => prev.map(o => o.id === updated.id ? updated : o))
     }
     return updated
   }
