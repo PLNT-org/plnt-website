@@ -697,25 +697,25 @@ export default function OrthomosaicViewerPage() {
     // Don't try Lightning URLs — they expire quickly
     if (selectedOrthomosaic.orthomosaic_url.includes('spark1.webodm.net')) return
 
-    // Check if bounds need extraction or re-extraction (UTM values are > 180)
+    // Check if bounds need extraction or re-extraction
     const needsBounds = !selectedOrthomosaic.bounds
     const hasUtmBounds = selectedOrthomosaic.bounds && (
       Math.abs(selectedOrthomosaic.bounds.west) > 180 ||
       Math.abs(selectedOrthomosaic.bounds.south) > 90
     )
-    if (!needsBounds && !hasUtmBounds) return
+    // Also re-extract if URL is still a .tif (needs JPEG conversion for browser display)
+    const needsJpegConversion = selectedOrthomosaic.orthomosaic_url.endsWith('.tif')
+    if (!needsBounds && !hasUtmBounds && !needsJpegConversion) return
 
     const extractBounds = async () => {
       setExtractingBounds(true)
       try {
-        console.log(hasUtmBounds
-          ? 'Re-extracting bounds (UTM detected) for orthomosaic:'
-          : 'Auto-extracting bounds for orthomosaic:',
-          selectedOrthomosaic.id)
+        const reason = hasUtmBounds ? 'UTM bounds' : needsJpegConversion ? 'TIF→JPEG conversion' : 'missing bounds'
+        console.log(`Auto-extracting (${reason}) for orthomosaic:`, selectedOrthomosaic.id)
         const res = await fetch('/api/orthomosaic/extract-bounds', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds }),
+          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds || needsJpegConversion }),
         })
         const data = await res.json()
         if (data.success && data.bounds) {
