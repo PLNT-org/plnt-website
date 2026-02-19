@@ -136,7 +136,7 @@ export default function OrthomosaicViewerPage() {
 
   // Reload orthomosaics list and update selected ortho
   const reloadOrthomosaic = async (id: string) => {
-    const response = await fetch('/api/orthomosaic/list')
+    const response = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
     if (!response.ok) return null
     const { orthomosaics: data } = await response.json()
     // Refresh the full list so new orthos appear in the dropdown
@@ -215,7 +215,7 @@ export default function OrthomosaicViewerPage() {
         setError(null)
 
         // Fetch orthomosaics via API (uses service role — no auth needed)
-        const response = await fetch('/api/orthomosaic/list')
+        const response = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
         if (!response.ok) {
           throw new Error('Failed to fetch orthomosaics')
         }

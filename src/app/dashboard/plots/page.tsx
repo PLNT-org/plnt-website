@@ -202,7 +202,7 @@ export default function PlotsPage() {
         fetch('/api/species', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/orthomosaic/list'),
+        fetch('/api/orthomosaic/list', { cache: 'no-store' }),
         fetch('/api/marker-registrations', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),

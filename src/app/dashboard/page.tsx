@@ -247,7 +247,7 @@ function DashboardContent() {
 
   const loadInventoryFromDetections = async () => {
     try {
-      const listRes = await fetch('/api/orthomosaic/list')
+      const listRes = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
       if (!listRes.ok) return
       const listData = await listRes.json()
       const completed = (listData.orthomosaics || []).filter((o: any) => o.status === 'completed')

@@ -173,7 +173,7 @@ export default function InventoryPage() {
     setError(null)
 
     try {
-      const res = await fetch('/api/orthomosaic/list')
+      const res = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
       if (!res.ok) throw new Error('Failed to fetch orthomosaics')
       const data = await res.json()
       const completed = (data.orthomosaics || []).filter(

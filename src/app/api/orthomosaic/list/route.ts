@@ -29,7 +29,15 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    return NextResponse.json({ orthomosaics: orthomosaics || [] })
+    return NextResponse.json(
+      { orthomosaics: orthomosaics || [] },
+      {
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Pragma': 'no-cache',
+        },
+      }
+    )
 
   } catch (error) {
     console.error('Error in orthomosaic list:', error)

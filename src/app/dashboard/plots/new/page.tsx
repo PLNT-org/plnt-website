@@ -129,7 +129,7 @@ function NewPlotContent() {
         fetch('/api/species', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/orthomosaic/list'),
+        fetch('/api/orthomosaic/list', { cache: 'no-store' }),
         fetch('/api/plots', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
