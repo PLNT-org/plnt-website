@@ -186,6 +186,8 @@ export default function OrthomosaicViewerPage() {
   } | null>(null)
   const [showAggregation, setShowAggregation] = useState(false)
 
+  const [extractingBounds, setExtractingBounds] = useState(false)
+
   // Plots state for map visualization
   const [plots, setPlots] = useState<Array<{
     id: string
@@ -682,6 +684,37 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
+  // Auto-extract bounds for completed orthomosaics that are missing them
+  useEffect(() => {
+    if (!selectedOrthomosaic || isDemo) return
+    if (selectedOrthomosaic.status !== 'completed') return
+    if (selectedOrthomosaic.bounds) return
+    if (!selectedOrthomosaic.orthomosaic_url) return
+    if (extractingBounds) return
+
+    const extractBounds = async () => {
+      setExtractingBounds(true)
+      try {
+        console.log('Auto-extracting bounds for orthomosaic:', selectedOrthomosaic.id)
+        const res = await fetch('/api/orthomosaic/extract-bounds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+        })
+        const data = await res.json()
+        if (data.success && data.bounds) {
+          await reloadOrthomosaic(selectedOrthomosaic.id)
+        }
+      } catch (err) {
+        console.error('Auto-extract bounds error:', err)
+      } finally {
+        setExtractingBounds(false)
+      }
+    }
+
+    extractBounds()
+  }, [selectedOrthomosaic, isDemo])
+
   // Check for existing detections when orthomosaic changes
   useEffect(() => {
     async function checkExistingDetections() {
@@ -898,61 +931,19 @@ export default function OrthomosaicViewerPage() {
         </Card>
       )}
 
-      {/* Completed but no bounds — offer re-sync to extract bounds */}
+      {/* Completed but no bounds — auto-extracting */}
       {selectedOrthomosaic && selectedOrthomosaic.status === 'completed' && !selectedOrthomosaic.bounds && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">Orthomosaic Ready — Extracting Map Data</CardTitle>
-            <CardDescription>
-              The orthophoto is processed but geo bounds need to be extracted for the interactive map.
-              Click the button below to extract bounds and enable the full viewer.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <Button
-              onClick={async () => {
-                setError(null)
-                setProcessingStatus({ statusLabel: 'Extracting bounds from GeoTIFF...', progress: 50 })
-                try {
-                  const res = await fetch('/api/lightning/sync', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
-                  })
-                  const data = await res.json()
-                  if (!res.ok) throw new Error(data.error || 'Sync failed')
-
-                  // Reload to get the updated bounds
-                  await reloadOrthomosaic(selectedOrthomosaic.id)
-                } catch (err: any) {
-                  console.error('Re-sync error:', err)
-                  setError(err.message || 'Failed to extract bounds')
-                } finally {
-                  setProcessingStatus(null)
-                }
-              }}
-              className="bg-blue-600 hover:bg-blue-700"
-            >
-              <RefreshCw className="h-4 w-4 mr-2" />
-              Extract Map Bounds
-            </Button>
-
-            {selectedOrthomosaic.orthomosaic_url && (
-              <div className="pt-2 border-t">
-                <p className="text-sm text-gray-500 mb-2">Or download the orthophoto directly:</p>
-                <a
-                  href={selectedOrthomosaic.orthomosaic_url}
-                  download
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <Button variant="outline">
-                    <Download className="h-4 w-4 mr-2" />
-                    Download Orthophoto
-                  </Button>
-                </a>
+        <Card className="border-blue-200 bg-blue-50">
+          <CardContent className="py-4">
+            <div className="flex items-center gap-4">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+              <div className="flex-1">
+                <div className="font-medium text-blue-900">Extracting Map Bounds</div>
+                <div className="text-sm text-blue-700">
+                  Reading geo data from the orthophoto to enable the interactive map...
+                </div>
               </div>
-            )}
+            </div>
           </CardContent>
         </Card>
       )}
