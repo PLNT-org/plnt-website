@@ -256,7 +256,12 @@ export async function POST(request: NextRequest) {
         send({ type: 'status', message: 'Downloading orthomosaic image...' })
 
         // Download orthomosaic image
-        const imageResponse = await fetchWithWebODMAuth(orthomosaic.orthomosaic_url)
+        // Use plain fetch for Supabase Storage / public URLs, WebODM auth only for local WebODM
+        const orthoUrl = orthomosaic.orthomosaic_url
+        const isWebODMUrl = orthoUrl.includes('/api/projects/') || orthoUrl.includes('localhost:8000') || orthoUrl.includes('webodm')
+        const imageResponse = isWebODMUrl
+          ? await fetchWithWebODMAuth(orthoUrl)
+          : await fetch(orthoUrl)
         if (!imageResponse.ok) {
           send({ type: 'error', error: `Failed to download orthomosaic: ${imageResponse.status}` })
           controller.close()
