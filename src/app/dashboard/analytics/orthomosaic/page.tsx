@@ -619,6 +619,29 @@ export default function OrthomosaicViewerPage() {
       let buffer = ''
       let finalResult: Record<string, unknown> | null = null
 
+      const processLine = (line: string) => {
+        if (!line.trim()) return
+        try {
+          const event = JSON.parse(line)
+
+          if (event.type === 'progress') {
+            setDetectionProgress({
+              processedTiles: event.processedTiles,
+              totalTiles: event.totalTiles,
+              detectionsCount: event.detectionsCount,
+              phase: event.phase,
+            })
+          } else if (event.type === 'result') {
+            finalResult = event
+          } else if (event.type === 'error') {
+            console.error('Detection error:', event.error)
+            alert(event.error || 'Plant detection failed')
+          }
+        } catch {
+          // Skip malformed lines
+        }
+      }
+
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
@@ -630,28 +653,17 @@ export default function OrthomosaicViewerPage() {
         buffer = lines.pop() || '' // Keep incomplete line in buffer
 
         for (const line of lines) {
-          if (!line.trim()) continue
-          try {
-            const event = JSON.parse(line)
-
-            if (event.type === 'progress') {
-              setDetectionProgress({
-                processedTiles: event.processedTiles,
-                totalTiles: event.totalTiles,
-                detectionsCount: event.detectionsCount,
-                phase: event.phase,
-              })
-            } else if (event.type === 'result') {
-              finalResult = event
-            } else if (event.type === 'error') {
-              console.error('Detection error:', event.error)
-              alert(event.error || 'Plant detection failed')
-            }
-          } catch {
-            // Skip malformed lines
-          }
+          processLine(line)
         }
       }
+
+      // Flush any remaining data in the buffer (the final "result" event)
+      buffer += decoder.decode() // flush TextDecoder
+      if (buffer.trim()) {
+        processLine(buffer)
+      }
+
+      console.log('[Detection] Stream complete. finalResult:', finalResult)
 
       if (finalResult && finalResult.success) {
         setPlantDetectionResult({
@@ -660,6 +672,10 @@ export default function OrthomosaicViewerPage() {
           classCounts: finalResult.classCounts as Record<string, number>,
           averageConfidence: finalResult.averageConfidence as number,
         })
+
+        if ((finalResult.totalDetections as number) === 0) {
+          alert('No plants detected. Try lowering the confidence threshold in Settings.')
+        }
 
         // Reload labels to include new AI detections
         const labelsResponse = await fetch(
@@ -672,6 +688,9 @@ export default function OrthomosaicViewerPage() {
 
         // Automatically aggregate by plot
         await handleAggregateByPlot()
+      } else if (!finalResult) {
+        console.error('[Detection] No result event received from stream')
+        alert('Plant detection completed but no results were received. Check Vercel logs.')
       }
     } catch (err) {
       console.error('Error running plant detection:', err)
