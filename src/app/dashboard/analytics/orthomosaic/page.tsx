@@ -132,6 +132,19 @@ export default function OrthomosaicViewerPage() {
 
   const [orthomosaics, setOrthomosaics] = useState<Orthomosaic[]>([])
   const [selectedOrthomosaic, setSelectedOrthomosaic] = useState<Orthomosaic | null>(null)
+
+  // Reload a single orthomosaic via the API (bypasses RLS)
+  const reloadOrthomosaic = async (id: string) => {
+    const response = await fetch('/api/orthomosaic/list')
+    if (!response.ok) return null
+    const { orthomosaics: data } = await response.json()
+    const updated = data?.find((o: Orthomosaic) => o.id === id)
+    if (updated) {
+      setSelectedOrthomosaic(updated)
+      setOrthomosaics(prev => prev.map(o => o.id === updated.id ? updated : o))
+    }
+    return updated
+  }
   const [labels, setLabels] = useState<PlantLabel[]>([])
   const [loading, setLoading] = useState(true)
   const [labelsLoading, setLabelsLoading] = useState(false)
@@ -323,19 +336,10 @@ export default function OrthomosaicViewerPage() {
 
     const pollStatus = async () => {
       try {
-        // If already syncing (downloading orthophoto), just check DB for completion
+        // If already syncing (downloading orthophoto), just check for completion
         if (selectedOrthomosaic.status === 'syncing' || syncing) {
-          const { data: updated } = await supabase
-            .from('orthomosaics')
-            .select('*')
-            .eq('id', selectedOrthomosaic.id)
-            .single()
-          if (updated && updated.status === 'completed') {
-            setSelectedOrthomosaic(updated)
-            setOrthomosaics(prev =>
-              prev.map(o => o.id === updated.id ? updated : o)
-            )
-          }
+          const updated = await reloadOrthomosaic(selectedOrthomosaic.id)
+          if (updated?.status === 'completed') return
           return
         }
 
@@ -362,35 +366,14 @@ export default function OrthomosaicViewerPage() {
             .then(async (syncRes) => {
               const syncData = await syncRes.json()
               if (syncData.success) {
-                // Reload from DB
-                const { data: updated } = await supabase
-                  .from('orthomosaics')
-                  .select('*')
-                  .eq('id', selectedOrthomosaic.id)
-                  .single()
-                if (updated) {
-                  setSelectedOrthomosaic(updated)
-                  setOrthomosaics(prev =>
-                    prev.map(o => o.id === updated.id ? updated : o)
-                  )
-                }
+                await reloadOrthomosaic(selectedOrthomosaic.id)
               }
             })
             .catch((err) => console.error('Sync error:', err))
             .finally(() => { syncing = false })
         } else if (data.isComplete && !data.needsSync) {
           // Non-Lightning task completed directly
-          const { data: updated } = await supabase
-            .from('orthomosaics')
-            .select('*')
-            .eq('id', selectedOrthomosaic.id)
-            .single()
-          if (updated) {
-            setSelectedOrthomosaic(updated)
-            setOrthomosaics(prev =>
-              prev.map(o => o.id === updated.id ? updated : o)
-            )
-          }
+          await reloadOrthomosaic(selectedOrthomosaic.id)
         }
       } catch (err) {
         console.error('Error polling status:', err)
@@ -939,18 +922,8 @@ export default function OrthomosaicViewerPage() {
                   const data = await res.json()
                   if (!res.ok) throw new Error(data.error || 'Sync failed')
 
-                  // Reload from DB to get the updated bounds
-                  const { data: updated } = await supabase
-                    .from('orthomosaics')
-                    .select('*')
-                    .eq('id', selectedOrthomosaic.id)
-                    .single()
-                  if (updated) {
-                    setSelectedOrthomosaic(updated)
-                    setOrthomosaics(prev =>
-                      prev.map(o => o.id === updated.id ? updated : o)
-                    )
-                  }
+                  // Reload to get the updated bounds
+                  await reloadOrthomosaic(selectedOrthomosaic.id)
                 } catch (err: any) {
                   console.error('Re-sync error:', err)
                   setError(err.message || 'Failed to extract bounds')
