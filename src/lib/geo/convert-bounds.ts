@@ -1,5 +1,3 @@
-import proj4 from 'proj4'
-
 export interface GeoBounds {
   west: number
   south: number
@@ -17,10 +15,10 @@ export interface GeoBounds {
  * @param geoKeys - GeoKeys from geotiff's image.getGeoKeys()
  * @returns Bounds in WGS84 (longitude/latitude)
  */
-export function convertBoundsToWGS84(
+export async function convertBoundsToWGS84(
   bbox: number[],
   geoKeys: Record<string, number>
-): GeoBounds {
+): Promise<GeoBounds> {
   const epsg = geoKeys.ProjectedCSTypeGeoKey
 
   // If no projected CRS, assume already in geographic coordinates
@@ -34,6 +32,9 @@ export function convertBoundsToWGS84(
     console.warn(`Unknown EPSG:${epsg}, returning raw bounds`)
     return { west: bbox[0], south: bbox[1], east: bbox[2], north: bbox[3] }
   }
+
+  // Dynamic import to avoid webpack bundling issues
+  const proj4 = (await import('proj4')).default
 
   // Convert SW and NE corners to WGS84
   const [swLng, swLat] = proj4(sourceProj, 'EPSG:4326', [bbox[0], bbox[1]])
