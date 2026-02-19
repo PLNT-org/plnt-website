@@ -171,12 +171,13 @@ export default function ImageUploadPage() {
       // Store image records in database
       const imageRecords = uploadedPaths.map(path => ({
         flight_id: selectedFlight,
-        image_url: path,
+        storage_path: path,
+        filename: path.split('/').pop() || 'unknown.jpg',
         captured_at: new Date().toISOString()
       }))
 
       const { error: dbError } = await supabase
-        .from('aerial_images')
+        .from('flight_images')
         .insert(imageRecords)
 
       if (dbError) throw dbError

@@ -51,8 +51,8 @@ export async function POST(request: NextRequest) {
 
     // Get images for this flight
     const { data: images, error: imagesError } = await supabaseAdmin
-      .from('aerial_images')
-      .select('image_url')
+      .from('flight_images')
+      .select('storage_path')
       .eq('flight_id', flightId)
 
     if (imagesError || !images || images.length === 0) {
@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
     for (const image of images) {
       const { data } = await supabaseAdmin.storage
         .from('flight-images')
-        .createSignedUrl(image.image_url, 3600) // 1 hour
+        .createSignedUrl(image.storage_path, 3600) // 1 hour
       if (data?.signedUrl) {
         imageUrls.push(data.signedUrl)
       }

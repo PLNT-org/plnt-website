@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
   try {
     // --- Parse request body ---
     // Supports two modes:
-    //   1. { flightId } — looks up images from aerial_images table
+    //   1. { flightId } — looks up images from flight_images table
     //   2. { storagePaths } — uses provided Supabase Storage paths directly
     const { flightId, storagePaths, name, quality } = await request.json()
 
@@ -51,13 +51,13 @@ export async function POST(request: NextRequest) {
     }
 
     // --- Resolve image paths ---
-    let imagePaths: { id: string; image_url: string }[]
+    let imagePaths: { id: string; storage_path: string }[]
 
     if (flightId) {
-      // Mode 1: Look up images from aerial_images table
+      // Mode 1: Look up images from flight_images table
       const { data: imageRows, error: imgError } = await supabaseAdmin
-        .from('aerial_images')
-        .select('id, image_url')
+        .from('flight_images')
+        .select('id, storage_path')
         .eq('flight_id', flightId)
         .order('created_at', { ascending: true })
 
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest) {
       // Mode 2: Use provided storage paths directly
       imagePaths = (storagePaths as string[]).map((p: string, i: number) => ({
         id: String(i),
-        image_url: p,
+        storage_path: p,
       }))
     }
 
@@ -145,14 +145,14 @@ export async function POST(request: NextRequest) {
         batch.map(async (row) => {
           const { data, error } = await supabaseAdmin.storage
             .from(BUCKETS.FLIGHT_IMAGES)
-            .download(row.image_url)
+            .download(row.storage_path)
 
           if (error || !data) {
-            throw new Error(`Failed to download image ${row.image_url}: ${error?.message}`)
+            throw new Error(`Failed to download image ${row.storage_path}: ${error?.message}`)
           }
 
           // Extract filename from the storage path
-          const filename = row.image_url.split('/').pop() || `image_${row.id}.jpg`
+          const filename = row.storage_path.split('/').pop() || `image_${row.id}.jpg`
           return { blob: data, filename }
         })
       )

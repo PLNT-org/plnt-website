@@ -51,7 +51,7 @@ interface FlightDetails {
     individual_plants?: any[]
     created_at: string
   }[]
-  aerial_images?: {
+  flight_images?: {
     id: string
     image_url: string
     thumbnail_url?: string
@@ -92,7 +92,7 @@ export default function FlightResultsPage() {
             plots (*)
           ),
           plant_counts (*),
-          aerial_images (*)
+          flight_images (*)
         `)
         .eq('id', flightId)
         .single()
@@ -146,7 +146,7 @@ export default function FlightResultsPage() {
         created_at: new Date().toISOString(),
         individual_plants: generateDemoPlants(50)
       }],
-      aerial_images: Array.from({ length: 6 }, (_, i) => ({
+      flight_images: Array.from({ length: 6 }, (_, i) => ({
         id: `img-${i}`,
         image_url: `/api/placeholder/400/300`,
         thumbnail_url: `/api/placeholder/100/75`,
@@ -498,12 +498,12 @@ export default function FlightResultsPage() {
               <CardHeader>
                 <CardTitle>Captured Images</CardTitle>
                 <CardDescription>
-                  {flight.aerial_images?.length || 0} images from this flight
+                  {flight.flight_images?.length || 0} images from this flight
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
-                  {flight.aerial_images?.map(image => (
+                  {flight.flight_images?.map(image => (
                     <div 
                       key={image.id}
                       className="relative group cursor-pointer"
