@@ -54,6 +54,7 @@ interface Orthomosaic {
     west: number
   }
   orthomosaic_url: string | null
+  tiles_url?: string | null
   resolution_cm?: number | null
   image_width?: number | null
   image_height?: number | null
@@ -178,13 +179,20 @@ export default function OrthomosaicMap({
     )
     satelliteLayer.addTo(map)
 
-    // Orthophoto tile layer
-    if (orthomosaic.orthomosaic_url) {
+    // Orthophoto layer — prefer pre-generated tiles, fall back to image overlay
+    if (orthomosaic.tiles_url) {
+      // Pre-generated XYZ tiles in Supabase Storage
+      const orthophotoLayer = L.tileLayer(orthomosaic.tiles_url, {
+        maxZoom: 24,
+        minZoom: 10,
+        opacity: 0.9,
+        bounds: [[south, west], [north, east]],
+      })
+      orthophotoLayer.addTo(map)
+      orthophotoLayerRef.current = orthophotoLayer
+    } else if (orthomosaic.orthomosaic_url) {
       // Extract project and task IDs from the URL to build proxy tiles URL
-      // URL format: .../api/projects/{projectId}/tasks/{taskId}/download/orthophoto.tif
       const urlMatch = orthomosaic.orthomosaic_url.match(/projects\/(\d+)\/tasks\/([^/]+)/)
-
-      const orthoUrl = orthomosaic.orthomosaic_url!
 
       if (urlMatch) {
         const [, projectId, taskId] = urlMatch
@@ -201,7 +209,7 @@ export default function OrthomosaicMap({
       } else {
         // Direct image overlay (Supabase Storage URL, demo image, etc.)
         const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
-        const imageLayer = L.imageOverlay(orthoUrl, bounds, {
+        const imageLayer = L.imageOverlay(orthomosaic.orthomosaic_url, bounds, {
           opacity: 0.9,
         }) as any
         imageLayer.addTo(map)

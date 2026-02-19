@@ -81,6 +81,7 @@ interface Orthomosaic {
   image_width: number | null
   image_height: number | null
   orthomosaic_url: string | null
+  tiles_url?: string | null
   created_at: string
   flight_id: string
   error_message?: string
@@ -323,16 +324,23 @@ export default function OrthomosaicViewerPage() {
     loadArucoData()
   }, [selectedOrthomosaic, isDemo, user])
 
-  // Poll for processing status if orthomosaic is processing/syncing
+  // Poll for processing status if orthomosaic is pending/processing/syncing
   useEffect(() => {
     if (!selectedOrthomosaic) return
-    if (selectedOrthomosaic.status !== 'processing' && selectedOrthomosaic.status !== 'syncing') return
+    if (selectedOrthomosaic.status !== 'pending' && selectedOrthomosaic.status !== 'processing' && selectedOrthomosaic.status !== 'syncing') return
     if (isDemo) return
 
     let syncing = false
 
     const pollStatus = async () => {
       try {
+        // If pending (images still uploading to Lightning), just check DB for status change
+        if (selectedOrthomosaic.status === 'pending') {
+          const updated = await reloadOrthomosaic(selectedOrthomosaic.id)
+          if (updated?.status === 'processing' || updated?.status === 'failed') return
+          return
+        }
+
         // If already syncing (downloading orthophoto), just check for completion
         if (selectedOrthomosaic.status === 'syncing' || syncing) {
           const updated = await reloadOrthomosaic(selectedOrthomosaic.id)
@@ -381,6 +389,40 @@ export default function OrthomosaicViewerPage() {
     const interval = setInterval(pollStatus, 5000)
     return () => clearInterval(interval)
   }, [selectedOrthomosaic, isDemo])
+
+  // Auto-generate tiles when an ortho completes and doesn't have them yet
+  const [generatingTiles, setGeneratingTiles] = useState(false)
+
+  useEffect(() => {
+    if (!selectedOrthomosaic) return
+    if (isDemo) return
+    if (selectedOrthomosaic.status !== 'completed') return
+    if (selectedOrthomosaic.tiles_url) return // Already has tiles
+    if (!selectedOrthomosaic.orthomosaic_url) return
+    if (!selectedOrthomosaic.bounds) return
+    if (generatingTiles) return
+
+    // Auto-trigger tile generation
+    setGeneratingTiles(true)
+    console.log('[Tiles] Auto-generating tiles for', selectedOrthomosaic.id)
+
+    fetch('/api/orthomosaic/generate-tiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+    })
+      .then(async (res) => {
+        const data = await res.json()
+        if (data.success) {
+          console.log(`[Tiles] Generated ${data.totalTiles} tiles`)
+          await reloadOrthomosaic(selectedOrthomosaic.id)
+        } else {
+          console.error('[Tiles] Generation failed:', data.error)
+        }
+      })
+      .catch((err) => console.error('[Tiles] Error:', err))
+      .finally(() => setGeneratingTiles(false))
+  }, [selectedOrthomosaic, isDemo, generatingTiles])
 
   // Handle adding a new label
   const handleAddLabel = async (lat: number, lng: number, pixelX?: number, pixelY?: number) => {

@@ -15,16 +15,12 @@ const LIGHTNING_MAX_IMAGES = 337
 const BATCH_SIZE = 10
 
 export async function POST(request: NextRequest) {
-  let lightningUuid: string | null = null
+  let orthomosaicId: string | null = null
   const lightningToken = process.env.WEBODM_LIGHTNING_TOKEN
   const lightningHost = process.env.WEBODM_LIGHTNING_HOST || 'spark1.webodm.net'
   const lightningBase = `https://${lightningHost}`
 
   try {
-    // --- Parse request body ---
-    // Supports two modes:
-    //   1. { flightId } — looks up images from flight_images table
-    //   2. { storagePaths } — uses provided Supabase Storage paths directly
     const { flightId, storagePaths, name, quality } = await request.json()
 
     if (!flightId && (!storagePaths || storagePaths.length === 0)) {
@@ -35,18 +31,20 @@ export async function POST(request: NextRequest) {
     }
 
     // --- Authenticate user ---
-    let user = null
+    let userId: string | null = null
     const cookies = request.headers.get('cookie') || ''
-    const accessTokenMatch = cookies.match(/sb-[^-]+-auth-token=([^;]+)/)
+    // Match both regular and chunked Supabase auth cookies
+    const accessTokenMatch = cookies.match(/sb-[^-]+-auth-token(?:\.0)?=([^;]+)/)
     if (accessTokenMatch) {
       try {
         const tokenData = JSON.parse(decodeURIComponent(accessTokenMatch[1]))
-        if (tokenData.access_token) {
-          const { data } = await supabaseAdmin.auth.getUser(tokenData.access_token)
-          user = data.user
+        const token = tokenData.access_token || tokenData
+        if (token && typeof token === 'string') {
+          const { data } = await supabaseAdmin.auth.getUser(token)
+          userId = data.user?.id || null
         }
       } catch {
-        // Token parsing failed
+        console.log('[Lightning] Could not extract user from cookies')
       }
     }
 
@@ -54,7 +52,6 @@ export async function POST(request: NextRequest) {
     let imagePaths: { id: string; storage_path: string }[]
 
     if (flightId) {
-      // Mode 1: Look up images from flight_images table
       const { data: imageRows, error: imgError } = await supabaseAdmin
         .from('flight_images')
         .select('id, storage_path')
@@ -62,13 +59,13 @@ export async function POST(request: NextRequest) {
         .order('created_at', { ascending: true })
 
       if (imgError) {
-        console.error('Error fetching images:', imgError)
+        console.error('[Lightning] Error fetching images:', imgError)
         return NextResponse.json({ error: 'Failed to look up flight images' }, { status: 500 })
       }
 
       imagePaths = imageRows || []
+      console.log(`[Lightning] Found ${imagePaths.length} images for flight ${flightId}`)
     } else {
-      // Mode 2: Use provided storage paths directly
       imagePaths = (storagePaths as string[]).map((p: string, i: number) => ({
         id: String(i),
         storage_path: p,
@@ -77,7 +74,7 @@ export async function POST(request: NextRequest) {
 
     if (imagePaths.length < 3) {
       return NextResponse.json(
-        { error: `At least 3 images are required (found ${imagePaths.length})` },
+        { error: `At least 3 images are required (found ${imagePaths.length}). Make sure images were uploaded successfully.` },
         { status: 400 }
       )
     }
@@ -89,7 +86,6 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // --- Verify Lightning is configured ---
     if (!lightningToken) {
       return NextResponse.json(
         { error: 'WebODM Lightning is not configured. Please add WEBODM_LIGHTNING_TOKEN to environment variables.' },
@@ -106,6 +102,34 @@ export async function POST(request: NextRequest) {
     const options = PROCESSING_PRESETS[presetKey]
     const isHeightMapping = quality === 'height-mapping'
     const taskName = name || `Orthomosaic - ${new Date().toLocaleDateString()}`
+
+    // --- Create DB record FIRST so it exists even if upload times out ---
+    console.log(`[Lightning] Creating DB record for "${taskName}"...`)
+    const { data: orthomosaic, error: orthoError } = await supabaseAdmin
+      .from('orthomosaics')
+      .insert({
+        flight_id: flightId || null,
+        user_id: userId,
+        name: taskName,
+        webodm_project_id: 'lightning',
+        status: 'pending',
+        processing_type: isHeightMapping ? 'height-mapping' : 'orthomosaic',
+        has_dsm: isHeightMapping,
+        has_dtm: isHeightMapping,
+      })
+      .select()
+      .single()
+
+    if (orthoError) {
+      console.error('[Lightning] Error creating orthomosaic record:', orthoError)
+      return NextResponse.json(
+        { error: `Failed to create orthomosaic record: ${orthoError.message}` },
+        { status: 500 }
+      )
+    }
+
+    orthomosaicId = orthomosaic.id
+    console.log(`[Lightning] DB record created: ${orthomosaicId}`)
 
     // --- Step 1: Initialize Lightning task ---
     console.log(`[Lightning] Initializing task "${taskName}" with ${imagePaths.length} images...`)
@@ -130,8 +154,14 @@ export async function POST(request: NextRequest) {
     }
 
     const initData = await initRes.json()
-    lightningUuid = initData.uuid
+    const lightningUuid = initData.uuid
     console.log(`[Lightning] Task initialized: ${lightningUuid}`)
+
+    // Save the Lightning UUID immediately so we can track/recover
+    await supabaseAdmin
+      .from('orthomosaics')
+      .update({ webodm_task_id: lightningUuid })
+      .eq('id', orthomosaicId)
 
     // --- Step 2: Download from Supabase + upload to Lightning in batches ---
     for (let i = 0; i < imagePaths.length; i += BATCH_SIZE) {
@@ -140,7 +170,6 @@ export async function POST(request: NextRequest) {
       const totalBatches = Math.ceil(imagePaths.length / BATCH_SIZE)
       console.log(`[Lightning] Uploading batch ${batchNum}/${totalBatches} (${batch.length} images)...`)
 
-      // Download all images in this batch from Supabase concurrently
       const downloadResults = await Promise.all(
         batch.map(async (row) => {
           const { data, error } = await supabaseAdmin.storage
@@ -151,13 +180,11 @@ export async function POST(request: NextRequest) {
             throw new Error(`Failed to download image ${row.storage_path}: ${error?.message}`)
           }
 
-          // Extract filename from the storage path
           const filename = row.storage_path.split('/').pop() || `image_${row.id}.jpg`
           return { blob: data, filename }
         })
       )
 
-      // Build form data for this batch and upload to Lightning
       const uploadForm = new FormData()
       for (const { blob, filename } of downloadResults) {
         uploadForm.append('images', blob, filename)
@@ -186,50 +213,35 @@ export async function POST(request: NextRequest) {
       throw new Error(`Lightning commit failed: ${errText}`)
     }
 
-    console.log(`[Lightning] Task committed successfully`)
-
-    // --- Create orthomosaics DB record ---
-    const { data: orthomosaic, error: orthoError } = await supabaseAdmin
+    // --- Update DB record to processing ---
+    await supabaseAdmin
       .from('orthomosaics')
-      .insert({
-        flight_id: flightId || null,
-        user_id: user?.id || null,
-        name: taskName,
-        webodm_task_id: lightningUuid,
-        webodm_project_id: 'lightning',
-        status: 'processing',
-        processing_type: isHeightMapping ? 'height-mapping' : 'orthomosaic',
-        has_dsm: isHeightMapping,
-        has_dtm: isHeightMapping,
-      })
-      .select()
-      .single()
+      .update({ status: 'processing' })
+      .eq('id', orthomosaicId)
 
-    if (orthoError) {
-      console.error('Error creating orthomosaic record:', orthoError)
-      return NextResponse.json({ error: 'Failed to create orthomosaic record' }, { status: 500 })
-    }
+    console.log(`[Lightning] Task committed and DB updated. UUID: ${lightningUuid}, orthoId: ${orthomosaicId}`)
 
     return NextResponse.json({
       success: true,
       uuid: lightningUuid,
-      orthomosaicId: orthomosaic?.id,
+      orthomosaicId: orthomosaicId,
       imagesCount: imagePaths.length,
     })
   } catch (error) {
-    console.error('Error creating Lightning task:', error)
+    console.error('[Lightning] Error:', error)
 
-    // Clean up the Lightning task if it was created
-    if (lightningUuid && lightningToken) {
+    // Update DB record to failed (don't delete it — user can see the error)
+    if (orthomosaicId) {
       try {
-        await fetch(`${lightningBase}/task/remove?token=${lightningToken}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: lightningUuid }),
-        })
-        console.log(`[Lightning] Cleaned up failed task ${lightningUuid}`)
-      } catch (cleanupErr) {
-        console.error('[Lightning] Cleanup failed:', cleanupErr)
+        await supabaseAdmin
+          .from('orthomosaics')
+          .update({
+            status: 'failed',
+            error_message: error instanceof Error ? error.message : 'Unknown error',
+          })
+          .eq('id', orthomosaicId)
+      } catch (dbErr) {
+        console.error('[Lightning] Failed to update error status:', dbErr)
       }
     }
 

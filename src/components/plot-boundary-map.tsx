@@ -41,6 +41,7 @@ interface Orthomosaic {
   id: string
   name: string
   orthomosaic_url?: string
+  tiles_url?: string
   webodm_project_id?: string
   webodm_task_id?: string
   bounds?: {
@@ -322,7 +323,17 @@ export default function PlotBoundaryMap({
       && ortho.webodm_project_id !== 'lightning'
       && ortho.webodm_task_id
 
-    if (isLocalWebODM) {
+    if (ortho.tiles_url) {
+      // Pre-generated XYZ tiles — best zoom experience
+      const tileLayer = L.tileLayer(ortho.tiles_url, {
+        bounds,
+        opacity: 0.9,
+        maxZoom: 24,
+        minZoom: 10,
+      })
+      tileLayer.addTo(mapRef.current)
+      orthomosaicLayerRef.current = tileLayer
+    } else if (isLocalWebODM) {
       // Use tile proxy API (handles WebODM authentication)
       const tileUrl = `/api/orthomosaic/tiles/${ortho.webodm_project_id}/${ortho.webodm_task_id}/{z}/{x}/{y}`
       const tileLayer = L.tileLayer(tileUrl, {
