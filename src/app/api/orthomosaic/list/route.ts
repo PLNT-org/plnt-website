@@ -1,21 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { unstable_noStore as noStore } from 'next/cache'
 
 // Must be dynamic — returns live data from the database
 export const dynamic = 'force-dynamic'
 
-// Use service role to bypass RLS
+// Use service role to bypass RLS, with no-store to defeat Next.js data cache
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  {
+    global: {
+      fetch: (url: string | URL | Request, options: RequestInit = {}) =>
+        fetch(url, { ...options, cache: 'no-store' }),
+    },
+  }
 )
 
 export async function GET(request: NextRequest) {
-  try {
-    // For now, fetch all orthomosaics (local dev - no strict auth required)
-    // In production, you'd want to properly authenticate
+  noStore()
 
-    // Fetch all orthomosaics
+  try {
     const { data: orthomosaics, error } = await supabaseAdmin
       .from('orthomosaics')
       .select('*')
