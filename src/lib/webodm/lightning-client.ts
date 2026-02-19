@@ -357,10 +357,52 @@ export class LightningClient {
   }
 
   /**
-   * Download orthophoto as buffer
+   * Download orthophoto as buffer.
+   * Tries direct orthophoto.tif first; if Lightning returns 404
+   * (known issue with COG-enabled tasks), falls back to downloading
+   * all.zip and extracting the orthophoto from it.
    */
   async downloadOrthophoto(uuid: string): Promise<ArrayBuffer> {
-    return this.downloadAsset(uuid, 'orthophoto.tif')
+    // Try direct download first
+    const directUrl = this.getAssetUrl(uuid, 'orthophoto.tif')
+    const directRes = await fetch(directUrl)
+
+    if (directRes.ok) {
+      return directRes.arrayBuffer()
+    }
+
+    console.log(`Direct orthophoto.tif returned ${directRes.status}, falling back to all.zip extraction...`)
+
+    // Fallback: download all.zip and extract the orthophoto
+    const zipBuffer = await this.downloadAsset(uuid, 'all.zip')
+    const JSZip = (await import('jszip')).default
+    const zip = await JSZip.loadAsync(zipBuffer)
+
+    // Look for the orthophoto in common paths
+    const orthoPaths = [
+      'odm_orthophoto/odm_orthophoto.tif',
+      'odm_orthophoto/odm_orthophoto.cog.tif',
+      'orthophoto.tif',
+    ]
+
+    for (const path of orthoPaths) {
+      const entry = zip.file(path)
+      if (entry) {
+        console.log(`Found orthophoto at: ${path}`)
+        return entry.async('arraybuffer')
+      }
+    }
+
+    // Try to find any .tif file in the zip
+    const tifFiles = Object.keys(zip.files).filter(f =>
+      f.endsWith('.tif') && f.includes('ortho')
+    )
+    if (tifFiles.length > 0) {
+      console.log(`Found orthophoto at: ${tifFiles[0]}`)
+      return zip.file(tifFiles[0])!.async('arraybuffer')
+    }
+
+    throw new Error('Orthophoto not found in all.zip')
   }
 
   /**
