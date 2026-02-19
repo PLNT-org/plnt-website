@@ -910,8 +910,11 @@ export default function OrthomosaicViewerPage() {
                 {orthomosaics.map((ortho) => (
                   <SelectItem key={ortho.id} value={ortho.id}>
                     <div className="flex items-center gap-2">
-                      <span>{ortho.name}</span>
+                      <span className="truncate">{ortho.name}</span>
                       <StatusBadge status={ortho.status} small />
+                      <span className="text-xs text-gray-400 whitespace-nowrap">
+                        {new Date(ortho.created_at).toLocaleDateString()}
+                      </span>
                     </div>
                   </SelectItem>
                 ))}
