@@ -915,39 +915,70 @@ export default function OrthomosaicViewerPage() {
         </Card>
       )}
 
-      {/* Completed but no bounds — show download/image view */}
+      {/* Completed but no bounds — offer re-sync to extract bounds */}
       {selectedOrthomosaic && selectedOrthomosaic.status === 'completed' && !selectedOrthomosaic.bounds && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Orthomosaic Ready</CardTitle>
+            <CardTitle className="text-lg">Orthomosaic Ready — Extracting Map Data</CardTitle>
             <CardDescription>
-              Processing is complete. Geo bounds were not extracted so the map overlay is unavailable,
-              but you can view or download the orthophoto directly.
+              The orthophoto is processed but geo bounds need to be extracted for the interactive map.
+              Click the button below to extract bounds and enable the full viewer.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <Button
+              onClick={async () => {
+                setError(null)
+                setProcessingStatus({ statusLabel: 'Extracting bounds from GeoTIFF...', progress: 50 })
+                try {
+                  const res = await fetch('/api/lightning/sync', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+                  })
+                  const data = await res.json()
+                  if (!res.ok) throw new Error(data.error || 'Sync failed')
+
+                  // Reload from DB to get the updated bounds
+                  const { data: updated } = await supabase
+                    .from('orthomosaics')
+                    .select('*')
+                    .eq('id', selectedOrthomosaic.id)
+                    .single()
+                  if (updated) {
+                    setSelectedOrthomosaic(updated)
+                    setOrthomosaics(prev =>
+                      prev.map(o => o.id === updated.id ? updated : o)
+                    )
+                  }
+                } catch (err: any) {
+                  console.error('Re-sync error:', err)
+                  setError(err.message || 'Failed to extract bounds')
+                } finally {
+                  setProcessingStatus(null)
+                }
+              }}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Extract Map Bounds
+            </Button>
+
             {selectedOrthomosaic.orthomosaic_url && (
-              <>
-                <div className="rounded-lg overflow-hidden border bg-gray-100 max-h-[600px]">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={selectedOrthomosaic.orthomosaic_url}
-                    alt={selectedOrthomosaic.name}
-                    className="w-full h-auto object-contain max-h-[600px]"
-                  />
-                </div>
+              <div className="pt-2 border-t">
+                <p className="text-sm text-gray-500 mb-2">Or download the orthophoto directly:</p>
                 <a
                   href={selectedOrthomosaic.orthomosaic_url}
                   download
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  <Button>
+                  <Button variant="outline">
                     <Download className="h-4 w-4 mr-2" />
                     Download Orthophoto
                   </Button>
                 </a>
-              </>
+              </div>
             )}
           </CardContent>
         </Card>
