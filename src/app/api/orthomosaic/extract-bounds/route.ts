@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { fromArrayBuffer } from 'geotiff'
-
-export const maxDuration = 120
+import { fromUrl } from 'geotiff'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -11,7 +9,8 @@ const supabaseAdmin = createClient(
 
 /**
  * POST: Extract geo bounds from an already-uploaded orthophoto in Supabase Storage.
- * This avoids re-downloading from Lightning — it reads directly from the stored file.
+ * Uses HTTP range requests (fromUrl) to read only the GeoTIFF header/metadata
+ * without downloading the entire multi-hundred-MB file into memory.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -45,21 +44,10 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Download the orthophoto from Supabase Storage
-    console.log(`Downloading orthophoto from Supabase for bounds extraction: ${ortho.orthomosaic_url}`)
-    const response = await fetch(ortho.orthomosaic_url)
-    if (!response.ok) {
-      return NextResponse.json(
-        { error: `Failed to download orthophoto: ${response.status}` },
-        { status: 500 }
-      )
-    }
-
-    const buffer = await response.arrayBuffer()
-
-    // Parse the GeoTIFF and extract bounds
-    console.log('Extracting bounds from GeoTIFF...')
-    const tiff = await fromArrayBuffer(buffer)
+    // Use fromUrl to read only the GeoTIFF metadata via HTTP range requests.
+    // This avoids downloading the entire file (which can be hundreds of MB).
+    console.log(`Extracting bounds via range requests from: ${ortho.orthomosaic_url}`)
+    const tiff = await fromUrl(ortho.orthomosaic_url)
     const image = await tiff.getImage()
     const bbox = image.getBoundingBox() // [west, south, east, north]
     const width = image.getWidth()
