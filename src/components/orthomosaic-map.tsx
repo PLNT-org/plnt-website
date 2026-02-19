@@ -506,7 +506,7 @@ export default function OrthomosaicMap({
           opacity: 0.9,
           fillColor: color,
           fillOpacity: 0.1,
-          bubblingMouseEvents: false, // Prevent click from propagating to map
+          bubblingMouseEvents: true, // Allow clicks to propagate for manual labeling
         })
 
         const popupContent = `
