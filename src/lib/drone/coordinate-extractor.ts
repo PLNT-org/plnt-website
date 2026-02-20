@@ -1,6 +1,13 @@
 // Coordinate Extractor for Nadir Drone Images
 // Extracts GPS coordinates for any point in a drone image using EXIF data
 
+// Polyfill DOMParser for Node.js — ExifReader needs it to parse XMP tags
+// (where DJI stores gimbal yaw, pitch, relative altitude, etc.)
+if (typeof globalThis.DOMParser === 'undefined') {
+  const { DOMParser } = require('@xmldom/xmldom')
+  globalThis.DOMParser = DOMParser
+}
+
 import ExifReader from 'exifreader'
 
 export interface DroneImageMetadata {
