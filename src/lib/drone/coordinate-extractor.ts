@@ -263,19 +263,22 @@ export function pixelToGroundCoordinate(
   let offsetMetersX = offsetPixelX * gsdX
   let offsetMetersY = offsetPixelY * gsdY
 
-  // Rotate by yaw to account for drone heading
-  // Yaw 0° = north (image top points north), 90° = east, etc.
-  // Without rotation, we assume image top = north, which is wrong when the drone faces other directions
+  // Rotate by compass heading (yaw) to map image axes to ground axes.
+  // Yaw is clockwise from North: 0°=N, 90°=E, 180°=S, 270°=W.
+  // Image axes: X=right, Y=up(forward). Ground axes: X=East, Y=North.
+  // When drone faces heading θ:
+  //   image-right  on ground = (cos θ, -sin θ) in (East, North)
+  //   image-forward on ground = (sin θ,  cos θ) in (East, North)
   if (gimbalYaw !== undefined && gimbalYaw !== 0) {
     const yawRad = gimbalYaw * Math.PI / 180
     const cosYaw = Math.cos(yawRad)
     const sinYaw = Math.sin(yawRad)
 
-    const rotatedX = offsetMetersX * cosYaw - offsetMetersY * sinYaw
-    const rotatedY = offsetMetersX * sinYaw + offsetMetersY * cosYaw
+    const groundEast  =  offsetMetersX * cosYaw + offsetMetersY * sinYaw
+    const groundNorth = -offsetMetersX * sinYaw + offsetMetersY * cosYaw
 
-    offsetMetersX = rotatedX
-    offsetMetersY = rotatedY
+    offsetMetersX = groundEast
+    offsetMetersY = groundNorth
   }
 
   // Convert meters to lat/long degrees
