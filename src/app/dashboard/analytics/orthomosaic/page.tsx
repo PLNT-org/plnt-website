@@ -25,6 +25,7 @@ import {
   Sparkles,
   TreeDeciduous,
   BarChart3,
+  Camera,
 } from 'lucide-react'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -172,6 +173,17 @@ export default function OrthomosaicViewerPage() {
     totalTiles: number
     detectionsCount: number
     phase: string
+  } | null>(null)
+
+  // Raw image detection state
+  const [rawDetecting, setRawDetecting] = useState(false)
+  const [rawDetectionProgress, setRawDetectionProgress] = useState<{
+    imageIndex: number
+    totalImages: number
+    imageName: string
+    phase: string
+    detectionsInImage?: number
+    totalDetections?: number
   } | null>(null)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
   const [plotAggregation, setPlotAggregation] = useState<{
@@ -701,6 +713,108 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
+  // Handle raw image detection (runs YOLOv11 on original drone photos)
+  const handleRawImageDetection = async () => {
+    if (!selectedOrthomosaic || isDemo || !selectedOrthomosaic.flight_id) return
+
+    setRawDetecting(true)
+    setPlantDetectionResult(null)
+    setRawDetectionProgress(null)
+    setPlotAggregation(null)
+
+    try {
+      const response = await fetch('/api/flight-detection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          flightId: selectedOrthomosaic.flight_id,
+          userId: user?.id,
+          confidence_threshold: confidenceThreshold,
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        console.error('Raw detection failed:', errorData.error)
+        alert(errorData.error || 'Raw image detection failed')
+        return
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No response body')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finalResult: Record<string, unknown> | null = null
+
+      const processLine = (line: string) => {
+        if (!line.trim()) return
+        try {
+          const event = JSON.parse(line)
+
+          if (event.type === 'imageProgress') {
+            setRawDetectionProgress({
+              imageIndex: event.imageIndex,
+              totalImages: event.totalImages,
+              imageName: event.imageName,
+              phase: event.phase,
+              detectionsInImage: event.detectionsInImage,
+              totalDetections: event.totalDetections,
+            })
+          } else if (event.type === 'result') {
+            finalResult = event
+          } else if (event.type === 'error') {
+            console.error('Raw detection error:', event.error)
+            alert(event.error || 'Raw image detection failed')
+          }
+        } catch {
+          // Skip malformed lines
+        }
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          processLine(line)
+        }
+      }
+
+      buffer += decoder.decode()
+      if (buffer.trim()) processLine(buffer)
+
+      if (finalResult && finalResult.success) {
+        setPlantDetectionResult({
+          totalDetections: finalResult.totalDetections as number,
+          savedCount: finalResult.savedCount as number,
+          classCounts: {},
+          averageConfidence: 0,
+        })
+
+        // Reload labels using the sentinel orthomosaic ID
+        const orthoId = finalResult.orthomosaicId as string
+        const labelsResponse = await fetch(`/api/plant-labels?orthomosaicId=${orthoId}`)
+        const labelsData = await labelsResponse.json()
+        if (labelsData.labels) {
+          setLabels(labelsData.labels)
+        }
+
+        await handleAggregateByPlot()
+      }
+    } catch (err) {
+      console.error('Error running raw image detection:', err)
+      alert('Failed to run raw image detection. Check console for details.')
+    } finally {
+      setRawDetecting(false)
+      setRawDetectionProgress(null)
+    }
+  }
+
   // Aggregate plant counts by plot
   const handleAggregateByPlot = async () => {
     if (!selectedOrthomosaic) return
@@ -1170,7 +1284,7 @@ export default function OrthomosaicViewerPage() {
                     variant="default"
                     className="bg-green-600 hover:bg-green-700"
                     onClick={handlePlantDetection}
-                    disabled={plantDetecting}
+                    disabled={plantDetecting || rawDetecting}
                   >
                     {plantDetecting ? (
                       <>
@@ -1184,6 +1298,27 @@ export default function OrthomosaicViewerPage() {
                       </>
                     )}
                   </Button>
+
+                  {selectedOrthomosaic.flight_id && (
+                    <Button
+                      variant="outline"
+                      className="border-blue-300 text-blue-700 hover:bg-blue-50"
+                      onClick={handleRawImageDetection}
+                      disabled={rawDetecting || plantDetecting}
+                    >
+                      {rawDetecting ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Processing Raw Images...
+                        </>
+                      ) : (
+                        <>
+                          <Camera className="h-4 w-4 mr-2" />
+                          Detect from Raw Images
+                        </>
+                      )}
+                    </Button>
+                  )}
 
                   <Button
                     variant="ghost"
@@ -1259,6 +1394,51 @@ export default function OrthomosaicViewerPage() {
                     {detectionProgress.totalTiles > 0
                       ? Math.round((detectionProgress.processedTiles / detectionProgress.totalTiles) * 100)
                       : 0}%
+                  </div>
+                </div>
+              )}
+
+              {/* Raw Image Detection Progress */}
+              {rawDetecting && rawDetectionProgress && (
+                <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                      <span className="text-sm font-medium text-blue-800">
+                        {rawDetectionProgress.phase === 'downloading' && `Downloading ${rawDetectionProgress.imageName}...`}
+                        {rawDetectionProgress.phase === 'decoding' && `Decoding ${rawDetectionProgress.imageName}...`}
+                        {rawDetectionProgress.phase === 'inferring' && `Running inference on ${rawDetectionProgress.imageName}...`}
+                        {rawDetectionProgress.phase === 'done' && `Completed ${rawDetectionProgress.imageName}`}
+                      </span>
+                    </div>
+                    <div className="text-sm text-blue-700 font-mono">
+                      Image {rawDetectionProgress.imageIndex + 1}/{rawDetectionProgress.totalImages}
+                      {rawDetectionProgress.totalDetections !== undefined && (
+                        <span className="ml-2">({rawDetectionProgress.totalDetections} plants total)</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="h-3 bg-blue-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-blue-600 rounded-full transition-all duration-300"
+                      style={{
+                        width: `${rawDetectionProgress.totalImages > 0
+                          ? Math.round(((rawDetectionProgress.imageIndex + (rawDetectionProgress.phase === 'done' ? 1 : 0.5)) / rawDetectionProgress.totalImages) * 100)
+                          : 0}%`
+                      }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-xs text-blue-600 mt-1">
+                    <span>
+                      {rawDetectionProgress.detectionsInImage !== undefined
+                        ? `${rawDetectionProgress.detectionsInImage} plants in this image`
+                        : 'Processing...'}
+                    </span>
+                    <span>
+                      {rawDetectionProgress.totalImages > 0
+                        ? Math.round(((rawDetectionProgress.imageIndex + (rawDetectionProgress.phase === 'done' ? 1 : 0.5)) / rawDetectionProgress.totalImages) * 100)
+                        : 0}%
+                    </span>
                   </div>
                 </div>
               )}
