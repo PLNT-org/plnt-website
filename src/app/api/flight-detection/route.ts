@@ -157,12 +157,16 @@ export async function POST(request: NextRequest) {
     userId,
     confidence_threshold = DEFAULT_CONFIDENCE,
     maxImages,
+    startIndex = 0,
+    batchSize = 10,
   } = body as {
     orthomosaicId?: string
     storagePath?: string
     userId?: string
     confidence_threshold?: number
     maxImages?: number
+    startIndex?: number
+    batchSize?: number
   }
 
   if (!inputOrthoId && !storagePath) {
@@ -208,9 +212,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'No images found' }, { status: 404 })
   }
 
-  if (maxImages) {
-    imagePaths = imagePaths.slice(0, maxImages)
-  }
+  const totalImageCount = maxImages ? Math.min(imagePaths.length, maxImages) : imagePaths.length
+  // Slice to the batch for this invocation
+  const endIndex = Math.min(startIndex + batchSize, totalImageCount)
+  const batchPaths = imagePaths.slice(startIndex, endIndex)
+  const isFirstBatch = startIndex === 0
+  const isLastBatch = endIndex >= totalImageCount
 
   // Stream NDJSON progress
   const encoder = new TextEncoder()
@@ -222,8 +229,7 @@ export async function POST(request: NextRequest) {
 
       try {
         const t0 = Date.now()
-        const totalImages = imagePaths.length
-        send({ type: 'status', message: `Processing ${totalImages} raw drone images...` })
+        send({ type: 'status', message: `Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...` })
 
         // Step 1: Determine orthomosaic ID for storing labels
         let orthomosaicId: string
@@ -269,29 +275,34 @@ export async function POST(request: NextRequest) {
           console.log(`[FlightDetection] Using sentinel ortho: ${orthomosaicId}`)
         }
 
-        // Step 2: Delete existing AI labels for this orthomosaic
-        const { count: deleteCount } = await supabase
-          .from('plant_labels')
-          .delete()
-          .eq('orthomosaic_id', orthomosaicId)
-          .eq('source', 'ai')
+        // Step 2: Delete existing AI labels only on first batch
+        if (isFirstBatch) {
+          const { count: deleteCount } = await supabase
+            .from('plant_labels')
+            .delete()
+            .eq('orthomosaic_id', orthomosaicId)
+            .eq('source', 'ai')
 
-        console.log(`[FlightDetection] Deleted ${deleteCount ?? 0} existing AI labels`)
+          console.log(`[FlightDetection] Deleted ${deleteCount ?? 0} existing AI labels`)
+        }
+
+        console.log(`[FlightDetection] Processing batch: images ${startIndex}-${endIndex - 1} of ${totalImageCount} (batch size ${batchSize})`)
 
         // Step 3: Process images one at a time
         let totalDetections = 0
         let imagesProcessed = 0
         let imagesSkipped = 0
 
-        for (let imgIdx = 0; imgIdx < imagePaths.length; imgIdx++) {
-          const storagFilePath = imagePaths[imgIdx]
-          const imageName = storagFilePath.split('/').pop() || `image-${imgIdx}`
+        for (let imgIdx = 0; imgIdx < batchPaths.length; imgIdx++) {
+          const storagFilePath = batchPaths[imgIdx]
+          const globalIdx = startIndex + imgIdx
+          const imageName = storagFilePath.split('/').pop() || `image-${globalIdx}`
           const imageStart = Date.now()
 
           send({
             type: 'imageProgress',
-            imageIndex: imgIdx,
-            totalImages,
+            imageIndex: globalIdx,
+            totalImages: totalImageCount,
             imageName,
             phase: 'downloading',
           })
@@ -327,8 +338,8 @@ export async function POST(request: NextRequest) {
             // Decode to raw pixels with sharp
             send({
               type: 'imageProgress',
-              imageIndex: imgIdx,
-              totalImages,
+              imageIndex: globalIdx,
+              totalImages: totalImageCount,
               imageName,
               phase: 'decoding',
             })
@@ -359,8 +370,8 @@ export async function POST(request: NextRequest) {
 
             send({
               type: 'imageProgress',
-              imageIndex: imgIdx,
-              totalImages,
+              imageIndex: globalIdx,
+              totalImages: totalImageCount,
               imageName,
               phase: 'inferring',
               totalTiles: tileJobs.length,
@@ -468,8 +479,8 @@ export async function POST(request: NextRequest) {
 
             send({
               type: 'imageProgress',
-              imageIndex: imgIdx,
-              totalImages,
+              imageIndex: globalIdx,
+              totalImages: totalImageCount,
               imageName,
               phase: 'done',
               detectionsInImage: nmsDetections.length,
@@ -482,56 +493,58 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // Step 4: Cross-image GPS NMS
-        send({ type: 'status', message: 'Running cross-image deduplication...' })
-        console.log(`[FlightDetection] Cross-image GPS NMS on ${totalDetections} detections (threshold: ${GPS_NMS_DISTANCE_METERS}m)`)
+        // Step 4: Cross-image GPS NMS (only on last batch when all images are done)
+        if (isLastBatch) {
+          send({ type: 'status', message: 'Running cross-image deduplication...' })
+          console.log(`[FlightDetection] Cross-image GPS NMS (threshold: ${GPS_NMS_DISTANCE_METERS}m)`)
 
-        const batchSize = 1000
-        let allLabels: Array<{ id: string; latitude: number; longitude: number; confidence: number }> = []
-        let offset = 0
-        let hasMore = true
+          const dbPageSize = 1000
+          let allLabels: Array<{ id: string; latitude: number; longitude: number; confidence: number }> = []
+          let offset = 0
+          let hasMore = true
 
-        while (hasMore) {
-          const { data, error } = await supabase
-            .from('plant_labels')
-            .select('id, latitude, longitude, confidence')
-            .eq('orthomosaic_id', orthomosaicId)
-            .eq('source', 'ai')
-            .range(offset, offset + batchSize - 1)
+          while (hasMore) {
+            const { data, error } = await supabase
+              .from('plant_labels')
+              .select('id, latitude, longitude, confidence')
+              .eq('orthomosaic_id', orthomosaicId)
+              .eq('source', 'ai')
+              .range(offset, offset + dbPageSize - 1)
 
-          if (error || !data || data.length === 0) {
-            hasMore = false
-          } else {
-            allLabels = [...allLabels, ...data]
-            offset += batchSize
-            hasMore = data.length === batchSize
-          }
-        }
-
-        if (allLabels.length > 0) {
-          const suppressedIds = applyGPSNMS(
-            allLabels.map(l => ({
-              id: l.id,
-              latitude: l.latitude,
-              longitude: l.longitude,
-              confidence: l.confidence || 0,
-            })),
-            GPS_NMS_DISTANCE_METERS
-          )
-
-          if (suppressedIds.length > 0) {
-            console.log(`[FlightDetection] GPS NMS: suppressing ${suppressedIds.length} of ${allLabels.length} labels`)
-
-            for (let i = 0; i < suppressedIds.length; i += 100) {
-              const chunk = suppressedIds.slice(i, i + 100)
-              await supabase
-                .from('plant_labels')
-                .delete()
-                .in('id', chunk)
+            if (error || !data || data.length === 0) {
+              hasMore = false
+            } else {
+              allLabels = [...allLabels, ...data]
+              offset += dbPageSize
+              hasMore = data.length === dbPageSize
             }
           }
 
-          totalDetections = allLabels.length - suppressedIds.length
+          if (allLabels.length > 0) {
+            const suppressedIds = applyGPSNMS(
+              allLabels.map(l => ({
+                id: l.id,
+                latitude: l.latitude,
+                longitude: l.longitude,
+                confidence: l.confidence || 0,
+              })),
+              GPS_NMS_DISTANCE_METERS
+            )
+
+            if (suppressedIds.length > 0) {
+              console.log(`[FlightDetection] GPS NMS: suppressing ${suppressedIds.length} of ${allLabels.length} labels`)
+
+              for (let i = 0; i < suppressedIds.length; i += 100) {
+                const chunk = suppressedIds.slice(i, i + 100)
+                await supabase
+                  .from('plant_labels')
+                  .delete()
+                  .in('id', chunk)
+              }
+            }
+
+            totalDetections = allLabels.length - suppressedIds.length
+          }
         }
 
         // Final count from DB
@@ -542,7 +555,7 @@ export async function POST(request: NextRequest) {
           .eq('source', 'ai')
 
         const elapsed = ((Date.now() - t0) / 1000).toFixed(1)
-        console.log(`[FlightDetection] Complete: ${savedCount} plants saved from ${imagesProcessed} images in ${elapsed}s (${imagesSkipped} skipped)`)
+        console.log(`[FlightDetection] Batch done: ${savedCount} plants saved from ${imagesProcessed} images in ${elapsed}s (${imagesSkipped} skipped), isLastBatch=${isLastBatch}`)
 
         send({
           type: 'result',
@@ -553,7 +566,10 @@ export async function POST(request: NextRequest) {
           savedCount: savedCount || 0,
           imagesProcessed,
           imagesSkipped,
-          totalImages,
+          totalImages: totalImageCount,
+          batchComplete: true,
+          isLastBatch,
+          nextStartIndex: isLastBatch ? undefined : endIndex,
           elapsedSeconds: parseFloat(elapsed),
         })
       } catch (error) {

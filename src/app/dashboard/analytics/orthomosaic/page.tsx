@@ -714,6 +714,7 @@ export default function OrthomosaicViewerPage() {
   }
 
   // Handle raw image detection (runs YOLOv11 on original drone photos)
+  // Processes in batches to avoid Vercel's 300s timeout
   const handleRawImageDetection = async () => {
     if (!selectedOrthomosaic || isDemo) return
 
@@ -722,90 +723,112 @@ export default function OrthomosaicViewerPage() {
     setRawDetectionProgress(null)
     setPlotAggregation(null)
 
+    const BATCH_SIZE = 10
+    let currentStartIndex = 0
+    let allDone = false
+
     try {
-      const response = await fetch('/api/flight-detection', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orthomosaicId: selectedOrthomosaic.id,
-          userId: user?.id,
-          confidence_threshold: confidenceThreshold,
-        }),
-      })
+      while (!allDone) {
+        console.log(`[RawDetection] Starting batch at index ${currentStartIndex}`)
 
-      if (!response.ok) {
-        const errorData = await response.json()
-        console.error('Raw detection failed:', errorData.error)
-        alert(errorData.error || 'Raw image detection failed')
-        return
-      }
-
-      const reader = response.body?.getReader()
-      if (!reader) throw new Error('No response body')
-
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let finalResult: Record<string, unknown> | null = null
-
-      const processLine = (line: string) => {
-        if (!line.trim()) return
-        try {
-          const event = JSON.parse(line)
-
-          if (event.type === 'imageProgress') {
-            setRawDetectionProgress({
-              imageIndex: event.imageIndex,
-              totalImages: event.totalImages,
-              imageName: event.imageName,
-              phase: event.phase,
-              detectionsInImage: event.detectionsInImage,
-              totalDetections: event.totalDetections,
-            })
-          } else if (event.type === 'result') {
-            finalResult = event
-          } else if (event.type === 'error') {
-            console.error('Raw detection error:', event.error)
-            alert(event.error || 'Raw image detection failed')
-          }
-        } catch {
-          // Skip malformed lines
-        }
-      }
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          processLine(line)
-        }
-      }
-
-      buffer += decoder.decode()
-      if (buffer.trim()) processLine(buffer)
-
-      if (finalResult && finalResult.success) {
-        setPlantDetectionResult({
-          totalDetections: finalResult.totalDetections as number,
-          savedCount: finalResult.savedCount as number,
-          classCounts: {},
-          averageConfidence: 0,
+        const response = await fetch('/api/flight-detection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            orthomosaicId: selectedOrthomosaic.id,
+            userId: user?.id,
+            confidence_threshold: confidenceThreshold,
+            startIndex: currentStartIndex,
+            batchSize: BATCH_SIZE,
+          }),
         })
 
-        // Reload labels using the sentinel orthomosaic ID
-        const orthoId = finalResult.orthomosaicId as string
-        const labelsResponse = await fetch(`/api/plant-labels?orthomosaicId=${orthoId}`)
-        const labelsData = await labelsResponse.json()
-        if (labelsData.labels) {
-          setLabels(labelsData.labels)
+        if (!response.ok) {
+          const errorData = await response.json()
+          console.error('Raw detection failed:', errorData.error)
+          alert(errorData.error || 'Raw image detection failed')
+          return
         }
 
-        await handleAggregateByPlot()
+        const reader = response.body?.getReader()
+        if (!reader) throw new Error('No response body')
+
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let finalResult: Record<string, unknown> | null = null
+
+        const processLine = (line: string) => {
+          if (!line.trim()) return
+          try {
+            const event = JSON.parse(line)
+
+            if (event.type === 'imageProgress') {
+              setRawDetectionProgress({
+                imageIndex: event.imageIndex,
+                totalImages: event.totalImages,
+                imageName: event.imageName,
+                phase: event.phase,
+                detectionsInImage: event.detectionsInImage,
+                totalDetections: event.totalDetections,
+              })
+            } else if (event.type === 'result') {
+              finalResult = event
+            } else if (event.type === 'error') {
+              console.error('Raw detection error:', event.error)
+              alert(event.error || 'Raw image detection failed')
+            }
+          } catch {
+            // Skip malformed lines
+          }
+        }
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            processLine(line)
+          }
+        }
+
+        buffer += decoder.decode()
+        if (buffer.trim()) processLine(buffer)
+
+        if (finalResult && finalResult.success) {
+          if (finalResult.isLastBatch) {
+            allDone = true
+          } else if (finalResult.nextStartIndex) {
+            currentStartIndex = finalResult.nextStartIndex as number
+            console.log(`[RawDetection] Batch complete, continuing at index ${currentStartIndex}`)
+          } else {
+            allDone = true
+          }
+
+          // Update result display after each batch
+          setPlantDetectionResult({
+            totalDetections: finalResult.totalDetections as number,
+            savedCount: finalResult.savedCount as number,
+            classCounts: {},
+            averageConfidence: 0,
+          })
+        } else {
+          // No result or error — stop retrying
+          allDone = true
+        }
       }
+
+      // All batches complete — reload labels
+      const labelsResponse = await fetch(`/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`)
+      const labelsData = await labelsResponse.json()
+      if (labelsData.labels) {
+        setLabels(labelsData.labels)
+      }
+
+      await handleAggregateByPlot()
     } catch (err) {
       console.error('Error running raw image detection:', err)
       alert('Failed to run raw image detection. Check console for details.')
