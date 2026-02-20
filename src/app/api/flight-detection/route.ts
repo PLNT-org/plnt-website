@@ -316,6 +316,7 @@ export async function POST(request: NextRequest) {
             let metadata
             try {
               metadata = await extractDroneMetadata(imageBuffer)
+              console.log(`[FlightDetection] ${imageName}: GPS=(${metadata.latitude.toFixed(6)}, ${metadata.longitude.toFixed(6)}), alt=${metadata.altitude}m, yaw=${metadata.gimbalYaw}, pitch=${metadata.gimbalPitch}, GSD=${metadata.gsdX.toFixed(4)}m/px`)
             } catch {
               console.warn(`[FlightDetection] No GPS data in ${imageName}, skipping`)
               send({ type: 'warning', message: `Skipping ${imageName}: no GPS data in EXIF` })

@@ -174,15 +174,30 @@ export async function extractDroneMetadata(
   const footprintWidth = gsdX * imageWidth
   const footprintHeight = gsdY * imageHeight
 
-  // Extract gimbal data if available (DJI XMP)
+  // Extract gimbal/flight data if available (DJI XMP)
   let gimbalPitch: number | undefined
   let gimbalYaw: number | undefined
   let gimbalRoll: number | undefined
 
   if (xmp) {
-    if (xmp.GimbalPitchDegree) gimbalPitch = parseFloat(String(xmp.GimbalPitchDegree.value || xmp.GimbalPitchDegree))
-    if (xmp.GimbalYawDegree) gimbalYaw = parseFloat(String(xmp.GimbalYawDegree.value || xmp.GimbalYawDegree))
-    if (xmp.GimbalRollDegree) gimbalRoll = parseFloat(String(xmp.GimbalRollDegree.value || xmp.GimbalRollDegree))
+    // Log all XMP keys for debugging
+    console.log('[EXIF] XMP keys:', Object.keys(xmp).join(', '))
+
+    const parseXmpValue = (tag: any): number | undefined => {
+      if (!tag) return undefined
+      const val = parseFloat(String(tag.value ?? tag.description ?? tag))
+      return isNaN(val) ? undefined : val
+    }
+
+    gimbalPitch = parseXmpValue(xmp.GimbalPitchDegree)
+    gimbalRoll = parseXmpValue(xmp.GimbalRollDegree)
+
+    // Try GimbalYawDegree first, then FlightYawDegree as fallback
+    // DJI stores both: gimbal yaw (absolute heading of camera) and flight yaw (drone body heading)
+    gimbalYaw = parseXmpValue(xmp.GimbalYawDegree) ?? parseXmpValue(xmp.FlightYawDegree)
+
+    console.log(`[EXIF] Yaw: gimbal=${parseXmpValue(xmp.GimbalYawDegree)}, flight=${parseXmpValue(xmp.FlightYawDegree)}, using=${gimbalYaw}`)
+    console.log(`[EXIF] Pitch: ${gimbalPitch}, Roll: ${gimbalRoll}`)
   }
 
   // Extract timestamp
