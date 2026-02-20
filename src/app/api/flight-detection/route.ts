@@ -206,11 +206,14 @@ export async function POST(request: NextRequest) {
   // Resolve image paths — either from orthomosaic record or storage folder
   let imagePaths: string[]
 
+  // Camera positions from ODM's bundle adjustment (if available)
+  let cameraPositions: Record<string, { latitude: number; longitude: number; altitude: number }> | null = null
+
   if (inputOrthoId) {
-    // Look up source_image_paths from the orthomosaic record
+    // Look up source_image_paths and camera_positions from the orthomosaic record
     const { data: ortho, error: orthoError } = await supabase
       .from('orthomosaics')
-      .select('source_image_paths')
+      .select('source_image_paths, camera_positions')
       .eq('id', inputOrthoId)
       .single()
 
@@ -226,6 +229,12 @@ export async function POST(request: NextRequest) {
     }
 
     imagePaths = ortho.source_image_paths as string[]
+
+    // Load corrected camera positions if available
+    if (ortho.camera_positions && typeof ortho.camera_positions === 'object') {
+      cameraPositions = ortho.camera_positions as Record<string, { latitude: number; longitude: number; altitude: number }>
+      console.log(`[FlightDetection] Loaded ${Object.keys(cameraPositions).length} corrected camera positions from ODM`)
+    }
   } else {
     // Fallback: list from storage folder
     imagePaths = await listImagesInStorage(storagePath!)
@@ -252,7 +261,17 @@ export async function POST(request: NextRequest) {
 
       try {
         const t0 = Date.now()
-        send({ type: 'status', message: `Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...` })
+        const usingCorrectedPositions = cameraPositions !== null && Object.keys(cameraPositions).length > 0
+        if (isFirstBatch) {
+          send({
+            type: 'status',
+            message: usingCorrectedPositions
+              ? `Using ODM-corrected camera positions for accurate GPS placement. Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...`
+              : `Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...`,
+          })
+        } else {
+          send({ type: 'status', message: `Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...` })
+        }
 
         // Step 1: Determine orthomosaic ID for storing labels
         let orthomosaicId: string
@@ -350,12 +369,31 @@ export async function POST(request: NextRequest) {
             let metadata
             try {
               metadata = await extractDroneMetadata(imageBuffer)
-              console.log(`[FlightDetection] ${imageName}: GPS=(${metadata.latitude.toFixed(6)}, ${metadata.longitude.toFixed(6)}), alt=${metadata.altitude}m, yaw=${metadata.gimbalYaw}, pitch=${metadata.gimbalPitch}, GSD=${metadata.gsdX.toFixed(4)}m/px`)
+              console.log(`[FlightDetection] ${imageName}: EXIF GPS=(${metadata.latitude.toFixed(6)}, ${metadata.longitude.toFixed(6)}), alt=${metadata.altitude}m, yaw=${metadata.gimbalYaw}, pitch=${metadata.gimbalPitch}, GSD=${metadata.gsdX.toFixed(4)}m/px`)
             } catch {
               console.warn(`[FlightDetection] No GPS data in ${imageName}, skipping`)
               send({ type: 'warning', message: `Skipping ${imageName}: no GPS data in EXIF` })
               imagesSkipped++
               continue
+            }
+
+            // Override GPS with ODM's corrected camera position if available
+            // Keep EXIF yaw, pitch, GSD, sensor info — only replace lat/lon/alt
+            if (cameraPositions) {
+              // Try exact filename match, then without extension variations
+              const corrected = cameraPositions[imageName]
+                || cameraPositions[imageName.replace(/\.[^.]+$/, '.JPG')]
+                || cameraPositions[imageName.replace(/\.[^.]+$/, '.jpg')]
+              if (corrected) {
+                console.log(`[FlightDetection] ${imageName}: Using ODM position (${corrected.latitude.toFixed(6)}, ${corrected.longitude.toFixed(6)}) instead of EXIF (${metadata.latitude.toFixed(6)}, ${metadata.longitude.toFixed(6)})`)
+                metadata.latitude = corrected.latitude
+                metadata.longitude = corrected.longitude
+                if (corrected.altitude) {
+                  metadata.altitude = corrected.altitude
+                }
+              } else {
+                console.warn(`[FlightDetection] ${imageName}: No corrected position found in ODM data, using EXIF GPS`)
+              }
             }
 
             // Decode to raw pixels with sharp
@@ -550,46 +588,51 @@ export async function POST(request: NextRequest) {
           console.log(`[FlightDetection] Fetched ${allLabels.length} AI labels for post-processing`)
 
           if (allLabels.length > 0) {
-            // 4b. GPS offset correction — align raw EXIF GPS with orthomosaic coordinates
-            // Compute centroid of all detections and compare to orthomosaic center.
-            // Raw EXIF GPS has systematic bias vs the photogrammetry-corrected orthomosaic.
-            const { data: orthoData } = await supabase
-              .from('orthomosaics')
-              .select('bounds')
-              .eq('id', orthomosaicId)
-              .single()
+            // 4b. GPS offset correction — only needed when using raw EXIF GPS
+            // When ODM camera positions are available, coordinates are already corrected
+            if (cameraPositions) {
+              console.log(`[FlightDetection] Using ODM camera positions — skipping centroid offset correction`)
+            } else {
+              // Compute centroid of all detections and compare to orthomosaic center.
+              // Raw EXIF GPS has systematic bias vs the photogrammetry-corrected orthomosaic.
+              const { data: orthoData } = await supabase
+                .from('orthomosaics')
+                .select('bounds')
+                .eq('id', orthomosaicId)
+                .single()
 
-            if (orthoData?.bounds) {
-              const bounds = orthoData.bounds as { north: number; south: number; east: number; west: number }
-              const orthoCenterLat = (bounds.north + bounds.south) / 2
-              const orthoCenterLon = (bounds.east + bounds.west) / 2
+              if (orthoData?.bounds) {
+                const bounds = orthoData.bounds as { north: number; south: number; east: number; west: number }
+                const orthoCenterLat = (bounds.north + bounds.south) / 2
+                const orthoCenterLon = (bounds.east + bounds.west) / 2
 
-              const labelCenterLat = allLabels.reduce((sum, l) => sum + l.latitude, 0) / allLabels.length
-              const labelCenterLon = allLabels.reduce((sum, l) => sum + l.longitude, 0) / allLabels.length
+                const labelCenterLat = allLabels.reduce((sum, l) => sum + l.latitude, 0) / allLabels.length
+                const labelCenterLon = allLabels.reduce((sum, l) => sum + l.longitude, 0) / allLabels.length
 
-              const offsetLat = orthoCenterLat - labelCenterLat
-              const offsetLon = orthoCenterLon - labelCenterLon
+                const offsetLat = orthoCenterLat - labelCenterLat
+                const offsetLon = orthoCenterLon - labelCenterLon
 
-              // Compute offset magnitude in meters
-              const offsetMeters = Math.sqrt(
-                (offsetLat * 111320) ** 2 +
-                (offsetLon * 111320 * Math.cos(labelCenterLat * Math.PI / 180)) ** 2
-              )
+                // Compute offset magnitude in meters
+                const offsetMeters = Math.sqrt(
+                  (offsetLat * 111320) ** 2 +
+                  (offsetLon * 111320 * Math.cos(labelCenterLat * Math.PI / 180)) ** 2
+                )
 
-              console.log(`[FlightDetection] GPS offset: ${offsetMeters.toFixed(1)}m (dlat=${offsetLat.toFixed(6)}, dlon=${offsetLon.toFixed(6)})`)
-              console.log(`[FlightDetection]   Ortho center: (${orthoCenterLat.toFixed(6)}, ${orthoCenterLon.toFixed(6)})`)
-              console.log(`[FlightDetection]   Label center: (${labelCenterLat.toFixed(6)}, ${labelCenterLon.toFixed(6)})`)
+                console.log(`[FlightDetection] GPS offset: ${offsetMeters.toFixed(1)}m (dlat=${offsetLat.toFixed(6)}, dlon=${offsetLon.toFixed(6)})`)
+                console.log(`[FlightDetection]   Ortho center: (${orthoCenterLat.toFixed(6)}, ${orthoCenterLon.toFixed(6)})`)
+                console.log(`[FlightDetection]   Label center: (${labelCenterLat.toFixed(6)}, ${labelCenterLon.toFixed(6)})`)
 
-              // Apply offset if significant (> 0.3m)
-              if (offsetMeters > 0.3) {
-                send({ type: 'status', message: `Applying GPS offset correction (${offsetMeters.toFixed(1)}m)...` })
-                for (const label of allLabels) {
-                  label.latitude += offsetLat
-                  label.longitude += offsetLon
+                // Apply offset if significant (> 0.3m)
+                if (offsetMeters > 0.3) {
+                  send({ type: 'status', message: `Applying GPS offset correction (${offsetMeters.toFixed(1)}m)...` })
+                  for (const label of allLabels) {
+                    label.latitude += offsetLat
+                    label.longitude += offsetLon
+                  }
+                  console.log(`[FlightDetection] Applied offset correction to ${allLabels.length} labels`)
+                } else {
+                  console.log(`[FlightDetection] GPS offset < 0.3m, skipping correction`)
                 }
-                console.log(`[FlightDetection] Applied offset correction to ${allLabels.length} labels`)
-              } else {
-                console.log(`[FlightDetection] GPS offset < 0.3m, skipping correction`)
               }
             }
 

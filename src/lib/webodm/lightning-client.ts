@@ -411,6 +411,137 @@ export class LightningClient {
   async downloadAllAssets(uuid: string): Promise<ArrayBuffer> {
     return this.downloadAsset(uuid, 'all.zip')
   }
+
+  /**
+   * Try to download corrected camera positions from the ODM output.
+   * ODM's bundle adjustment produces more accurate camera positions than raw EXIF GPS.
+   * Returns a map of filename → {latitude, longitude, altitude} or null if unavailable.
+   */
+  async downloadCameraPositions(uuid: string): Promise<Record<string, { latitude: number; longitude: number; altitude: number }> | null> {
+    // Try individual file downloads — some NodeODM implementations support /download/all/{path}
+    const filesToTry = [
+      'opensfm/shots.geojson',
+      'odm_report/shots.geojson',
+    ]
+
+    for (const filePath of filesToTry) {
+      try {
+        const url = `${this.baseUrl}/task/${uuid}/download/all/${filePath}${this.getAuthParam()}`
+        const response = await fetch(url, { signal: AbortSignal.timeout(10000) })
+        if (response.ok) {
+          const geojson = await response.json()
+          const positions = parseShotsGeoJSON(geojson)
+          if (positions && Object.keys(positions).length > 0) {
+            console.log(`[Lightning] Got ${Object.keys(positions).length} camera positions from ${filePath}`)
+            return positions
+          }
+        }
+      } catch {
+        // Try next path
+      }
+    }
+
+    // Try reconstruction.json (needs more parsing)
+    try {
+      const url = `${this.baseUrl}/task/${uuid}/download/all/opensfm/reconstruction.json${this.getAuthParam()}`
+      const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+      if (response.ok) {
+        const reconstruction = await response.json()
+        const positions = parseReconstructionJSON(reconstruction)
+        if (positions && Object.keys(positions).length > 0) {
+          console.log(`[Lightning] Got ${Object.keys(positions).length} camera positions from reconstruction.json`)
+          return positions
+        }
+      }
+    } catch {
+      // Not available
+    }
+
+    console.log('[Lightning] Camera positions not available from this task')
+    return null
+  }
+}
+
+/**
+ * Parse OpenSfM shots.geojson into a filename → position map
+ */
+function parseShotsGeoJSON(
+  geojson: any
+): Record<string, { latitude: number; longitude: number; altitude: number }> | null {
+  if (!geojson?.features || !Array.isArray(geojson.features)) return null
+
+  const positions: Record<string, { latitude: number; longitude: number; altitude: number }> = {}
+
+  for (const feature of geojson.features) {
+    const filename = feature.properties?.filename || feature.properties?.name
+    const coords = feature.geometry?.coordinates // [lon, lat, alt]
+    if (filename && coords && coords.length >= 2) {
+      positions[filename] = {
+        latitude: coords[1],
+        longitude: coords[0],
+        altitude: coords[2] || 0,
+      }
+    }
+  }
+
+  return Object.keys(positions).length > 0 ? positions : null
+}
+
+/**
+ * Parse OpenSfM reconstruction.json to extract corrected camera positions.
+ * Converts from local ENU frame to geographic coordinates using reference_lla.
+ */
+function parseReconstructionJSON(
+  reconstruction: any
+): Record<string, { latitude: number; longitude: number; altitude: number }> | null {
+  const recon = Array.isArray(reconstruction) ? reconstruction[0] : reconstruction
+  if (!recon?.shots || !recon?.reference_lla) return null
+
+  const refLat = recon.reference_lla.latitude
+  const refLon = recon.reference_lla.longitude
+  const refAlt = recon.reference_lla.altitude || 0
+
+  const positions: Record<string, { latitude: number; longitude: number; altitude: number }> = {}
+
+  for (const [filename, shot] of Object.entries(recon.shots) as [string, any][]) {
+    if (!shot.translation || !shot.rotation) continue
+
+    // Convert Rodrigues rotation vector to rotation matrix
+    const [rx, ry, rz] = shot.rotation
+    const theta = Math.sqrt(rx * rx + ry * ry + rz * rz)
+
+    let R: number[][]
+    if (theta < 1e-10) {
+      R = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    } else {
+      const k = [rx / theta, ry / theta, rz / theta]
+      const c = Math.cos(theta)
+      const s = Math.sin(theta)
+      const v = 1 - c
+      R = [
+        [c + k[0] * k[0] * v,        k[0] * k[1] * v - k[2] * s, k[0] * k[2] * v + k[1] * s],
+        [k[1] * k[0] * v + k[2] * s, c + k[1] * k[1] * v,        k[1] * k[2] * v - k[0] * s],
+        [k[2] * k[0] * v - k[1] * s, k[2] * k[1] * v + k[0] * s, c + k[2] * k[2] * v],
+      ]
+    }
+
+    // Camera position in ENU = -R^T * t
+    const t = shot.translation
+    const posENU = [
+      -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]),
+      -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]),
+      -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]),
+    ]
+
+    // ENU to geographic: East=x, North=y, Up=z
+    const lat = refLat + posENU[1] / 111320
+    const lon = refLon + posENU[0] / (111320 * Math.cos(refLat * Math.PI / 180))
+    const alt = refAlt + posENU[2]
+
+    positions[filename] = { latitude: lat, longitude: lon, altitude: alt }
+  }
+
+  return Object.keys(positions).length > 0 ? positions : null
 }
 
 // Export singleton instance

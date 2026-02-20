@@ -166,6 +166,20 @@ export async function POST(request: NextRequest) {
         updateData.orthomosaic_url = url
         updateData.completed_at = new Date().toISOString()
 
+        // Try to download corrected camera positions from ODM output
+        try {
+          console.log('Attempting to download corrected camera positions...')
+          const cameraPositions = await lightning.downloadCameraPositions(taskId)
+          if (cameraPositions) {
+            updateData.camera_positions = cameraPositions
+            console.log(`Saved ${Object.keys(cameraPositions).length} corrected camera positions`)
+          } else {
+            console.log('Camera positions not available — will use EXIF GPS with offset correction')
+          }
+        } catch (camErr) {
+          console.error('Failed to fetch camera positions (non-fatal):', camErr)
+        }
+
       } catch (uploadError) {
         console.error('Error uploading to Supabase:', uploadError)
         // Still mark as completed but note the upload failure
