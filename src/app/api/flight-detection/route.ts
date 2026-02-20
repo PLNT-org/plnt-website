@@ -22,7 +22,7 @@ const TILE_SIZE = 400
 const TILE_OVERLAP_PX = 100
 const NMS_IOU_THRESHOLD = 0.05
 const DEFAULT_CONFIDENCE = 0.17
-const CONCURRENT_TILES = 25
+const CONCURRENT_TILES = 10
 const GPS_NMS_DISTANCE_METERS = 2.0
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng']
@@ -95,23 +95,44 @@ async function runTileInference(
 ): Promise<RoboflowPrediction[]> {
   const roboflowUrl = `${ROBOFLOW_API_URL}/${ROBOFLOW_MODEL_ID}?api_key=${ROBOFLOW_API_KEY}&confidence=${confidenceThreshold}`
 
-  const blob = new Blob([tileBuffer], { type: 'image/png' })
-  const formData = new FormData()
-  formData.append('file', blob, 'tile.png')
+  const MAX_RETRIES = 3
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const blob = new Blob([tileBuffer], { type: 'image/png' })
+      const formData = new FormData()
+      formData.append('file', blob, 'tile.png')
 
-  const response = await fetch(roboflowUrl, {
-    method: 'POST',
-    body: formData,
-  })
+      const response = await fetch(roboflowUrl, {
+        method: 'POST',
+        body: formData,
+      })
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    console.error('[FlightDetection] Roboflow API error:', errorText)
-    throw new Error(`Roboflow API error: ${response.status}`)
+      if (!response.ok) {
+        const errorText = await response.text()
+        if (attempt < MAX_RETRIES && (response.status === 502 || response.status === 503 || response.status === 429)) {
+          const delay = 1000 * (attempt + 1)
+          console.warn(`[FlightDetection] Roboflow ${response.status}, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`)
+          await new Promise(r => setTimeout(r, delay))
+          continue
+        }
+        console.error('[FlightDetection] Roboflow API error:', errorText)
+        throw new Error(`Roboflow API error: ${response.status}`)
+      }
+
+      const data = await response.json()
+      return data.predictions || []
+    } catch (err) {
+      if (attempt < MAX_RETRIES && err instanceof Error && (err.message.includes('502') || err.message.includes('connection') || err.message.includes('ECONNRESET'))) {
+        const delay = 1000 * (attempt + 1)
+        console.warn(`[FlightDetection] Roboflow connection error, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`)
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+      throw err
+    }
   }
 
-  const data = await response.json()
-  return data.predictions || []
+  return [] // Shouldn't reach here, but satisfy TypeScript
 }
 
 // Recursively list image files in a storage folder
