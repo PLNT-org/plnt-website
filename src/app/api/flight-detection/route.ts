@@ -613,30 +613,20 @@ export async function POST(request: NextRequest) {
             // 4d. Delete all AI labels and re-insert surviving ones with corrected coordinates
             send({ type: 'status', message: `Saving ${survivingLabels.length} deduplicated labels...` })
 
-            // Delete all AI labels for this orthomosaic
-            let deleteOffset = 0
-            let deleteMore = true
-            while (deleteMore) {
-              const { data: toDelete } = await supabase
-                .from('plant_labels')
-                .select('id')
-                .eq('orthomosaic_id', orthomosaicId)
-                .eq('source', 'ai')
-                .range(0, 999)
+            // Delete all AI labels for this orthomosaic in one call
+            const { error: deleteError, count: deleteCount } = await supabase
+              .from('plant_labels')
+              .delete({ count: 'exact' })
+              .eq('orthomosaic_id', orthomosaicId)
+              .eq('source', 'ai')
 
-              if (!toDelete || toDelete.length === 0) {
-                deleteMore = false
-              } else {
-                await supabase
-                  .from('plant_labels')
-                  .delete()
-                  .in('id', toDelete.map(r => r.id))
-                deleteOffset += toDelete.length
-              }
+            if (deleteError) {
+              console.error(`[FlightDetection] Delete error:`, deleteError.message)
             }
-            console.log(`[FlightDetection] Deleted ${deleteOffset} old AI labels`)
+            console.log(`[FlightDetection] Deleted ${deleteCount ?? '?'} old AI labels`)
 
             // Re-insert surviving labels with corrected GPS coordinates
+            let insertedCount = 0
             for (let i = 0; i < survivingLabels.length; i += 250) {
               const chunk = survivingLabels.slice(i, i + 250).map(({ id, ...rest }) => rest)
               const { error: insertError } = await supabase
@@ -645,7 +635,10 @@ export async function POST(request: NextRequest) {
 
               if (insertError) {
                 console.error(`[FlightDetection] Re-insert error at chunk ${i}:`, insertError.message)
+              } else {
+                insertedCount += chunk.length
               }
+              console.log(`[FlightDetection] Re-inserted ${insertedCount}/${survivingLabels.length}`)
             }
 
             totalDetections = survivingLabels.length
