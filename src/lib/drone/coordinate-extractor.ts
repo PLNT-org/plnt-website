@@ -199,9 +199,13 @@ export async function extractDroneMetadata(
     gimbalPitch = parseXmpValue(xmp.GimbalPitchDegree)
     gimbalRoll = parseXmpValue(xmp.GimbalRollDegree)
 
-    // Try GimbalYawDegree first, then FlightYawDegree as fallback
-    // DJI stores both: gimbal yaw (absolute heading of camera) and flight yaw (drone body heading)
-    gimbalYaw = parseXmpValue(xmp.GimbalYawDegree) ?? parseXmpValue(xmp.FlightYawDegree)
+    // DJI stores GimbalYawDegree (gimbal relative to body, often 0) and
+    // FlightYawDegree (drone heading from north). For mapping, the camera
+    // heading = FlightYawDegree + GimbalYawDegree. When gimbal yaw is 0
+    // (no independent rotation), camera heading = flight heading.
+    const gYaw = parseXmpValue(xmp.GimbalYawDegree) || 0
+    const fYaw = parseXmpValue(xmp.FlightYawDegree) || 0
+    gimbalYaw = fYaw + gYaw
 
     console.log(`[EXIF] Yaw: gimbal=${parseXmpValue(xmp.GimbalYawDegree)}, flight=${parseXmpValue(xmp.FlightYawDegree)}, using=${gimbalYaw}`)
     console.log(`[EXIF] Pitch: ${gimbalPitch}, Roll: ${gimbalRoll}`)
@@ -259,7 +263,7 @@ export function pixelToGroundCoordinate(
   let offsetMetersX = offsetPixelX * gsdX
   let offsetMetersY = offsetPixelY * gsdY
 
-  // Rotate by gimbal yaw to account for drone heading
+  // Rotate by yaw to account for drone heading
   // Yaw 0° = north (image top points north), 90° = east, etc.
   // Without rotation, we assume image top = north, which is wrong when the drone faces other directions
   if (gimbalYaw !== undefined && gimbalYaw !== 0) {
