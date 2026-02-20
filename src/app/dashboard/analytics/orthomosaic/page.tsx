@@ -723,7 +723,7 @@ export default function OrthomosaicViewerPage() {
     setRawDetectionProgress(null)
     setPlotAggregation(null)
 
-    const BATCH_SIZE = 10
+    const BATCH_SIZE = 5
     let currentStartIndex = 0
     let allDone = false
 

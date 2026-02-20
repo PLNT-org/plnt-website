@@ -179,7 +179,7 @@ export async function POST(request: NextRequest) {
     confidence_threshold = DEFAULT_CONFIDENCE,
     maxImages,
     startIndex = 0,
-    batchSize = 10,
+    batchSize = 5,
     gps_nms_distance = GPS_NMS_DISTANCE_METERS,
   } = body as {
     orthomosaicId?: string
