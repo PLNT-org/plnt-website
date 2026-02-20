@@ -39,29 +39,30 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ flights: [] })
     }
 
-    // Fetch flight details
-    let query = supabase
+    // Fetch flight details — join through flight_plans to filter by user_id
+    // (flights table has no user_id, it's on flight_plans)
+    const { data: flights, error: flightError } = await supabase
       .from('flights')
-      .select('id, name, created_at, user_id')
+      .select('id, created_at, flight_plans!inner(name, user_id)')
       .in('id', flightIds)
       .order('created_at', { ascending: false })
-
-    if (userId) {
-      query = query.eq('user_id', userId)
-    }
-
-    const { data: flights, error: flightError } = await query
 
     if (flightError) {
       console.error('[flight-detection/flights] Error querying flights:', flightError)
       return NextResponse.json({ error: flightError.message }, { status: 500 })
     }
 
-    const result = (flights || []).map(f => ({
-      id: f.id,
-      name: f.name || `Flight ${new Date(f.created_at).toLocaleDateString()}`,
-      imageCount: flightCounts[f.id] || 0,
-    }))
+    const result = (flights || [])
+      .filter((f: any) => {
+        // Filter by user if provided
+        if (userId && f.flight_plans?.user_id !== userId) return false
+        return true
+      })
+      .map((f: any) => ({
+        id: f.id,
+        name: f.flight_plans?.name || `Flight ${new Date(f.created_at).toLocaleDateString()}`,
+        imageCount: flightCounts[f.id] || 0,
+      }))
 
     return NextResponse.json({ flights: result })
   } catch (error) {

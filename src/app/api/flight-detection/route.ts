@@ -189,19 +189,20 @@ export async function POST(request: NextRequest) {
           orthomosaicId = existingOrtho.id
           console.log(`[FlightDetection] Using existing sentinel ortho: ${orthomosaicId}`)
         } else {
-          // Get the flight to find the user_id
+          // Get the flight + flight plan to find user_id and name
           const { data: flight } = await supabase
             .from('flights')
-            .select('user_id, name')
+            .select('id, flight_plans(user_id, name)')
             .eq('id', flightId)
             .single()
 
+          const flightPlan = (flight as any)?.flight_plans
           const { data: newOrtho, error: createError } = await supabase
             .from('orthomosaics')
             .insert({
               flight_id: flightId,
-              user_id: flight?.user_id || userId,
-              name: `Raw Detection - ${flight?.name || flightId}`,
+              user_id: flightPlan?.user_id || userId,
+              name: `Raw Detection - ${flightPlan?.name || flightId}`,
               status: 'completed',
               webodm_project_id: 'raw-detection',
               webodm_task_id: `raw-${flightId}`,
