@@ -185,6 +185,9 @@ export default function OrthomosaicViewerPage() {
     detectionsInImage?: number
     totalDetections?: number
   } | null>(null)
+  const [availableFlights, setAvailableFlights] = useState<Array<{ id: string; name: string; imageCount: number }>>([])
+  const [showFlightPicker, setShowFlightPicker] = useState(false)
+  const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
   const [plotAggregation, setPlotAggregation] = useState<{
     plotCounts: Array<{
@@ -714,9 +717,39 @@ export default function OrthomosaicViewerPage() {
   }
 
   // Handle raw image detection (runs YOLOv11 on original drone photos)
-  const handleRawImageDetection = async () => {
-    if (!selectedOrthomosaic || isDemo || !selectedOrthomosaic.flight_id) return
+  const handleRawImageDetection = async (flightIdOverride?: string) => {
+    if (!selectedOrthomosaic || isDemo) return
 
+    // Determine which flight's images to use
+    let flightId = flightIdOverride || selectedOrthomosaic.flight_id
+
+    if (!flightId) {
+      // Look up available flights with images for this user
+      try {
+        const res = await fetch(`/api/flight-detection/flights?userId=${user?.id}`)
+        const data = await res.json()
+
+        if (!data.flights || data.flights.length === 0) {
+          alert('No flights with uploaded images found. Upload drone images first.')
+          return
+        }
+
+        if (data.flights.length === 1) {
+          // Only one flight — use it directly
+          flightId = data.flights[0].id
+        } else {
+          // Multiple flights — show picker
+          setAvailableFlights(data.flights)
+          setShowFlightPicker(true)
+          return
+        }
+      } catch {
+        alert('Failed to look up flights. Check console for details.')
+        return
+      }
+    }
+
+    setShowFlightPicker(false)
     setRawDetecting(true)
     setPlantDetectionResult(null)
     setRawDetectionProgress(null)
@@ -727,7 +760,7 @@ export default function OrthomosaicViewerPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          flightId: selectedOrthomosaic.flight_id,
+          flightId,
           userId: user?.id,
           confidence_threshold: confidenceThreshold,
         }),
@@ -1299,26 +1332,24 @@ export default function OrthomosaicViewerPage() {
                     )}
                   </Button>
 
-                  {selectedOrthomosaic.flight_id && (
-                    <Button
-                      variant="outline"
-                      className="border-blue-300 text-blue-700 hover:bg-blue-50"
-                      onClick={handleRawImageDetection}
-                      disabled={rawDetecting || plantDetecting}
-                    >
-                      {rawDetecting ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Processing Raw Images...
-                        </>
-                      ) : (
-                        <>
-                          <Camera className="h-4 w-4 mr-2" />
-                          Detect from Raw Images
-                        </>
-                      )}
-                    </Button>
-                  )}
+                  <Button
+                    variant="outline"
+                    className="border-blue-300 text-blue-700 hover:bg-blue-50"
+                    onClick={() => handleRawImageDetection()}
+                    disabled={rawDetecting || plantDetecting}
+                  >
+                    {rawDetecting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Processing Raw Images...
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="h-4 w-4 mr-2" />
+                        Detect from Raw Images
+                      </>
+                    )}
+                  </Button>
 
                   <Button
                     variant="ghost"
@@ -1440,6 +1471,35 @@ export default function OrthomosaicViewerPage() {
                         : 0}%
                     </span>
                   </div>
+                </div>
+              )}
+
+              {/* Flight Picker (shown when multiple flights available) */}
+              {showFlightPicker && availableFlights.length > 0 && (
+                <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                  <h4 className="font-medium mb-2 text-blue-900">Select a flight to process</h4>
+                  <p className="text-sm text-blue-700 mb-3">Multiple flights with images found. Choose which one to run detection on:</p>
+                  <div className="space-y-2">
+                    {availableFlights.map(flight => (
+                      <Button
+                        key={flight.id}
+                        variant="outline"
+                        className="w-full justify-between"
+                        onClick={() => handleRawImageDetection(flight.id)}
+                      >
+                        <span>{flight.name}</span>
+                        <Badge variant="secondary">{flight.imageCount} images</Badge>
+                      </Button>
+                    ))}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => setShowFlightPicker(false)}
+                  >
+                    Cancel
+                  </Button>
                 </div>
               )}
 
