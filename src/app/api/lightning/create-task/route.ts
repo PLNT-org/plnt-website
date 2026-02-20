@@ -213,10 +213,13 @@ export async function POST(request: NextRequest) {
       throw new Error(`Lightning commit failed: ${errText}`)
     }
 
-    // --- Update DB record to processing ---
+    // --- Update DB record to processing + save source image paths ---
     await supabaseAdmin
       .from('orthomosaics')
-      .update({ status: 'processing' })
+      .update({
+        status: 'processing',
+        source_image_paths: imagePaths.map(p => p.storage_path),
+      })
       .eq('id', orthomosaicId)
 
     console.log(`[Lightning] Task committed and DB updated. UUID: ${lightningUuid}, orthoId: ${orthomosaicId}`)

@@ -185,8 +185,6 @@ export default function OrthomosaicViewerPage() {
     detectionsInImage?: number
     totalDetections?: number
   } | null>(null)
-  const [availableImageFolders, setAvailableImageFolders] = useState<Array<{ id: string; name: string; imageCount: number; storagePath: string }>>([])
-  const [showFolderPicker, setShowFolderPicker] = useState(false)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
   const [plotAggregation, setPlotAggregation] = useState<{
     plotCounts: Array<{
@@ -716,36 +714,9 @@ export default function OrthomosaicViewerPage() {
   }
 
   // Handle raw image detection (runs YOLOv11 on original drone photos)
-  const handleRawImageDetection = async (storagePathOverride?: string) => {
+  const handleRawImageDetection = async () => {
     if (!selectedOrthomosaic || isDemo) return
 
-    let storagePath = storagePathOverride
-
-    if (!storagePath) {
-      // Look up image folders in storage
-      try {
-        const res = await fetch('/api/flight-detection/flights')
-        const data = await res.json()
-
-        if (!data.flights || data.flights.length === 0) {
-          alert('No image folders found in storage. Upload drone images first.')
-          return
-        }
-
-        if (data.flights.length === 1) {
-          storagePath = data.flights[0].storagePath
-        } else {
-          setAvailableImageFolders(data.flights)
-          setShowFolderPicker(true)
-          return
-        }
-      } catch {
-        alert('Failed to look up image folders. Check console for details.')
-        return
-      }
-    }
-
-    setShowFolderPicker(false)
     setRawDetecting(true)
     setPlantDetectionResult(null)
     setRawDetectionProgress(null)
@@ -756,7 +727,7 @@ export default function OrthomosaicViewerPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          storagePath,
+          orthomosaicId: selectedOrthomosaic.id,
           userId: user?.id,
           confidence_threshold: confidenceThreshold,
         }),
@@ -1331,7 +1302,7 @@ export default function OrthomosaicViewerPage() {
                   <Button
                     variant="outline"
                     className="border-blue-300 text-blue-700 hover:bg-blue-50"
-                    onClick={() => handleRawImageDetection()}
+                    onClick={handleRawImageDetection}
                     disabled={rawDetecting || plantDetecting}
                   >
                     {rawDetecting ? (
@@ -1467,35 +1438,6 @@ export default function OrthomosaicViewerPage() {
                         : 0}%
                     </span>
                   </div>
-                </div>
-              )}
-
-              {/* Folder Picker (shown when multiple image folders available) */}
-              {showFolderPicker && availableImageFolders.length > 0 && (
-                <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                  <h4 className="font-medium mb-2 text-blue-900">Select image folder to process</h4>
-                  <p className="text-sm text-blue-700 mb-3">Multiple image folders found. Choose which one to run detection on:</p>
-                  <div className="space-y-2">
-                    {availableImageFolders.map(folder => (
-                      <Button
-                        key={folder.id}
-                        variant="outline"
-                        className="w-full justify-between"
-                        onClick={() => handleRawImageDetection(folder.storagePath)}
-                      >
-                        <span>{folder.name}</span>
-                        <Badge variant="secondary">{folder.imageCount} images</Badge>
-                      </Button>
-                    ))}
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="mt-2"
-                    onClick={() => setShowFolderPicker(false)}
-                  >
-                    Cancel
-                  </Button>
                 </div>
               )}
 

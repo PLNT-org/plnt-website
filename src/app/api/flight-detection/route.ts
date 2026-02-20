@@ -152,19 +152,21 @@ export async function POST(request: NextRequest) {
   }
 
   const {
+    orthomosaicId: inputOrthoId,
     storagePath,
     userId,
     confidence_threshold = DEFAULT_CONFIDENCE,
     maxImages,
   } = body as {
+    orthomosaicId?: string
     storagePath?: string
     userId?: string
     confidence_threshold?: number
     maxImages?: number
   }
 
-  if (!storagePath) {
-    return NextResponse.json({ error: 'storagePath is required' }, { status: 400 })
+  if (!inputOrthoId && !storagePath) {
+    return NextResponse.json({ error: 'orthomosaicId or storagePath is required' }, { status: 400 })
   }
 
   if (!ROBOFLOW_API_KEY || !ROBOFLOW_MODEL_ID) {
@@ -174,17 +176,41 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // List image files in the storage path
-  const allImagePaths = await listImagesInStorage(storagePath)
+  // Resolve image paths — either from orthomosaic record or storage folder
+  let imagePaths: string[]
 
-  if (allImagePaths.length === 0) {
-    return NextResponse.json(
-      { error: 'No images found in this storage folder' },
-      { status: 404 }
-    )
+  if (inputOrthoId) {
+    // Look up source_image_paths from the orthomosaic record
+    const { data: ortho, error: orthoError } = await supabase
+      .from('orthomosaics')
+      .select('source_image_paths')
+      .eq('id', inputOrthoId)
+      .single()
+
+    if (orthoError || !ortho) {
+      return NextResponse.json({ error: 'Orthomosaic not found' }, { status: 404 })
+    }
+
+    if (!ortho.source_image_paths || (ortho.source_image_paths as string[]).length === 0) {
+      return NextResponse.json(
+        { error: 'No source images stored for this orthomosaic. Re-upload images to create a new orthomosaic.' },
+        { status: 404 }
+      )
+    }
+
+    imagePaths = ortho.source_image_paths as string[]
+  } else {
+    // Fallback: list from storage folder
+    imagePaths = await listImagesInStorage(storagePath!)
   }
 
-  const imagePaths = maxImages ? allImagePaths.slice(0, maxImages) : allImagePaths
+  if (imagePaths.length === 0) {
+    return NextResponse.json({ error: 'No images found' }, { status: 404 })
+  }
+
+  if (maxImages) {
+    imagePaths = imagePaths.slice(0, maxImages)
+  }
 
   // Stream NDJSON progress
   const encoder = new TextEncoder()
@@ -199,43 +225,48 @@ export async function POST(request: NextRequest) {
         const totalImages = imagePaths.length
         send({ type: 'status', message: `Processing ${totalImages} raw drone images...` })
 
-        // Step 1: Create or find sentinel orthomosaic record
-        // Use storagePath as a stable identifier
-        const sentinelKey = `raw-${storagePath}`
-
-        const { data: existingOrtho } = await supabase
-          .from('orthomosaics')
-          .select('id')
-          .eq('webodm_project_id', 'raw-detection')
-          .eq('webodm_task_id', sentinelKey)
-          .single()
-
+        // Step 1: Determine orthomosaic ID for storing labels
         let orthomosaicId: string
 
-        if (existingOrtho) {
-          orthomosaicId = existingOrtho.id
-          console.log(`[FlightDetection] Using existing sentinel ortho: ${orthomosaicId}`)
+        if (inputOrthoId) {
+          // Use the same orthomosaic the user selected
+          orthomosaicId = inputOrthoId
+          console.log(`[FlightDetection] Using selected ortho: ${orthomosaicId}`)
         } else {
-          const { data: newOrtho, error: createError } = await supabase
+          // Create a sentinel orthomosaic for standalone storage-path runs
+          const sentinelKey = `raw-${storagePath}`
+
+          const { data: existingOrtho } = await supabase
             .from('orthomosaics')
-            .insert({
-              user_id: userId || null,
-              name: `Raw Detection - ${storagePath.substring(0, 8)}...`,
-              status: 'completed',
-              webodm_project_id: 'raw-detection',
-              webodm_task_id: sentinelKey,
-            })
             .select('id')
+            .eq('webodm_project_id', 'raw-detection')
+            .eq('webodm_task_id', sentinelKey)
             .single()
 
-          if (createError || !newOrtho) {
-            send({ type: 'error', error: `Failed to create sentinel orthomosaic: ${createError?.message}` })
-            controller.close()
-            return
-          }
+          if (existingOrtho) {
+            orthomosaicId = existingOrtho.id
+          } else {
+            const { data: newOrtho, error: createError } = await supabase
+              .from('orthomosaics')
+              .insert({
+                user_id: userId || null,
+                name: `Raw Detection - ${storagePath!.substring(0, 8)}...`,
+                status: 'completed',
+                webodm_project_id: 'raw-detection',
+                webodm_task_id: sentinelKey,
+              })
+              .select('id')
+              .single()
 
-          orthomosaicId = newOrtho.id
-          console.log(`[FlightDetection] Created sentinel ortho: ${orthomosaicId}`)
+            if (createError || !newOrtho) {
+              send({ type: 'error', error: `Failed to create sentinel orthomosaic: ${createError?.message}` })
+              controller.close()
+              return
+            }
+
+            orthomosaicId = newOrtho.id
+          }
+          console.log(`[FlightDetection] Using sentinel ortho: ${orthomosaicId}`)
         }
 
         // Step 2: Delete existing AI labels for this orthomosaic
