@@ -20,7 +20,7 @@ const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.rob
 // Tiling configuration — matches Colab inference pipeline exactly
 const TILE_SIZE = 400
 const TILE_OVERLAP_PX = 100
-const NMS_IOU_THRESHOLD = 0.5
+const NMS_IOU_THRESHOLD = 0.05
 const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 25
 const GPS_NMS_DISTANCE_METERS = 0.15
