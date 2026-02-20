@@ -25,6 +25,8 @@ const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 25
 const GPS_NMS_DISTANCE_METERS = 0.15
 
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng']
+
 interface RoboflowPrediction {
   x: number
   y: number
@@ -43,7 +45,6 @@ interface Detection {
   class: string
 }
 
-// Calculate IoU between two center-format boxes
 function calculateIoU(box1: Detection, box2: Detection): number {
   const x1_1 = box1.x - box1.width / 2
   const y1_1 = box1.y - box1.height / 2
@@ -68,7 +69,6 @@ function calculateIoU(box1: Detection, box2: Detection): number {
   return union > 0 ? intersection / union : 0
 }
 
-// Non-Maximum Suppression (per-image, pixel space)
 function applyNMS(detections: Detection[], iouThreshold: number): Detection[] {
   if (detections.length === 0) return []
 
@@ -89,7 +89,6 @@ function applyNMS(detections: Detection[], iouThreshold: number): Detection[] {
   return kept
 }
 
-// Run YOLOv11 inference on a single tile via Roboflow
 async function runTileInference(
   tileBuffer: Buffer,
   confidenceThreshold: number
@@ -115,6 +114,35 @@ async function runTileInference(
   return data.predictions || []
 }
 
+// Recursively list image files in a storage folder
+async function listImagesInStorage(prefix: string): Promise<string[]> {
+  const allImages: string[] = []
+
+  const { data: items, error } = await supabase
+    .storage
+    .from('flight-images')
+    .list(prefix, { limit: 1000 })
+
+  if (error || !items) return allImages
+
+  for (const item of items) {
+    const fullPath = `${prefix}/${item.name}`
+    if (item.id) {
+      // It's a file
+      const ext = item.name.toLowerCase().substring(item.name.lastIndexOf('.'))
+      if (IMAGE_EXTENSIONS.includes(ext)) {
+        allImages.push(fullPath)
+      }
+    } else {
+      // It's a subfolder
+      const subImages = await listImagesInStorage(fullPath)
+      allImages.push(...subImages)
+    }
+  }
+
+  return allImages
+}
+
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown>
   try {
@@ -124,19 +152,19 @@ export async function POST(request: NextRequest) {
   }
 
   const {
-    flightId,
+    storagePath,
     userId,
     confidence_threshold = DEFAULT_CONFIDENCE,
     maxImages,
   } = body as {
-    flightId?: string
+    storagePath?: string
     userId?: string
     confidence_threshold?: number
     maxImages?: number
   }
 
-  if (!flightId) {
-    return NextResponse.json({ error: 'flightId is required' }, { status: 400 })
+  if (!storagePath) {
+    return NextResponse.json({ error: 'storagePath is required' }, { status: 400 })
   }
 
   if (!ROBOFLOW_API_KEY || !ROBOFLOW_MODEL_ID) {
@@ -146,21 +174,17 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // Pre-flight: fetch flight images
-  const { data: flightImages, error: imgError } = await supabase
-    .from('flight_images')
-    .select('*')
-    .eq('flight_id', flightId)
-    .order('captured_at', { ascending: true })
+  // List image files in the storage path
+  const allImagePaths = await listImagesInStorage(storagePath)
 
-  if (imgError || !flightImages || flightImages.length === 0) {
+  if (allImagePaths.length === 0) {
     return NextResponse.json(
-      { error: 'No images found for this flight' },
+      { error: 'No images found in this storage folder' },
       { status: 404 }
     )
   }
 
-  const imagesToProcess = maxImages ? flightImages.slice(0, maxImages) : flightImages
+  const imagePaths = maxImages ? allImagePaths.slice(0, maxImages) : allImagePaths
 
   // Stream NDJSON progress
   const encoder = new TextEncoder()
@@ -172,15 +196,18 @@ export async function POST(request: NextRequest) {
 
       try {
         const t0 = Date.now()
-        const totalImages = imagesToProcess.length
+        const totalImages = imagePaths.length
         send({ type: 'status', message: `Processing ${totalImages} raw drone images...` })
 
         // Step 1: Create or find sentinel orthomosaic record
+        // Use storagePath as a stable identifier
+        const sentinelKey = `raw-${storagePath}`
+
         const { data: existingOrtho } = await supabase
           .from('orthomosaics')
           .select('id')
-          .eq('flight_id', flightId)
           .eq('webodm_project_id', 'raw-detection')
+          .eq('webodm_task_id', sentinelKey)
           .single()
 
         let orthomosaicId: string
@@ -189,23 +216,14 @@ export async function POST(request: NextRequest) {
           orthomosaicId = existingOrtho.id
           console.log(`[FlightDetection] Using existing sentinel ortho: ${orthomosaicId}`)
         } else {
-          // Get the flight + flight plan to find user_id and name
-          const { data: flight } = await supabase
-            .from('flights')
-            .select('id, flight_plans(user_id, name)')
-            .eq('id', flightId)
-            .single()
-
-          const flightPlan = (flight as any)?.flight_plans
           const { data: newOrtho, error: createError } = await supabase
             .from('orthomosaics')
             .insert({
-              flight_id: flightId,
-              user_id: flightPlan?.user_id || userId,
-              name: `Raw Detection - ${flightPlan?.name || flightId}`,
+              user_id: userId || null,
+              name: `Raw Detection - ${storagePath.substring(0, 8)}...`,
               status: 'completed',
               webodm_project_id: 'raw-detection',
-              webodm_task_id: `raw-${flightId}`,
+              webodm_task_id: sentinelKey,
             })
             .select('id')
             .single()
@@ -234,9 +252,9 @@ export async function POST(request: NextRequest) {
         let imagesProcessed = 0
         let imagesSkipped = 0
 
-        for (let imgIdx = 0; imgIdx < imagesToProcess.length; imgIdx++) {
-          const image = imagesToProcess[imgIdx]
-          const imageName = image.original_name || image.storage_path?.split('/').pop() || `image-${imgIdx}`
+        for (let imgIdx = 0; imgIdx < imagePaths.length; imgIdx++) {
+          const storagFilePath = imagePaths[imgIdx]
+          const imageName = storagFilePath.split('/').pop() || `image-${imgIdx}`
           const imageStart = Date.now()
 
           send({
@@ -252,7 +270,7 @@ export async function POST(request: NextRequest) {
             const { data: fileData, error: downloadError } = await supabase
               .storage
               .from('flight-images')
-              .download(image.storage_path)
+              .download(storagFilePath)
 
             if (downloadError || !fileData) {
               console.error(`[FlightDetection] Failed to download ${imageName}:`, downloadError)
@@ -267,7 +285,7 @@ export async function POST(request: NextRequest) {
             let metadata
             try {
               metadata = await extractDroneMetadata(imageBuffer)
-            } catch (exifError) {
+            } catch {
               console.warn(`[FlightDetection] No GPS data in ${imageName}, skipping`)
               send({ type: 'warning', message: `Skipping ${imageName}: no GPS data in EXIF` })
               imagesSkipped++
@@ -342,7 +360,6 @@ export async function POST(request: NextRequest) {
                     confidence_threshold as number,
                   )
 
-                  // Map tile coords to full image coords
                   const detections: Detection[] = []
                   for (const pred of predictions) {
                     const predClass = (pred.class || 'plant').toLowerCase()
@@ -411,12 +428,6 @@ export async function POST(request: NextRequest) {
               }
             }
 
-            // Update flight_images tracking
-            await supabase
-              .from('flight_images')
-              .update({ detection_status: 'completed', detection_count: nmsDetections.length })
-              .eq('id', image.id)
-
             totalDetections += nmsDetections.length
             imagesProcessed++
 
@@ -436,11 +447,6 @@ export async function POST(request: NextRequest) {
             console.error(`[FlightDetection] Error processing ${imageName}:`, imgErr)
             send({ type: 'warning', message: `Error processing ${imageName}: ${imgErr instanceof Error ? imgErr.message : 'unknown'}` })
             imagesSkipped++
-
-            await supabase
-              .from('flight_images')
-              .update({ detection_status: 'failed' })
-              .eq('id', image.id)
           }
         }
 
@@ -448,7 +454,6 @@ export async function POST(request: NextRequest) {
         send({ type: 'status', message: 'Running cross-image deduplication...' })
         console.log(`[FlightDetection] Cross-image GPS NMS on ${totalDetections} detections (threshold: ${GPS_NMS_DISTANCE_METERS}m)`)
 
-        // Fetch all saved labels for this ortho
         const batchSize = 1000
         let allLabels: Array<{ id: string; latitude: number; longitude: number; confidence: number }> = []
         let offset = 0
@@ -485,7 +490,6 @@ export async function POST(request: NextRequest) {
           if (suppressedIds.length > 0) {
             console.log(`[FlightDetection] GPS NMS: suppressing ${suppressedIds.length} of ${allLabels.length} labels`)
 
-            // Delete suppressed labels in chunks
             for (let i = 0; i < suppressedIds.length; i += 100) {
               const chunk = suppressedIds.slice(i, i + 100)
               await supabase
@@ -512,7 +516,7 @@ export async function POST(request: NextRequest) {
           type: 'result',
           success: true,
           orthomosaicId,
-          flightId,
+          storagePath,
           totalDetections: savedCount || 0,
           savedCount: savedCount || 0,
           imagesProcessed,

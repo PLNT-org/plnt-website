@@ -185,9 +185,8 @@ export default function OrthomosaicViewerPage() {
     detectionsInImage?: number
     totalDetections?: number
   } | null>(null)
-  const [availableFlights, setAvailableFlights] = useState<Array<{ id: string; name: string; imageCount: number }>>([])
-  const [showFlightPicker, setShowFlightPicker] = useState(false)
-  const [selectedFlightId, setSelectedFlightId] = useState<string | null>(null)
+  const [availableImageFolders, setAvailableImageFolders] = useState<Array<{ id: string; name: string; imageCount: number; storagePath: string }>>([])
+  const [showFolderPicker, setShowFolderPicker] = useState(false)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
   const [plotAggregation, setPlotAggregation] = useState<{
     plotCounts: Array<{
@@ -717,39 +716,36 @@ export default function OrthomosaicViewerPage() {
   }
 
   // Handle raw image detection (runs YOLOv11 on original drone photos)
-  const handleRawImageDetection = async (flightIdOverride?: string) => {
+  const handleRawImageDetection = async (storagePathOverride?: string) => {
     if (!selectedOrthomosaic || isDemo) return
 
-    // Determine which flight's images to use
-    let flightId = flightIdOverride || selectedOrthomosaic.flight_id
+    let storagePath = storagePathOverride
 
-    if (!flightId) {
-      // Look up available flights with images for this user
+    if (!storagePath) {
+      // Look up image folders in storage
       try {
-        const res = await fetch(`/api/flight-detection/flights?userId=${user?.id}`)
+        const res = await fetch('/api/flight-detection/flights')
         const data = await res.json()
 
         if (!data.flights || data.flights.length === 0) {
-          alert('No flights with uploaded images found. Upload drone images first.')
+          alert('No image folders found in storage. Upload drone images first.')
           return
         }
 
         if (data.flights.length === 1) {
-          // Only one flight — use it directly
-          flightId = data.flights[0].id
+          storagePath = data.flights[0].storagePath
         } else {
-          // Multiple flights — show picker
-          setAvailableFlights(data.flights)
-          setShowFlightPicker(true)
+          setAvailableImageFolders(data.flights)
+          setShowFolderPicker(true)
           return
         }
       } catch {
-        alert('Failed to look up flights. Check console for details.')
+        alert('Failed to look up image folders. Check console for details.')
         return
       }
     }
 
-    setShowFlightPicker(false)
+    setShowFolderPicker(false)
     setRawDetecting(true)
     setPlantDetectionResult(null)
     setRawDetectionProgress(null)
@@ -760,7 +756,7 @@ export default function OrthomosaicViewerPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          flightId,
+          storagePath,
           userId: user?.id,
           confidence_threshold: confidenceThreshold,
         }),
@@ -1474,21 +1470,21 @@ export default function OrthomosaicViewerPage() {
                 </div>
               )}
 
-              {/* Flight Picker (shown when multiple flights available) */}
-              {showFlightPicker && availableFlights.length > 0 && (
+              {/* Folder Picker (shown when multiple image folders available) */}
+              {showFolderPicker && availableImageFolders.length > 0 && (
                 <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                  <h4 className="font-medium mb-2 text-blue-900">Select a flight to process</h4>
-                  <p className="text-sm text-blue-700 mb-3">Multiple flights with images found. Choose which one to run detection on:</p>
+                  <h4 className="font-medium mb-2 text-blue-900">Select image folder to process</h4>
+                  <p className="text-sm text-blue-700 mb-3">Multiple image folders found. Choose which one to run detection on:</p>
                   <div className="space-y-2">
-                    {availableFlights.map(flight => (
+                    {availableImageFolders.map(folder => (
                       <Button
-                        key={flight.id}
+                        key={folder.id}
                         variant="outline"
                         className="w-full justify-between"
-                        onClick={() => handleRawImageDetection(flight.id)}
+                        onClick={() => handleRawImageDetection(folder.storagePath)}
                       >
-                        <span>{flight.name}</span>
-                        <Badge variant="secondary">{flight.imageCount} images</Badge>
+                        <span>{folder.name}</span>
+                        <Badge variant="secondary">{folder.imageCount} images</Badge>
                       </Button>
                     ))}
                   </div>
@@ -1496,7 +1492,7 @@ export default function OrthomosaicViewerPage() {
                     variant="ghost"
                     size="sm"
                     className="mt-2"
-                    onClick={() => setShowFlightPicker(false)}
+                    onClick={() => setShowFolderPicker(false)}
                   >
                     Cancel
                   </Button>

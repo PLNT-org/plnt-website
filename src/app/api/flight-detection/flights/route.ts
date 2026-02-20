@@ -6,67 +6,75 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
-// GET: List flights that have uploaded images
+// GET: List folders in the flight-images bucket that contain images
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url)
-  const userId = searchParams.get('userId')
-
   try {
-    // Get distinct flight_ids from flight_images
-    const { data: imageRows, error: imgError } = await supabase
-      .from('flight_images')
-      .select('flight_id')
+    // List top-level folders in flight-images bucket
+    const { data: topFolders, error: listError } = await supabase
+      .storage
+      .from('flight-images')
+      .list('', { limit: 100 })
 
-    if (imgError) {
-      console.error('[flight-detection/flights] Error querying flight_images:', imgError)
-      return NextResponse.json({ error: imgError.message }, { status: 500 })
+    if (listError) {
+      console.error('[flight-detection/flights] Storage list error:', listError)
+      return NextResponse.json({ error: listError.message }, { status: 500 })
     }
 
-    if (!imageRows || imageRows.length === 0) {
+    if (!topFolders || topFolders.length === 0) {
       return NextResponse.json({ flights: [] })
     }
 
-    // Count images per flight
-    const flightCounts: Record<string, number> = {}
-    for (const row of imageRows) {
-      if (row.flight_id) {
-        flightCounts[row.flight_id] = (flightCounts[row.flight_id] || 0) + 1
+    // For each top-level folder, find subfolders with images
+    const flights: Array<{ id: string; name: string; imageCount: number; storagePath: string }> = []
+
+    for (const folder of topFolders) {
+      if (!folder.id && folder.name) {
+        // It's a folder (no id means it's a prefix, not a file)
+        const imageFiles = await listImagesRecursive(folder.name)
+        if (imageFiles.length > 0) {
+          flights.push({
+            id: folder.name,
+            name: `${folder.name.substring(0, 8)}... (${imageFiles.length} images)`,
+            imageCount: imageFiles.length,
+            storagePath: folder.name,
+          })
+        }
       }
     }
 
-    const flightIds = Object.keys(flightCounts)
-    if (flightIds.length === 0) {
-      return NextResponse.json({ flights: [] })
-    }
-
-    // Fetch flight details — join through flight_plans to filter by user_id
-    // (flights table has no user_id, it's on flight_plans)
-    const { data: flights, error: flightError } = await supabase
-      .from('flights')
-      .select('id, created_at, flight_plans!inner(name, user_id)')
-      .in('id', flightIds)
-      .order('created_at', { ascending: false })
-
-    if (flightError) {
-      console.error('[flight-detection/flights] Error querying flights:', flightError)
-      return NextResponse.json({ error: flightError.message }, { status: 500 })
-    }
-
-    const result = (flights || [])
-      .filter((f: any) => {
-        // Filter by user if provided
-        if (userId && f.flight_plans?.user_id !== userId) return false
-        return true
-      })
-      .map((f: any) => ({
-        id: f.id,
-        name: f.flight_plans?.name || `Flight ${new Date(f.created_at).toLocaleDateString()}`,
-        imageCount: flightCounts[f.id] || 0,
-      }))
-
-    return NextResponse.json({ flights: result })
+    return NextResponse.json({ flights })
   } catch (error) {
     console.error('[flight-detection/flights] Error:', error)
-    return NextResponse.json({ error: 'Failed to fetch flights' }, { status: 500 })
+    return NextResponse.json({ error: 'Failed to list image folders' }, { status: 500 })
   }
+}
+
+// Recursively list image files in a storage folder
+async function listImagesRecursive(prefix: string): Promise<string[]> {
+  const imageExtensions = ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng']
+  const allImages: string[] = []
+
+  const { data: items, error } = await supabase
+    .storage
+    .from('flight-images')
+    .list(prefix, { limit: 1000 })
+
+  if (error || !items) return allImages
+
+  for (const item of items) {
+    const fullPath = `${prefix}/${item.name}`
+    if (item.id) {
+      // It's a file — check if it's an image
+      const ext = item.name.toLowerCase().substring(item.name.lastIndexOf('.'))
+      if (imageExtensions.includes(ext)) {
+        allImages.push(fullPath)
+      }
+    } else {
+      // It's a subfolder — recurse
+      const subImages = await listImagesRecursive(fullPath)
+      allImages.push(...subImages)
+    }
+  }
+
+  return allImages
 }
