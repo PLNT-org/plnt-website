@@ -187,6 +187,10 @@ export default function OrthomosaicViewerPage() {
   } | null>(null)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
 
+  // Camera positions re-sync state
+  const [resyncingCameras, setResyncingCameras] = useState(false)
+  const [cameraPositionCount, setCameraPositionCount] = useState<number | null>(null)
+
   // Manual GPS offset nudge (meters)
   const [labelNudge, setLabelNudge] = useState({ lat: 0, lon: 0 })
   const NUDGE_STEP = 0.5 // meters per click
@@ -882,6 +886,33 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
+  // Re-sync camera positions from Lightning task
+  const handleResyncCameras = async () => {
+    if (!selectedOrthomosaic || isDemo) return
+
+    setResyncingCameras(true)
+    try {
+      const response = await fetch('/api/lightning/resync-cameras', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+      })
+
+      const data = await response.json()
+      if (data.success) {
+        setCameraPositionCount(data.count)
+        alert(`Fetched ${data.count} corrected camera positions. Run "Detect from Raw Images" to use them.`)
+      } else {
+        alert(data.error || 'Failed to fetch camera positions')
+      }
+    } catch (err) {
+      console.error('Error re-syncing cameras:', err)
+      alert('Failed to fetch camera positions. Check console for details.')
+    } finally {
+      setResyncingCameras(false)
+    }
+  }
+
   // Auto-extract bounds for completed orthomosaics that are missing them
   // or have invalid UTM bounds (coordinates in meters instead of lat/lng degrees)
   // Skip if the orthophoto URL points to Lightning (ephemeral) or has a known download error
@@ -1341,6 +1372,26 @@ export default function OrthomosaicViewerPage() {
                       <>
                         <Camera className="h-4 w-4 mr-2" />
                         Detect from Raw Images
+                      </>
+                    )}
+                  </Button>
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleResyncCameras}
+                    disabled={resyncingCameras}
+                    title="Fetch corrected camera positions from ODM for accurate GPS placement"
+                  >
+                    {resyncingCameras ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                        Fetching...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="h-4 w-4 mr-1" />
+                        {cameraPositionCount ? `${cameraPositionCount} Positions` : 'Fetch Camera Positions'}
                       </>
                     )}
                   </Button>
