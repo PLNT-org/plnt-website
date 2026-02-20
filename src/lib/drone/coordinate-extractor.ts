@@ -224,7 +224,7 @@ export function pixelToGroundCoordinate(
   pixel: PixelCoordinate,
   metadata: DroneImageMetadata
 ): GroundCoordinate {
-  const { latitude, longitude, imageWidth, imageHeight, gsdX, gsdY } = metadata
+  const { latitude, longitude, imageWidth, imageHeight, gsdX, gsdY, gimbalYaw } = metadata
 
   // Calculate offset from image center in pixels
   const centerX = imageWidth / 2
@@ -234,8 +234,23 @@ export function pixelToGroundCoordinate(
   const offsetPixelY = centerY - pixel.y // Y is inverted (image Y increases downward)
 
   // Convert pixel offset to meters
-  const offsetMetersX = offsetPixelX * gsdX
-  const offsetMetersY = offsetPixelY * gsdY
+  let offsetMetersX = offsetPixelX * gsdX
+  let offsetMetersY = offsetPixelY * gsdY
+
+  // Rotate by gimbal yaw to account for drone heading
+  // Yaw 0° = north (image top points north), 90° = east, etc.
+  // Without rotation, we assume image top = north, which is wrong when the drone faces other directions
+  if (gimbalYaw !== undefined && gimbalYaw !== 0) {
+    const yawRad = gimbalYaw * Math.PI / 180
+    const cosYaw = Math.cos(yawRad)
+    const sinYaw = Math.sin(yawRad)
+
+    const rotatedX = offsetMetersX * cosYaw - offsetMetersY * sinYaw
+    const rotatedY = offsetMetersX * sinYaw + offsetMetersY * cosYaw
+
+    offsetMetersX = rotatedX
+    offsetMetersY = rotatedY
+  }
 
   // Convert meters to lat/long degrees
   // At the equator: 1 degree latitude ≈ 111,320 meters
