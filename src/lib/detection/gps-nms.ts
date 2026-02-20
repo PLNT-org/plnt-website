@@ -41,21 +41,19 @@ export function haversineDistance(
  */
 export function applyGPSNMS(
   detections: GPSDetection[],
-  distanceThresholdMeters: number = 0.15
+  distanceThresholdMeters: number = 2.0
 ): string[] {
   if (detections.length === 0) return []
 
   // Sort by confidence descending
   const sorted = [...detections].sort((a, b) => b.confidence - a.confidence)
-  const suppressedIds: string[] = []
-  const kept = new Set<number>()
+  const suppressedSet = new Set<string>()
 
   for (let i = 0; i < sorted.length; i++) {
-    if (suppressedIds.includes(sorted[i].id)) continue
-    kept.add(i)
+    if (suppressedSet.has(sorted[i].id)) continue
 
     for (let j = i + 1; j < sorted.length; j++) {
-      if (suppressedIds.includes(sorted[j].id)) continue
+      if (suppressedSet.has(sorted[j].id)) continue
 
       const dist = haversineDistance(
         sorted[i].latitude,
@@ -65,10 +63,10 @@ export function applyGPSNMS(
       )
 
       if (dist <= distanceThresholdMeters) {
-        suppressedIds.push(sorted[j].id)
+        suppressedSet.add(sorted[j].id)
       }
     }
   }
 
-  return suppressedIds
+  return Array.from(suppressedSet)
 }

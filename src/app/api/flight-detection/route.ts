@@ -23,7 +23,7 @@ const TILE_OVERLAP_PX = 100
 const NMS_IOU_THRESHOLD = 0.05
 const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 25
-const GPS_NMS_DISTANCE_METERS = 0.15
+const GPS_NMS_DISTANCE_METERS = 2.0
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng']
 
@@ -159,6 +159,7 @@ export async function POST(request: NextRequest) {
     maxImages,
     startIndex = 0,
     batchSize = 10,
+    gps_nms_distance = GPS_NMS_DISTANCE_METERS,
   } = body as {
     orthomosaicId?: string
     storagePath?: string
@@ -167,6 +168,7 @@ export async function POST(request: NextRequest) {
     maxImages?: number
     startIndex?: number
     batchSize?: number
+    gps_nms_distance?: number
   }
 
   if (!inputOrthoId && !storagePath) {
@@ -493,20 +495,24 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // Step 4: Cross-image GPS NMS (only on last batch when all images are done)
+        // Step 4: Offset correction + cross-image GPS NMS (only on last batch)
         if (isLastBatch) {
-          send({ type: 'status', message: 'Running cross-image deduplication...' })
-          console.log(`[FlightDetection] Cross-image GPS NMS (threshold: ${GPS_NMS_DISTANCE_METERS}m)`)
+          send({ type: 'status', message: 'Correcting GPS offset and deduplicating...' })
 
+          // 4a. Fetch ALL AI labels with full row data (for re-insertion after correction)
           const dbPageSize = 1000
-          let allLabels: Array<{ id: string; latitude: number; longitude: number; confidence: number }> = []
+          let allLabels: Array<{
+            id: string; orthomosaic_id: string; user_id: string | null;
+            latitude: number; longitude: number; pixel_x: number | null; pixel_y: number | null;
+            source: string; confidence: number; label: string; verified: boolean;
+          }> = []
           let offset = 0
           let hasMore = true
 
           while (hasMore) {
             const { data, error } = await supabase
               .from('plant_labels')
-              .select('id, latitude, longitude, confidence')
+              .select('id, orthomosaic_id, user_id, latitude, longitude, pixel_x, pixel_y, source, confidence, label, verified')
               .eq('orthomosaic_id', orthomosaicId)
               .eq('source', 'ai')
               .range(offset, offset + dbPageSize - 1)
@@ -520,7 +526,55 @@ export async function POST(request: NextRequest) {
             }
           }
 
+          console.log(`[FlightDetection] Fetched ${allLabels.length} AI labels for post-processing`)
+
           if (allLabels.length > 0) {
+            // 4b. GPS offset correction — align raw EXIF GPS with orthomosaic coordinates
+            // Compute centroid of all detections and compare to orthomosaic center.
+            // Raw EXIF GPS has systematic bias vs the photogrammetry-corrected orthomosaic.
+            const { data: orthoData } = await supabase
+              .from('orthomosaics')
+              .select('bounds')
+              .eq('id', orthomosaicId)
+              .single()
+
+            if (orthoData?.bounds) {
+              const bounds = orthoData.bounds as { north: number; south: number; east: number; west: number }
+              const orthoCenterLat = (bounds.north + bounds.south) / 2
+              const orthoCenterLon = (bounds.east + bounds.west) / 2
+
+              const labelCenterLat = allLabels.reduce((sum, l) => sum + l.latitude, 0) / allLabels.length
+              const labelCenterLon = allLabels.reduce((sum, l) => sum + l.longitude, 0) / allLabels.length
+
+              const offsetLat = orthoCenterLat - labelCenterLat
+              const offsetLon = orthoCenterLon - labelCenterLon
+
+              // Compute offset magnitude in meters
+              const offsetMeters = Math.sqrt(
+                (offsetLat * 111320) ** 2 +
+                (offsetLon * 111320 * Math.cos(labelCenterLat * Math.PI / 180)) ** 2
+              )
+
+              console.log(`[FlightDetection] GPS offset: ${offsetMeters.toFixed(1)}m (dlat=${offsetLat.toFixed(6)}, dlon=${offsetLon.toFixed(6)})`)
+              console.log(`[FlightDetection]   Ortho center: (${orthoCenterLat.toFixed(6)}, ${orthoCenterLon.toFixed(6)})`)
+              console.log(`[FlightDetection]   Label center: (${labelCenterLat.toFixed(6)}, ${labelCenterLon.toFixed(6)})`)
+
+              // Apply offset if significant (> 0.3m)
+              if (offsetMeters > 0.3) {
+                send({ type: 'status', message: `Applying GPS offset correction (${offsetMeters.toFixed(1)}m)...` })
+                for (const label of allLabels) {
+                  label.latitude += offsetLat
+                  label.longitude += offsetLon
+                }
+                console.log(`[FlightDetection] Applied offset correction to ${allLabels.length} labels`)
+              } else {
+                console.log(`[FlightDetection] GPS offset < 0.3m, skipping correction`)
+              }
+            }
+
+            // 4c. Cross-image GPS NMS with configurable distance
+            console.log(`[FlightDetection] GPS NMS: ${allLabels.length} labels, distance threshold: ${gps_nms_distance}m`)
+
             const suppressedIds = applyGPSNMS(
               allLabels.map(l => ({
                 id: l.id,
@@ -528,22 +582,53 @@ export async function POST(request: NextRequest) {
                 longitude: l.longitude,
                 confidence: l.confidence || 0,
               })),
-              GPS_NMS_DISTANCE_METERS
+              gps_nms_distance as number
             )
 
-            if (suppressedIds.length > 0) {
-              console.log(`[FlightDetection] GPS NMS: suppressing ${suppressedIds.length} of ${allLabels.length} labels`)
+            const suppressedSet = new Set(suppressedIds)
+            const survivingLabels = allLabels.filter(l => !suppressedSet.has(l.id))
+            console.log(`[FlightDetection] GPS NMS: ${allLabels.length} → ${survivingLabels.length} (suppressed ${suppressedIds.length})`)
 
-              for (let i = 0; i < suppressedIds.length; i += 100) {
-                const chunk = suppressedIds.slice(i, i + 100)
+            // 4d. Delete all AI labels and re-insert surviving ones with corrected coordinates
+            send({ type: 'status', message: `Saving ${survivingLabels.length} deduplicated labels...` })
+
+            // Delete all AI labels for this orthomosaic
+            let deleteOffset = 0
+            let deleteMore = true
+            while (deleteMore) {
+              const { data: toDelete } = await supabase
+                .from('plant_labels')
+                .select('id')
+                .eq('orthomosaic_id', orthomosaicId)
+                .eq('source', 'ai')
+                .range(0, 999)
+
+              if (!toDelete || toDelete.length === 0) {
+                deleteMore = false
+              } else {
                 await supabase
                   .from('plant_labels')
                   .delete()
-                  .in('id', chunk)
+                  .in('id', toDelete.map(r => r.id))
+                deleteOffset += toDelete.length
+              }
+            }
+            console.log(`[FlightDetection] Deleted ${deleteOffset} old AI labels`)
+
+            // Re-insert surviving labels with corrected GPS coordinates
+            for (let i = 0; i < survivingLabels.length; i += 250) {
+              const chunk = survivingLabels.slice(i, i + 250).map(({ id, ...rest }) => rest)
+              const { error: insertError } = await supabase
+                .from('plant_labels')
+                .insert(chunk)
+
+              if (insertError) {
+                console.error(`[FlightDetection] Re-insert error at chunk ${i}:`, insertError.message)
               }
             }
 
-            totalDetections = allLabels.length - suppressedIds.length
+            totalDetections = survivingLabels.length
+            console.log(`[FlightDetection] Re-inserted ${survivingLabels.length} corrected labels`)
           }
         }
 
