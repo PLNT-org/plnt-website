@@ -186,6 +186,10 @@ export default function OrthomosaicViewerPage() {
     totalDetections?: number
   } | null>(null)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
+
+  // Manual GPS offset nudge (meters)
+  const [labelNudge, setLabelNudge] = useState({ lat: 0, lon: 0 })
+  const NUDGE_STEP = 0.5 // meters per click
   const [plotAggregation, setPlotAggregation] = useState<{
     plotCounts: Array<{
       plotId: string
@@ -1582,12 +1586,62 @@ export default function OrthomosaicViewerPage() {
             </CardContent>
           </Card>
 
+          {/* Label GPS Nudge — adjust label positions to align with plants */}
+          {labels.length > 0 && labels.some(l => l.source === 'ai') && (
+            <Card>
+              <CardContent className="py-4">
+                <div className="flex items-center justify-between flex-wrap gap-4">
+                  <div className="flex items-center gap-3">
+                    <span className="font-medium text-sm">Nudge Labels</span>
+                    <div className="flex items-center gap-1">
+                      <Button variant="outline" size="sm" className="h-8 w-8 p-0"
+                        onClick={() => setLabelNudge(p => ({ ...p, lat: p.lat + NUDGE_STEP }))}>
+                        N
+                      </Button>
+                      <Button variant="outline" size="sm" className="h-8 w-8 p-0"
+                        onClick={() => setLabelNudge(p => ({ ...p, lat: p.lat - NUDGE_STEP }))}>
+                        S
+                      </Button>
+                      <Button variant="outline" size="sm" className="h-8 w-8 p-0"
+                        onClick={() => setLabelNudge(p => ({ ...p, lon: p.lon + NUDGE_STEP }))}>
+                        E
+                      </Button>
+                      <Button variant="outline" size="sm" className="h-8 w-8 p-0"
+                        onClick={() => setLabelNudge(p => ({ ...p, lon: p.lon - NUDGE_STEP }))}>
+                        W
+                      </Button>
+                    </div>
+                    <Button variant="ghost" size="sm"
+                      onClick={() => setLabelNudge({ lat: 0, lon: 0 })}
+                      disabled={labelNudge.lat === 0 && labelNudge.lon === 0}>
+                      Reset
+                    </Button>
+                  </div>
+                  {(labelNudge.lat !== 0 || labelNudge.lon !== 0) && (
+                    <span className="text-xs text-gray-500 font-mono">
+                      {labelNudge.lat > 0 ? '+' : ''}{labelNudge.lat.toFixed(1)}m N, {labelNudge.lon > 0 ? '+' : ''}{labelNudge.lon.toFixed(1)}m E
+                    </span>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Map */}
           <Card>
             <CardContent className="p-0 overflow-hidden rounded-lg">
               <OrthomosaicMap
                 orthomosaic={selectedOrthomosaic}
-                labels={labels}
+                labels={labels.map(l => {
+                  if (l.source !== 'ai' || (labelNudge.lat === 0 && labelNudge.lon === 0)) return l
+                  const lat = selectedOrthomosaic?.bounds
+                    ? l.latitude + labelNudge.lat / 111320
+                    : l.latitude
+                  const lon = selectedOrthomosaic?.bounds
+                    ? l.longitude + labelNudge.lon / (111320 * Math.cos(l.latitude * Math.PI / 180))
+                    : l.longitude
+                  return { ...l, latitude: lat, longitude: lon }
+                })}
                 labelMode={labelMode}
                 selectedLabelType={selectedLabelType}
                 onAddLabel={handleAddLabel}
