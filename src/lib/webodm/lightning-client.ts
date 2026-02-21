@@ -629,6 +629,10 @@ export class LightningClient {
 
       const allFiles = Object.keys(zip.files)
       console.log(`[Lightning] all.zip contains ${allFiles.length} files`)
+      const relevantFiles = allFiles.filter(f =>
+        f.includes('shots') || f.includes('reconstruction') || f.includes('cameras') || f.includes('opensfm') || f.includes('geo')
+      )
+      console.log(`[Lightning] Relevant files in zip:`, relevantFiles)
 
       // Extract camera positions from shots.geojson if we don't have them
       if (!cameraPositions) {
