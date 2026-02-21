@@ -312,5 +312,42 @@ export function buildReconstructionFromCamerasAndShots(
     altitude: sumAlt / count,
   }
 
+  // Detect if translations are in a projected CRS (UTM) rather than local ENU.
+  // Local ENU translations are typically < 1000m; UTM values are > 100,000.
+  const sampleShot = Object.values(shots)[0]
+  if (sampleShot && (Math.abs(sampleShot.translation[0]) > 10000 || Math.abs(sampleShot.translation[1]) > 10000)) {
+    console.log(`[Reconstruction] Detected projected CRS translations (e.g. UTM), converting to local ENU`)
+    console.log(`[Reconstruction] Sample translation before: [${sampleShot.translation.join(', ')}]`)
+
+    // Re-iterate features to get GPS coordinates and convert translations
+    for (const feature of shotsGeoJson.features) {
+      const filename = feature.properties?.filename || feature.properties?.name
+      if (!filename || !shots[filename]) continue
+
+      const coords = feature.geometry?.coordinates
+      if (!coords || coords.length < 2) continue
+
+      const lon = coords[0]
+      const lat = coords[1]
+      const alt = coords[2] || 0
+
+      // Compute local ENU camera position relative to reference_lla
+      const east = (lon - reference_lla.longitude) * 111320 * Math.cos(reference_lla.latitude * Math.PI / 180)
+      const north = (lat - reference_lla.latitude) * 111320
+      const up = alt - reference_lla.altitude
+
+      // Convert ENU position to OpenSfM camera-frame translation: t = -R * pos
+      const R = rodriguesRotation(shots[filename].rotation)
+      shots[filename].translation = [
+        -(R[0][0] * east + R[0][1] * north + R[0][2] * up),
+        -(R[1][0] * east + R[1][1] * north + R[1][2] * up),
+        -(R[2][0] * east + R[2][1] * north + R[2][2] * up),
+      ] as [number, number, number]
+    }
+
+    const sampleAfter = Object.values(shots)[0]
+    console.log(`[Reconstruction] Sample translation after: [${sampleAfter.translation.map(v => v.toFixed(4)).join(', ')}]`)
+  }
+
   return { reference_lla, cameras, shots }
 }
