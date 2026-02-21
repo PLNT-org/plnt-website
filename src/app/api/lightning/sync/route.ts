@@ -166,18 +166,24 @@ export async function POST(request: NextRequest) {
         updateData.orthomosaic_url = url
         updateData.completed_at = new Date().toISOString()
 
-        // Try to download corrected camera positions from ODM output
+        // Try to download corrected camera positions AND reconstruction data from ODM output
         try {
-          console.log('Attempting to download corrected camera positions...')
-          const cameraPositions = await lightning.downloadCameraPositions(taskId)
+          console.log('Attempting to download camera positions and reconstruction data...')
+          const { cameraPositions, reconstructionData } = await lightning.downloadReconstructionAndPositions(taskId)
           if (cameraPositions) {
             updateData.camera_positions = cameraPositions
             console.log(`Saved ${Object.keys(cameraPositions).length} corrected camera positions`)
           } else {
             console.log('Camera positions not available — will use EXIF GPS with offset correction')
           }
+          if (reconstructionData) {
+            updateData.reconstruction_data = reconstructionData
+            console.log(`Saved reconstruction data: ${Object.keys(reconstructionData.shots).length} shots, ${Object.keys(reconstructionData.cameras).length} cameras`)
+          } else {
+            console.log('Reconstruction data not available — will use EXIF-based projection')
+          }
         } catch (camErr) {
-          console.error('Failed to fetch camera positions (non-fatal):', camErr)
+          console.error('Failed to fetch camera positions/reconstruction (non-fatal):', camErr)
         }
 
       } catch (uploadError) {

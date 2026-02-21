@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import sharp from 'sharp'
 import { extractDroneMetadata, pixelToGroundCoordinate } from '@/lib/drone/coordinate-extractor'
 import { applyGPSNMS } from '@/lib/detection/gps-nms'
+import { projectPixelToGPS, CompactReconstruction } from '@/lib/detection/camera-projection'
 
 // Allow up to 5 minutes for processing many images
 export const maxDuration = 300
@@ -208,12 +209,14 @@ export async function POST(request: NextRequest) {
 
   // Camera positions from ODM's bundle adjustment (if available)
   let cameraPositions: Record<string, { latitude: number; longitude: number; altitude: number }> | null = null
+  // Full OpenSfM reconstruction data for pixel-accurate projection (if available)
+  let reconstructionData: CompactReconstruction | null = null
 
   if (inputOrthoId) {
-    // Look up source_image_paths and camera_positions from the orthomosaic record
+    // Look up source_image_paths, camera_positions, and reconstruction_data from the orthomosaic record
     const { data: ortho, error: orthoError } = await supabase
       .from('orthomosaics')
-      .select('source_image_paths, camera_positions')
+      .select('source_image_paths, camera_positions, reconstruction_data')
       .eq('id', inputOrthoId)
       .single()
 
@@ -234,6 +237,15 @@ export async function POST(request: NextRequest) {
     if (ortho.camera_positions && typeof ortho.camera_positions === 'object') {
       cameraPositions = ortho.camera_positions as Record<string, { latitude: number; longitude: number; altitude: number }>
       console.log(`[FlightDetection] Loaded ${Object.keys(cameraPositions).length} corrected camera positions from ODM`)
+    }
+
+    // Load full reconstruction data for pixel-accurate projection
+    if (ortho.reconstruction_data && typeof ortho.reconstruction_data === 'object') {
+      const rd = ortho.reconstruction_data as CompactReconstruction
+      if (rd.reference_lla && rd.cameras && rd.shots) {
+        reconstructionData = rd
+        console.log(`[FlightDetection] Loaded reconstruction data: ${Object.keys(rd.shots).length} shots, ${Object.keys(rd.cameras).length} cameras`)
+      }
     }
   } else {
     // Fallback: list from storage folder
@@ -262,12 +274,16 @@ export async function POST(request: NextRequest) {
       try {
         const t0 = Date.now()
         const usingCorrectedPositions = cameraPositions !== null && Object.keys(cameraPositions).length > 0
+        const usingFullProjection = reconstructionData !== null
         if (isFirstBatch) {
+          const projectionMsg = usingFullProjection
+            ? `Using full OpenSfM camera model projection for pixel-accurate GPS placement.`
+            : usingCorrectedPositions
+              ? `Using ODM-corrected camera positions for accurate GPS placement.`
+              : ''
           send({
             type: 'status',
-            message: usingCorrectedPositions
-              ? `Using ODM-corrected camera positions for accurate GPS placement. Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...`
-              : `Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...`,
+            message: `${projectionMsg} Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...`.trim(),
           })
         } else {
           send({ type: 'status', message: `Processing images ${startIndex + 1}-${endIndex} of ${totalImageCount}...` })
@@ -496,18 +512,51 @@ export async function POST(request: NextRequest) {
             const nmsDetections = applyNMS(allDetections, NMS_IOU_THRESHOLD)
             console.log(`[FlightDetection] ${imageName}: ${allDetections.length} raw -> ${nmsDetections.length} after NMS`)
 
-            // Convert each detection to GPS via EXIF metadata
+            // Convert each detection to GPS
+            // Try full OpenSfM camera model first, fall back to EXIF-based projection
+            let usedOpenSfM = false
+            let shotData: { rotation: [number, number, number]; translation: [number, number, number]; camera: string } | null = null
+            if (reconstructionData) {
+              // Look up shot by filename (try exact match, then common variations)
+              shotData = reconstructionData.shots[imageName]
+                || reconstructionData.shots[imageName.replace(/\.[^.]+$/, '.JPG')]
+                || reconstructionData.shots[imageName.replace(/\.[^.]+$/, '.jpg')]
+                || null
+            }
+
             const labels = nmsDetections.map(det => {
-              const gps = pixelToGroundCoordinate(
-                { x: det.x, y: det.y },
-                metadata
-              )
+              let lat: number
+              let lon: number
+
+              if (shotData && reconstructionData) {
+                const cam = reconstructionData.cameras[shotData.camera]
+                if (cam) {
+                  const gps = projectPixelToGPS(
+                    det.x, det.y,
+                    imageWidth, imageHeight,
+                    shotData, cam,
+                    reconstructionData.reference_lla
+                  )
+                  lat = gps.latitude
+                  lon = gps.longitude
+                  usedOpenSfM = true
+                } else {
+                  // Camera not found — fall back to EXIF
+                  const gps = pixelToGroundCoordinate({ x: det.x, y: det.y }, metadata)
+                  lat = gps.latitude
+                  lon = gps.longitude
+                }
+              } else {
+                const gps = pixelToGroundCoordinate({ x: det.x, y: det.y }, metadata)
+                lat = gps.latitude
+                lon = gps.longitude
+              }
 
               return {
                 orthomosaic_id: orthomosaicId,
                 user_id: userId || null,
-                latitude: gps.latitude,
-                longitude: gps.longitude,
+                latitude: lat,
+                longitude: lon,
                 pixel_x: Math.round(det.x),
                 pixel_y: Math.round(det.y),
                 source: 'ai' as const,
@@ -516,6 +565,12 @@ export async function POST(request: NextRequest) {
                 verified: false,
               }
             })
+
+            if (usedOpenSfM) {
+              console.log(`[FlightDetection] ${imageName}: Using full OpenSfM camera model projection`)
+            } else if (shotData) {
+              console.log(`[FlightDetection] ${imageName}: Shot found but camera missing, fell back to EXIF projection`)
+            }
 
             // Save labels to DB per-image
             if (labels.length > 0) {
@@ -637,7 +692,12 @@ export async function POST(request: NextRequest) {
             }
 
             // 4c. Cross-image GPS NMS with configurable distance
-            console.log(`[FlightDetection] GPS NMS: ${allLabels.length} labels, distance threshold: ${gps_nms_distance}m`)
+            // Use tighter threshold (0.5m) when full reconstruction data provides accurate projections
+            // With EXIF-based projection, GPS drift means nearby detections may be the same plant
+            const effectiveNmsDistance = reconstructionData
+              ? Math.min(gps_nms_distance as number, 0.5)
+              : gps_nms_distance as number
+            console.log(`[FlightDetection] GPS NMS: ${allLabels.length} labels, distance threshold: ${effectiveNmsDistance}m${reconstructionData ? ' (reduced for OpenSfM accuracy)' : ''}`)
 
             const suppressedIds = applyGPSNMS(
               allLabels.map(l => ({
@@ -646,7 +706,7 @@ export async function POST(request: NextRequest) {
                 longitude: l.longitude,
                 confidence: l.confidence || 0,
               })),
-              gps_nms_distance as number
+              effectiveNmsDistance
             )
 
             const suppressedSet = new Set(suppressedIds)

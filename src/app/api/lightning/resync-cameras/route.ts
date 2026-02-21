@@ -46,11 +46,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No task ID found' }, { status: 400 })
     }
 
-    // Try to download camera positions
+    // Try to download camera positions and reconstruction data
     const lightning = new LightningClient()
-    const cameraPositions = await lightning.downloadCameraPositions(taskId)
+    const { cameraPositions, reconstructionData } = await lightning.downloadReconstructionAndPositions(taskId)
 
-    if (!cameraPositions || Object.keys(cameraPositions).length === 0) {
+    if ((!cameraPositions || Object.keys(cameraPositions).length === 0) && !reconstructionData) {
       return NextResponse.json({
         success: false,
         error: 'Camera positions not available. The Lightning task may have expired (tasks expire after ~7 days).',
@@ -58,12 +58,19 @@ export async function POST(request: NextRequest) {
     }
 
     // Save to database
+    const updatePayload: Record<string, any> = {
+      updated_at: new Date().toISOString(),
+    }
+    if (cameraPositions) {
+      updatePayload.camera_positions = cameraPositions
+    }
+    if (reconstructionData) {
+      updatePayload.reconstruction_data = reconstructionData
+    }
+
     const { error: updateError } = await supabaseAdmin
       .from('orthomosaics')
-      .update({
-        camera_positions: cameraPositions,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updatePayload)
       .eq('id', orthomosaicId)
 
     if (updateError) {
@@ -72,8 +79,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      count: Object.keys(cameraPositions).length,
-      filenames: Object.keys(cameraPositions).slice(0, 5),
+      count: cameraPositions ? Object.keys(cameraPositions).length : 0,
+      filenames: cameraPositions ? Object.keys(cameraPositions).slice(0, 5) : [],
+      hasReconstruction: reconstructionData !== null,
+      reconstructionShots: reconstructionData ? Object.keys(reconstructionData.shots).length : 0,
     })
   } catch (error) {
     console.error('Resync cameras error:', error)

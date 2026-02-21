@@ -3,6 +3,7 @@
 // Docs: https://webodm.net/api
 
 import { WebODMProcessingOptions, PROCESSING_PRESETS } from './types'
+import { extractCompactReconstruction, CompactReconstruction } from '@/lib/detection/camera-projection'
 
 export interface LightningNodeInfo {
   version: string
@@ -550,6 +551,166 @@ export class LightningClient {
 
     console.log('[Lightning] Camera positions not available from this task')
     return null
+  }
+
+  /**
+   * Download both camera positions AND full reconstruction data from a single all.zip download.
+   * Returns { cameraPositions, reconstructionData } — either or both may be null.
+   * More efficient than calling downloadCameraPositions separately since it avoids
+   * downloading all.zip twice.
+   */
+  async downloadReconstructionAndPositions(uuid: string): Promise<{
+    cameraPositions: Record<string, { latitude: number; longitude: number; altitude: number }> | null
+    reconstructionData: CompactReconstruction | null
+  }> {
+    let cameraPositions: Record<string, { latitude: number; longitude: number; altitude: number }> | null = null
+    let reconstructionData: CompactReconstruction | null = null
+
+    // Try individual file downloads first for camera positions (shots.geojson)
+    const filesToTry = [
+      'opensfm/shots.geojson',
+      'odm_report/shots.geojson',
+    ]
+
+    for (const filePath of filesToTry) {
+      try {
+        const url = `${this.baseUrl}/task/${uuid}/download/all/${filePath}${this.getAuthParam()}`
+        console.log(`[Lightning] Trying camera positions from: ${filePath}`)
+        const response = await fetch(url, { signal: AbortSignal.timeout(10000) })
+        if (response.ok) {
+          const geojson = await response.json()
+          const positions = parseShotsGeoJSON(geojson)
+          if (positions && Object.keys(positions).length > 0) {
+            console.log(`[Lightning] Got ${Object.keys(positions).length} camera positions from ${filePath}`)
+            cameraPositions = positions
+            break
+          }
+        }
+      } catch (err) {
+        console.log(`[Lightning] ${filePath} failed:`, err instanceof Error ? err.message : err)
+      }
+    }
+
+    // Try individual reconstruction.json download
+    try {
+      const url = `${this.baseUrl}/task/${uuid}/download/all/opensfm/reconstruction.json${this.getAuthParam()}`
+      console.log(`[Lightning] Trying reconstruction.json individually...`)
+      const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+      if (response.ok) {
+        const reconstruction = await response.json()
+        // Extract camera positions if we don't have them yet
+        if (!cameraPositions) {
+          cameraPositions = parseReconstructionJSON(reconstruction)
+          if (cameraPositions) {
+            console.log(`[Lightning] Got ${Object.keys(cameraPositions).length} camera positions from reconstruction.json`)
+          }
+        }
+        // Extract compact reconstruction data
+        reconstructionData = extractCompactReconstruction(reconstruction)
+        if (reconstructionData) {
+          console.log(`[Lightning] Extracted compact reconstruction: ${Object.keys(reconstructionData.shots).length} shots, ${Object.keys(reconstructionData.cameras).length} cameras`)
+        }
+      }
+    } catch (err) {
+      console.log(`[Lightning] reconstruction.json individual download failed:`, err instanceof Error ? err.message : err)
+    }
+
+    // If we already have both, return early
+    if (cameraPositions && reconstructionData) {
+      return { cameraPositions, reconstructionData }
+    }
+
+    // Fallback: download all.zip and extract both files
+    console.log(`[Lightning] Falling back to all.zip extraction...`)
+    try {
+      const zipBuffer = await this.downloadAsset(uuid, 'all.zip')
+      const JSZip = (await import('jszip')).default
+      const zip = await JSZip.loadAsync(zipBuffer)
+
+      const allFiles = Object.keys(zip.files)
+      console.log(`[Lightning] all.zip contains ${allFiles.length} files`)
+
+      // Extract camera positions from shots.geojson if we don't have them
+      if (!cameraPositions) {
+        const shotsPaths = [
+          'opensfm/shots.geojson',
+          'odm_report/shots.geojson',
+          'project/opensfm/shots.geojson',
+          'project/odm_report/shots.geojson',
+        ]
+
+        for (const path of shotsPaths) {
+          const entry = zip.file(path)
+          if (entry) {
+            const content = await entry.async('string')
+            const geojson = JSON.parse(content)
+            cameraPositions = parseShotsGeoJSON(geojson)
+            if (cameraPositions) {
+              console.log(`[Lightning] Got ${Object.keys(cameraPositions).length} camera positions from zip:${path}`)
+              break
+            }
+          }
+        }
+      }
+
+      // Extract reconstruction.json for both camera positions (fallback) and reconstruction data
+      const reconPaths = [
+        'opensfm/reconstruction.json',
+        'project/opensfm/reconstruction.json',
+      ]
+
+      // Also try wildcard search
+      const reconFile = allFiles.find(f => f.endsWith('reconstruction.json'))
+
+      for (const path of [...reconPaths, ...(reconFile ? [reconFile] : [])]) {
+        const entry = zip.file(path)
+        if (entry) {
+          console.log(`[Lightning] Found reconstruction.json at: ${path}`)
+          const content = await entry.async('string')
+          const reconstruction = JSON.parse(content)
+
+          if (!cameraPositions) {
+            cameraPositions = parseReconstructionJSON(reconstruction)
+            if (cameraPositions) {
+              console.log(`[Lightning] Got ${Object.keys(cameraPositions).length} camera positions from zip:${path}`)
+            }
+          }
+
+          if (!reconstructionData) {
+            reconstructionData = extractCompactReconstruction(reconstruction)
+            if (reconstructionData) {
+              console.log(`[Lightning] Extracted compact reconstruction from zip: ${Object.keys(reconstructionData.shots).length} shots, ${Object.keys(reconstructionData.cameras).length} cameras`)
+            }
+          }
+
+          if (cameraPositions && reconstructionData) break
+        }
+      }
+
+      // Last resort for camera positions: find shots.geojson anywhere
+      if (!cameraPositions) {
+        const shotsFile = allFiles.find(f => f.endsWith('shots.geojson'))
+        if (shotsFile) {
+          const content = await zip.file(shotsFile)!.async('string')
+          const geojson = JSON.parse(content)
+          cameraPositions = parseShotsGeoJSON(geojson)
+          if (cameraPositions) {
+            console.log(`[Lightning] Got ${Object.keys(cameraPositions).length} camera positions from zip:${shotsFile}`)
+          }
+        }
+      }
+    } catch (zipErr) {
+      console.log(`[Lightning] all.zip extraction failed:`, zipErr instanceof Error ? zipErr.message : zipErr)
+    }
+
+    if (!cameraPositions) {
+      console.log('[Lightning] Camera positions not available from this task')
+    }
+    if (!reconstructionData) {
+      console.log('[Lightning] Reconstruction data not available from this task')
+    }
+
+    return { cameraPositions, reconstructionData }
   }
 }
 
