@@ -218,3 +218,87 @@ export function extractCompactReconstruction(
 
   return { reference_lla: refLLA, cameras, shots }
 }
+
+/**
+ * Build a CompactReconstruction from ODM's cameras.json + shots.geojson.
+ * Lightning doesn't include opensfm/reconstruction.json in all.zip,
+ * but cameras.json (intrinsics) and odm_report/shots.geojson (extrinsics)
+ * contain equivalent data.
+ *
+ * cameras.json format:
+ *   { "v2 DJI FC3582 4032 3024 brown 0.9185": { projection_type, focal_x, k1, k2, ... } }
+ *
+ * shots.geojson feature properties:
+ *   { filename, rotation: [rx,ry,rz], translation: [tx,ty,tz], camera, ... }
+ *   geometry.coordinates: [lon, lat, alt]
+ *
+ * reference_lla is derived from the mean GPS position of all shots.
+ *
+ * Returns null if either file is missing required data.
+ */
+export function buildReconstructionFromCamerasAndShots(
+  camerasJson: any,
+  shotsGeoJson: any
+): CompactReconstruction | null {
+  if (!camerasJson || typeof camerasJson !== 'object') return null
+  if (!shotsGeoJson?.features || !Array.isArray(shotsGeoJson.features)) return null
+
+  // Parse cameras.json — ODM format uses focal_x (or focal) and k1/k2
+  const cameras: Record<string, OpenSfMCamera> = {}
+  for (const [camId, camData] of Object.entries(camerasJson) as [string, any][]) {
+    const focal = camData.focal_x || camData.focal || camData.focal_y
+    if (!focal) continue
+    cameras[camId] = {
+      projection_type: camData.projection_type || 'brown',
+      focal,
+      k1: camData.k1 || 0,
+      k2: camData.k2 || 0,
+    }
+  }
+
+  if (Object.keys(cameras).length === 0) return null
+
+  // Parse shots from GeoJSON features
+  const shots: Record<string, OpenSfMShot> = {}
+  let sumLat = 0, sumLon = 0, sumAlt = 0, count = 0
+
+  for (const feature of shotsGeoJson.features) {
+    const props = feature.properties
+    const filename = props?.filename || props?.name
+    if (!filename) continue
+
+    // Check for rotation and translation in properties
+    if (!props.rotation || !props.translation || !props.camera) continue
+
+    // Validate rotation and translation are arrays of 3 numbers
+    const rot = props.rotation
+    const trans = props.translation
+    if (!Array.isArray(rot) || rot.length !== 3) continue
+    if (!Array.isArray(trans) || trans.length !== 3) continue
+
+    shots[filename] = {
+      rotation: rot as [number, number, number],
+      translation: trans as [number, number, number],
+      camera: props.camera,
+    }
+
+    // Accumulate GPS coordinates for reference_lla
+    const coords = feature.geometry?.coordinates
+    if (coords && coords.length >= 2) {
+      sumLon += coords[0]
+      sumLat += coords[1]
+      sumAlt += coords[2] || 0
+      count++
+    }
+  }
+
+  if (Object.keys(shots).length === 0 || count === 0) return null
+
+  const reference_lla: ReferenceLLA = {
+    latitude: sumLat / count,
+    longitude: sumLon / count,
+    altitude: sumAlt / count,
+  }
+
+  return { reference_lla, cameras, shots }
+}

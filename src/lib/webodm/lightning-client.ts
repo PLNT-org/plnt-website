@@ -3,7 +3,7 @@
 // Docs: https://webodm.net/api
 
 import { WebODMProcessingOptions, PROCESSING_PRESETS } from './types'
-import { extractCompactReconstruction, CompactReconstruction } from '@/lib/detection/camera-projection'
+import { extractCompactReconstruction, buildReconstructionFromCamerasAndShots, CompactReconstruction } from '@/lib/detection/camera-projection'
 
 export interface LightningNodeInfo {
   version: string
@@ -700,6 +700,38 @@ export class LightningClient {
           cameraPositions = parseShotsGeoJSON(geojson)
           if (cameraPositions) {
             console.log(`[Lightning] Got ${Object.keys(cameraPositions).length} camera positions from zip:${shotsFile}`)
+          }
+        }
+      }
+
+      // Build reconstruction from cameras.json + shots.geojson when reconstruction.json is missing
+      // Lightning doesn't include opensfm/reconstruction.json but does include these two files
+      if (!reconstructionData) {
+        const camerasEntry = zip.file('cameras.json')
+        const shotsEntry = zip.file('odm_report/shots.geojson')
+          || zip.file(allFiles.find(f => f.endsWith('shots.geojson')) || '')
+
+        if (camerasEntry && shotsEntry) {
+          try {
+            const camerasContent = await camerasEntry.async('string')
+            const shotsContent = await shotsEntry.async('string')
+            const camerasJson = JSON.parse(camerasContent)
+            const shotsGeoJson = JSON.parse(shotsContent)
+
+            // Log a sample feature's properties to see what fields are available
+            if (shotsGeoJson.features?.[0]?.properties) {
+              const sampleProps = Object.keys(shotsGeoJson.features[0].properties)
+              console.log(`[Lightning] shots.geojson sample feature properties: ${sampleProps.join(', ')}`)
+            }
+
+            reconstructionData = buildReconstructionFromCamerasAndShots(camerasJson, shotsGeoJson)
+            if (reconstructionData) {
+              console.log(`[Lightning] Built reconstruction from cameras.json + shots.geojson: ${Object.keys(reconstructionData.shots).length} shots, ${Object.keys(reconstructionData.cameras).length} cameras`)
+            } else {
+              console.log(`[Lightning] Could not build reconstruction from cameras.json + shots.geojson (missing rotation/translation in shot properties?)`)
+            }
+          } catch (buildErr) {
+            console.log(`[Lightning] Failed to build reconstruction from cameras.json + shots.geojson:`, buildErr instanceof Error ? buildErr.message : buildErr)
           }
         }
       }
