@@ -418,7 +418,7 @@ export class LightningClient {
    * Returns a map of filename → {latitude, longitude, altitude} or null if unavailable.
    */
   async downloadCameraPositions(uuid: string): Promise<Record<string, { latitude: number; longitude: number; altitude: number }> | null> {
-    // Try individual file downloads — some NodeODM implementations support /download/all/{path}
+    // Try individual file downloads first — some NodeODM implementations support /download/all/{path}
     const filesToTry = [
       'opensfm/shots.geojson',
       'odm_report/shots.geojson',
@@ -427,7 +427,9 @@ export class LightningClient {
     for (const filePath of filesToTry) {
       try {
         const url = `${this.baseUrl}/task/${uuid}/download/all/${filePath}${this.getAuthParam()}`
+        console.log(`[Lightning] Trying camera positions from: ${filePath}`)
         const response = await fetch(url, { signal: AbortSignal.timeout(10000) })
+        console.log(`[Lightning] ${filePath} → ${response.status}`)
         if (response.ok) {
           const geojson = await response.json()
           const positions = parseShotsGeoJSON(geojson)
@@ -436,15 +438,17 @@ export class LightningClient {
             return positions
           }
         }
-      } catch {
-        // Try next path
+      } catch (err) {
+        console.log(`[Lightning] ${filePath} failed:`, err instanceof Error ? err.message : err)
       }
     }
 
-    // Try reconstruction.json (needs more parsing)
+    // Try reconstruction.json via individual download
     try {
       const url = `${this.baseUrl}/task/${uuid}/download/all/opensfm/reconstruction.json${this.getAuthParam()}`
+      console.log(`[Lightning] Trying reconstruction.json...`)
       const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+      console.log(`[Lightning] reconstruction.json → ${response.status}`)
       if (response.ok) {
         const reconstruction = await response.json()
         const positions = parseReconstructionJSON(reconstruction)
@@ -453,8 +457,95 @@ export class LightningClient {
           return positions
         }
       }
-    } catch {
-      // Not available
+    } catch (err) {
+      console.log(`[Lightning] reconstruction.json failed:`, err instanceof Error ? err.message : err)
+    }
+
+    // Fallback: download all.zip and look for camera position files inside
+    console.log(`[Lightning] Individual file downloads failed, trying all.zip extraction...`)
+    try {
+      const zipBuffer = await this.downloadAsset(uuid, 'all.zip')
+      const JSZip = (await import('jszip')).default
+      const zip = await JSZip.loadAsync(zipBuffer)
+
+      // Log all files in the zip so we can see what's available
+      const allFiles = Object.keys(zip.files)
+      console.log(`[Lightning] all.zip contains ${allFiles.length} files`)
+      const relevantFiles = allFiles.filter(f =>
+        f.includes('shots') || f.includes('reconstruction') || f.includes('cameras') || f.includes('geo')
+      )
+      console.log(`[Lightning] Relevant files in zip:`, relevantFiles)
+
+      // Try shots.geojson paths
+      const shotsPaths = [
+        'opensfm/shots.geojson',
+        'odm_report/shots.geojson',
+        'project/opensfm/shots.geojson',
+        'project/odm_report/shots.geojson',
+      ]
+
+      for (const path of shotsPaths) {
+        const entry = zip.file(path)
+        if (entry) {
+          console.log(`[Lightning] Found shots.geojson at: ${path}`)
+          const content = await entry.async('string')
+          const geojson = JSON.parse(content)
+          const positions = parseShotsGeoJSON(geojson)
+          if (positions && Object.keys(positions).length > 0) {
+            console.log(`[Lightning] Got ${Object.keys(positions).length} camera positions from zip:${path}`)
+            return positions
+          }
+        }
+      }
+
+      // Try reconstruction.json paths
+      const reconPaths = [
+        'opensfm/reconstruction.json',
+        'project/opensfm/reconstruction.json',
+      ]
+
+      for (const path of reconPaths) {
+        const entry = zip.file(path)
+        if (entry) {
+          console.log(`[Lightning] Found reconstruction.json at: ${path}`)
+          const content = await entry.async('string')
+          const reconstruction = JSON.parse(content)
+          const positions = parseReconstructionJSON(reconstruction)
+          if (positions && Object.keys(positions).length > 0) {
+            console.log(`[Lightning] Got ${Object.keys(positions).length} camera positions from zip:${path}`)
+            return positions
+          }
+        }
+      }
+
+      // Last resort: find any shots.geojson or reconstruction.json anywhere in the zip
+      const shotsFile = allFiles.find(f => f.endsWith('shots.geojson'))
+      if (shotsFile) {
+        console.log(`[Lightning] Found shots.geojson at unexpected path: ${shotsFile}`)
+        const content = await zip.file(shotsFile)!.async('string')
+        const geojson = JSON.parse(content)
+        const positions = parseShotsGeoJSON(geojson)
+        if (positions && Object.keys(positions).length > 0) {
+          console.log(`[Lightning] Got ${Object.keys(positions).length} camera positions from zip:${shotsFile}`)
+          return positions
+        }
+      }
+
+      const reconFile = allFiles.find(f => f.endsWith('reconstruction.json'))
+      if (reconFile) {
+        console.log(`[Lightning] Found reconstruction.json at unexpected path: ${reconFile}`)
+        const content = await zip.file(reconFile)!.async('string')
+        const reconstruction = JSON.parse(content)
+        const positions = parseReconstructionJSON(reconstruction)
+        if (positions && Object.keys(positions).length > 0) {
+          console.log(`[Lightning] Got ${Object.keys(positions).length} camera positions from zip:${reconFile}`)
+          return positions
+        }
+      }
+
+      console.log(`[Lightning] No camera position files found in all.zip`)
+    } catch (zipErr) {
+      console.log(`[Lightning] all.zip extraction failed:`, zipErr instanceof Error ? zipErr.message : zipErr)
     }
 
     console.log('[Lightning] Camera positions not available from this task')
