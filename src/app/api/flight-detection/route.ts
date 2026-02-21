@@ -692,12 +692,11 @@ export async function POST(request: NextRequest) {
             }
 
             // 4c. Cross-image GPS NMS with configurable distance
-            // Use tighter threshold (0.5m) when full reconstruction data provides accurate projections
-            // With EXIF-based projection, GPS drift means nearby detections may be the same plant
-            const effectiveNmsDistance = reconstructionData
-              ? Math.min(gps_nms_distance as number, 0.5)
-              : gps_nms_distance as number
-            console.log(`[FlightDetection] GPS NMS: ${allLabels.length} labels, distance threshold: ${effectiveNmsDistance}m${reconstructionData ? ' (reduced for OpenSfM accuracy)' : ''}`)
+            // With accurate OpenSfM projection, the same plant in overlapping images
+            // projects to nearly the same GPS point, so the default 2.0m threshold
+            // still works well for cross-image dedup without merging adjacent plants.
+            const effectiveNmsDistance = gps_nms_distance as number
+            console.log(`[FlightDetection] GPS NMS: ${allLabels.length} labels, distance threshold: ${effectiveNmsDistance}m`)
 
             const suppressedIds = applyGPSNMS(
               allLabels.map(l => ({
