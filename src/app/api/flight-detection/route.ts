@@ -529,7 +529,17 @@ export async function POST(request: NextRequest) {
               let lon: number
 
               if (shotData && reconstructionData) {
-                const cam = reconstructionData.cameras[shotData.camera]
+                let cam = reconstructionData.cameras[shotData.camera]
+                if (!cam) {
+                  // Camera ID mismatch — fall back to first camera if only one exists
+                  const cameraKeys = Object.keys(reconstructionData.cameras)
+                  if (cameraKeys.length === 1) {
+                    console.log(`[FlightDetection] ${imageName}: Camera "${shotData.camera}" not found, using only camera "${cameraKeys[0]}"`)
+                    cam = reconstructionData.cameras[cameraKeys[0]]
+                  } else if (cameraKeys.length > 1) {
+                    console.log(`[FlightDetection] ${imageName}: Camera "${shotData.camera}" not found in [${cameraKeys.join(', ')}]`)
+                  }
+                }
                 if (cam) {
                   const gps = projectPixelToGPS(
                     det.x, det.y,

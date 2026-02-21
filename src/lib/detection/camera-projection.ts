@@ -294,6 +294,12 @@ export function buildReconstructionFromCamerasAndShots(
 
   if (Object.keys(shots).length === 0 || count === 0) return null
 
+  // Log camera ID mapping for debugging
+  const cameraKeys = Object.keys(cameras)
+  const shotCameraRefs = [...new Set(Object.values(shots).map(s => s.camera))]
+  console.log(`[Reconstruction] Camera IDs in cameras.json: [${cameraKeys.join(', ')}]`)
+  console.log(`[Reconstruction] Camera refs in shots: [${shotCameraRefs.join(', ')}]`)
+
   const reference_lla: ReferenceLLA = {
     latitude: sumLat / count,
     longitude: sumLon / count,
