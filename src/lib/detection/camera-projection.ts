@@ -276,10 +276,16 @@ export function buildReconstructionFromCamerasAndShots(
     if (!Array.isArray(rot) || rot.length !== 3) continue
     if (!Array.isArray(trans) || trans.length !== 3) continue
 
+    // Normalize camera ref — shots.geojson may prefix with "v2 " that cameras.json omits
+    let cameraRef: string = props.camera
+    if (!cameras[cameraRef] && cameraRef.startsWith('v2 ')) {
+      cameraRef = cameraRef.slice(3)
+    }
+
     shots[filename] = {
       rotation: rot as [number, number, number],
       translation: trans as [number, number, number],
-      camera: props.camera,
+      camera: cameraRef,
     }
 
     // Accumulate GPS coordinates for reference_lla
