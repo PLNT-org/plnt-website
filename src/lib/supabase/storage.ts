@@ -119,8 +119,8 @@ export class OrthomosaicStorage {
       .from(BUCKETS.TILES)
       .getPublicUrl(`${orthomosaicId}/{z}/{x}/{y}.png`)
 
-    // The URL will have the literal {z}/{x}/{y} which Leaflet will replace
-    return data.publicUrl
+    // Supabase encodes {z}/{x}/{y} as %7Bz%7D etc. — decode so Leaflet can substitute tile coords
+    return decodeURIComponent(data.publicUrl)
   }
 
   /**

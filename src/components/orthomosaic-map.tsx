@@ -182,7 +182,9 @@ export default function OrthomosaicMap({
     // Orthophoto layer — prefer pre-generated tiles, fall back to image overlay
     if (orthomosaic.tiles_url) {
       // Pre-generated XYZ tiles in Supabase Storage
-      const orthophotoLayer = L.tileLayer(orthomosaic.tiles_url, {
+      // Decode URL-encoded placeholders (%7Bz%7D → {z}) so Leaflet can substitute tile coords
+      const decodedTilesUrl = decodeURIComponent(orthomosaic.tiles_url)
+      const orthophotoLayer = L.tileLayer(decodedTilesUrl, {
         maxZoom: 24,
         minZoom: 10,
         opacity: 0.9,
