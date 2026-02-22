@@ -913,6 +913,7 @@ export default function OrthomosaicViewerPage() {
 
   // Deduplicate AI labels using GPS NMS
   const [deduplicating, setDeduplicating] = useState(false)
+  const [dedupeDistance, setDedupeDistance] = useState(0.3)
   const handleDeduplicate = async () => {
     if (!selectedOrthomosaic || isDemo) return
 
@@ -923,7 +924,7 @@ export default function OrthomosaicViewerPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           orthomosaicId: selectedOrthomosaic.id,
-          distance: 0.3,
+          distance: dedupeDistance,
         }),
       })
       const data = await response.json()
@@ -1468,26 +1469,39 @@ export default function OrthomosaicViewerPage() {
                   </Button>
 
                   {labels.filter(l => l.source === 'ai').length > 0 && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="border-orange-300 text-orange-700 hover:bg-orange-50"
-                      onClick={handleDeduplicate}
-                      disabled={deduplicating}
-                      title="Remove duplicate AI labels using GPS proximity"
-                    >
-                      {deduplicating ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                          Deduplicating...
-                        </>
-                      ) : (
-                        <>
-                          <Layers className="h-4 w-4 mr-1" />
-                          Deduplicate ({labels.filter(l => l.source === 'ai').length})
-                        </>
-                      )}
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        step="0.05"
+                        min="0.05"
+                        max="5"
+                        value={dedupeDistance}
+                        onChange={(e) => setDedupeDistance(parseFloat(e.target.value) || 0.3)}
+                        className="w-16 h-8 px-2 text-sm border rounded text-center"
+                        title="GPS NMS distance threshold in meters"
+                      />
+                      <span className="text-xs text-gray-500">m</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="border-orange-300 text-orange-700 hover:bg-orange-50"
+                        onClick={handleDeduplicate}
+                        disabled={deduplicating}
+                        title="Remove duplicate AI labels using GPS proximity"
+                      >
+                        {deduplicating ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                            Deduplicating...
+                          </>
+                        ) : (
+                          <>
+                            <Layers className="h-4 w-4 mr-1" />
+                            Deduplicate ({labels.filter(l => l.source === 'ai').length})
+                          </>
+                        )}
+                      </Button>
+                    </div>
                   )}
 
                   {plantDetectionResult && (
