@@ -23,11 +23,12 @@ const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.rob
 // ensures plants appear at the exact scale the model was trained on.
 const TILE_W = 500               // Width matches training tile size
 const TILE_H = 281               // Height matches training tile size
-const TILE_OVERLAP_X = 375       // 75% horizontal overlap
-const TILE_OVERLAP_Y = 211       // 75% vertical overlap
+const TILE_OVERLAP_X = 250       // 50% horizontal overlap
+const TILE_OVERLAP_Y = 140       // 50% vertical overlap
 const NMS_IOU_THRESHOLD = 0.3    // Lower IoU to preserve nearby distinct plants
 const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 20      // Process 20 tiles in parallel
+const EMPTY_TILE_THRESHOLD = 0.9 // Skip tiles where >90% of pixels are black/transparent
 
 interface RoboflowPrediction {
   x: number           // center x in pixels (relative to tile)
@@ -248,18 +249,52 @@ export async function POST(request: NextRequest) {
           x: number; y: number
           cropWidth: number; cropHeight: number
         }
+
+        // Check if a tile region is mostly empty (black/transparent) by sampling raw pixels.
+        // This avoids extracting PNGs and sending API calls for no-data edges of the ortho.
+        const isTileEmpty = (tileX: number, tileY: number, w: number, h: number): boolean => {
+          const sampleStep = 8 // Check every 8th pixel for speed
+          let emptyPixels = 0
+          let totalSampled = 0
+          for (let sy = 0; sy < h; sy += sampleStep) {
+            for (let sx = 0; sx < w; sx += sampleStep) {
+              const px = tileX + sx
+              const py = tileY + sy
+              const idx = (py * imageWidth + px) * channels
+              const r = rawPixels[idx]
+              const g = rawPixels[idx + 1]
+              const b = rawPixels[idx + 2]
+              const a = channels >= 4 ? rawPixels[idx + 3] : 255
+              // Black or transparent = empty
+              if (a < 10 || (r <= 10 && g <= 10 && b <= 10)) {
+                emptyPixels++
+              }
+              totalSampled++
+            }
+          }
+          return totalSampled > 0 && (emptyPixels / totalSampled) > EMPTY_TILE_THRESHOLD
+        }
+
+        const allTileJobs: TileJob[] = []
         const tileJobs: TileJob[] = []
+        let skippedTiles = 0
 
         for (let y = 0; y < imageHeight; y += strideY) {
           for (let x = 0; x < imageWidth; x += strideX) {
             const cropWidth = Math.min(TILE_W, imageWidth - x)
             const cropHeight = Math.min(TILE_H, imageHeight - y)
-            tileJobs.push({ x, y, cropWidth, cropHeight })
+            allTileJobs.push({ x, y, cropWidth, cropHeight })
+
+            if (isTileEmpty(x, y, cropWidth, cropHeight)) {
+              skippedTiles++
+            } else {
+              tileJobs.push({ x, y, cropWidth, cropHeight })
+            }
           }
         }
 
         const totalTiles = tileJobs.length
-        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${totalTiles} tiles (${TILE_W}x${TILE_H}, stride ${strideX}x${strideY})`)
+        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${allTileJobs.length} total tiles, ${skippedTiles} empty skipped, ${totalTiles} to process (${TILE_W}x${TILE_H}, stride ${strideX}x${strideY})`)
         console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, confidence: ${confidence_threshold}`)
         console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
 
