@@ -19,11 +19,13 @@ const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID // e.g., "my-first-proje
 const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
 
 // Tiling configuration — SAHI-style sliding window
-const TILE_SIZE = 640             // 640x640 tiles (YOLO native input resolution)
-const TILE_OVERLAP_PX = 320      // 50% overlap for better edge coverage
+// Ortho GSD is ~3cm/px. 480px tiles cover ~14.4m, matching raw image detection
+// coverage (~14.7m at 2.3cm GSD). Roboflow upscales to 640 for inference.
+const TILE_SIZE = 480             // Smaller tiles = plants appear larger (upscaled by Roboflow)
+const TILE_OVERLAP_PX = 240      // 50% overlap for better edge coverage
 const NMS_IOU_THRESHOLD = 0.5    // IoU threshold for removing duplicates
 const DEFAULT_CONFIDENCE = 0.17
-const CONCURRENT_TILES = 15      // Process 15 tiles in parallel (larger tiles = more memory)
+const CONCURRENT_TILES = 20      // Process 20 tiles in parallel
 
 interface RoboflowPrediction {
   x: number           // center x in pixels (relative to tile)
