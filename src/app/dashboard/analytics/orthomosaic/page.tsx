@@ -136,8 +136,9 @@ export default function OrthomosaicViewerPage() {
   const [orthomosaics, setOrthomosaics] = useState<Orthomosaic[]>([])
   const [selectedOrthomosaic, setSelectedOrthomosaic] = useState<Orthomosaic | null>(null)
 
-  // Reload orthomosaics list and update selected ortho
-  const reloadOrthomosaic = async (id: string) => {
+  // Reload orthomosaics list and update selected ortho.
+  // If updateSelected=false, only refresh the list without changing the current selection.
+  const reloadOrthomosaic = async (id: string, updateSelected = true) => {
     const response = await authFetch('/api/orthomosaic/list', {
       cache: 'no-store',
       headers: { Authorization: `Bearer ${session?.access_token}` },
@@ -147,7 +148,7 @@ export default function OrthomosaicViewerPage() {
     // Refresh the full list so new orthos appear in the dropdown
     if (data) setOrthomosaics(data)
     const updated = data?.find((o: Orthomosaic) => o.id === id)
-    if (updated) {
+    if (updated && updateSelected) {
       setSelectedOrthomosaic(updated)
     }
     return updated
@@ -369,8 +370,12 @@ export default function OrthomosaicViewerPage() {
         // the create-task may have timed out on Vercel — poll Lightning directly
         // and update status so the progress bar appears.
         if (selectedOrthomosaic.status === 'pending') {
-          const updated = await reloadOrthomosaic(selectedOrthomosaic.id)
-          if (updated?.status === 'processing' || updated?.status === 'failed' || updated?.status === 'completed') return
+          // Don't force-select on routine polls — only update selection when status changes
+          const updated = await reloadOrthomosaic(selectedOrthomosaic.id, false)
+          if (updated?.status === 'processing' || updated?.status === 'failed' || updated?.status === 'completed') {
+            setSelectedOrthomosaic(updated)
+            return
+          }
           // If task ID exists but status is still pending, create-task likely timed out.
           // Poll Lightning to see if the task is actually running or completed.
           if (updated?.webodm_task_id && updated?.webodm_project_id === 'lightning') {
@@ -415,8 +420,10 @@ export default function OrthomosaicViewerPage() {
 
         // If already syncing (downloading orthophoto), just check for completion
         if (selectedOrthomosaic.status === 'syncing' || syncing) {
-          const updated = await reloadOrthomosaic(selectedOrthomosaic.id)
-          if (updated?.status === 'completed') return
+          const updated = await reloadOrthomosaic(selectedOrthomosaic.id, false)
+          if (updated?.status === 'completed') {
+            setSelectedOrthomosaic(updated)
+          }
           return
         }
 
