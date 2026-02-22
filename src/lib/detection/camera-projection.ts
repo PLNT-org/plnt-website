@@ -102,7 +102,8 @@ export function projectPixelToGPS(
   imgH: number,
   shot: OpenSfMShot,
   camera: OpenSfMCamera,
-  refLLA: ReferenceLLA
+  refLLA: ReferenceLLA,
+  groundPlaneZ: number = 0
 ): { latitude: number; longitude: number } {
   // Step 1: Normalize to OpenSfM coordinates
   // OpenSfM uses center origin, max dimension = 1.0
@@ -136,15 +137,17 @@ export function projectPixelToGPS(
     -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]),
   ]
 
-  // Step 5: Intersect ray with ground plane (z=0)
+  // Step 5: Intersect ray with ground plane (z = groundPlaneZ)
+  // When reference_lla is at camera altitude (z≈0 for cameras), groundPlaneZ should be
+  // negative (e.g. -60m for 60m AGL) so the ground is below the cameras.
   // Point on ray: P = cam_pos + t * ray_world
-  // Ground: P.z = 0 → t = -cam_pos.z / ray_world.z
+  // Ground: P.z = groundPlaneZ → t = (groundPlaneZ - cam_pos.z) / ray_world.z
   if (Math.abs(ray_world[2]) < 1e-10) {
     // Ray is parallel to ground — fall back to camera position
     return enuToGPS(cam_pos[0], cam_pos[1], refLLA)
   }
 
-  const param = -cam_pos[2] / ray_world[2]
+  const param = (groundPlaneZ - cam_pos[2]) / ray_world[2]
 
   // If param is negative, the ray points away from the ground — use camera position
   if (param < 0) {

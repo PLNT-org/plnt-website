@@ -357,6 +357,8 @@ export async function POST(request: NextRequest) {
         let totalDetections = 0
         let imagesProcessed = 0
         let imagesSkipped = 0
+        let refAltitudeCorrected = false
+        let groundPlaneZ = 0 // z=0 by default; adjusted to -AGL when EXIF is available
 
         for (let imgIdx = 0; imgIdx < batchPaths.length; imgIdx++) {
           const storagFilePath = batchPaths[imgIdx]
@@ -393,6 +395,13 @@ export async function POST(request: NextRequest) {
             try {
               metadata = await extractDroneMetadata(imageBuffer)
               console.log(`[FlightDetection] ${imageName}: EXIF GPS=(${metadata.latitude.toFixed(6)}, ${metadata.longitude.toFixed(6)}), alt=${metadata.altitude}m, yaw=${metadata.gimbalYaw}, pitch=${metadata.gimbalPitch}, GSD=${metadata.gsdX.toFixed(4)}m/px`)
+
+              // Capture AGL from first image for ground plane correction
+              if (reconstructionData && !refAltitudeCorrected && metadata.altitude > 0) {
+                groundPlaneZ = -metadata.altitude
+                console.log(`[FlightDetection] Ground plane set to z=${groundPlaneZ.toFixed(1)}m (${metadata.altitude}m below cameras)`)
+                refAltitudeCorrected = true
+              }
             } catch {
               console.warn(`[FlightDetection] No GPS data in ${imageName}, skipping`)
               send({ type: 'warning', message: `Skipping ${imageName}: no GPS data in EXIF` })
@@ -552,7 +561,8 @@ export async function POST(request: NextRequest) {
                     det.x, det.y,
                     imageWidth, imageHeight,
                     shotData, cam,
-                    reconstructionData.reference_lla
+                    reconstructionData.reference_lla,
+                    groundPlaneZ
                   )
                   lat = gps.latitude
                   lon = gps.longitude
