@@ -19,10 +19,10 @@ const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID // e.g., "my-first-proje
 const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
 
 // Tiling configuration — SAHI-style sliding window
-// Ortho GSD is ~3cm/px. 320px tiles cover ~9.6m ground area.
-// Roboflow upscales 320→640 (2x), making plants appear twice as large for the model.
-const TILE_SIZE = 320             // 2x upscale by Roboflow → better small plant detection
-const TILE_OVERLAP_PX = 160      // 50% overlap for better edge coverage
+// Ortho GSD is ~3cm/px. 480px tiles cover ~14.4m ground area.
+// Roboflow upscales 480→640 (1.33x) — plants at natural scale for model training.
+const TILE_SIZE = 480             // Best empirical results vs 320 and 640
+const TILE_OVERLAP_PX = 240      // 50% overlap for better edge coverage
 const NMS_IOU_THRESHOLD = 0.5    // IoU threshold for removing duplicates
 const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 20      // Process 20 tiles in parallel

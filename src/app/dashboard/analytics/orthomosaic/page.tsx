@@ -172,7 +172,7 @@ export default function OrthomosaicViewerPage() {
     classCounts: Record<string, number>
     averageConfidence: number
   } | null>(null)
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.5)
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.15)
   const [detectionProgress, setDetectionProgress] = useState<{
     processedTiles: number
     totalTiles: number
