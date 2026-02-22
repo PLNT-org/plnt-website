@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '@/lib/auth/auth-context'
 import Link from 'next/link'
@@ -196,17 +198,17 @@ export default function PlotsPage() {
 
     try {
       const [plotsRes, speciesRes, orthoRes, markersRes] = await Promise.all([
-        fetch('/api/plots', {
+        authFetch('/api/plots', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/species', {
+        authFetch('/api/species', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/orthomosaic/list', {
+        authFetch('/api/orthomosaic/list', {
           cache: 'no-store',
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/marker-registrations', {
+        authFetch('/api/marker-registrations', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
       ])
@@ -346,7 +348,7 @@ export default function PlotsPage() {
       return
     }
 
-    const response = await fetch(`/api/plots/${plotId}`, {
+    const response = await authFetch(`/api/plots/${plotId}`, {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${session?.access_token}`,

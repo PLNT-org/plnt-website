@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,6 +9,9 @@ const supabase = createClient(
 
 // GET: List folders in the flight-images bucket that contain images
 export async function GET(request: NextRequest) {
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabase)
+  if (errorResponse) return errorResponse
+
   try {
     // List top-level folders in flight-images bucket
     const { data: topFolders, error: listError } = await supabase

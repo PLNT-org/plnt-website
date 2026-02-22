@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
@@ -126,14 +128,14 @@ function NewPlotContent() {
     try {
       // Load species, orthomosaics, and plots in parallel
       const [speciesRes, orthoRes, plotsRes] = await Promise.all([
-        fetch('/api/species', {
+        authFetch('/api/species', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/orthomosaic/list', {
+        authFetch('/api/orthomosaic/list', {
           cache: 'no-store',
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/plots', {
+        authFetch('/api/plots', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
       ])
@@ -191,7 +193,7 @@ function NewPlotContent() {
     setError('')
 
     try {
-      const response = await fetch('/api/plots', {
+      const response = await authFetch('/api/plots', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

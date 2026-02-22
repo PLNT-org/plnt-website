@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
@@ -142,17 +144,17 @@ function EditPlotContent() {
     try {
       // Load plot, species, orthomosaics, and other plots in parallel
       const [plotRes, speciesRes, orthoRes, plotsRes] = await Promise.all([
-        fetch(`/api/plots/${plotId}`, {
+        authFetch(`/api/plots/${plotId}`, {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/species', {
+        authFetch('/api/species', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/orthomosaic/list', {
+        authFetch('/api/orthomosaic/list', {
           cache: 'no-store',
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
-        fetch('/api/plots', {
+        authFetch('/api/plots', {
           headers: { Authorization: `Bearer ${session?.access_token}` },
         }),
       ])
@@ -227,7 +229,7 @@ function EditPlotContent() {
     setError('')
 
     try {
-      const response = await fetch(`/api/plots/${plotId}`, {
+      const response = await authFetch(`/api/plots/${plotId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',

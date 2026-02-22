@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -7,39 +8,15 @@ const supabaseAdmin = createClient(
 )
 
 export async function GET(request: NextRequest) {
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+  if (errorResponse) return errorResponse
+
   try {
-    // Get user from auth header or cookies
-    let userId: string | null = null
-
-    const authHeader = request.headers.get('authorization')
-    if (authHeader?.startsWith('Bearer ')) {
-      const token = authHeader.substring(7)
-      const { data } = await supabaseAdmin.auth.getUser(token)
-      userId = data.user?.id || null
-    }
-
-    if (!userId) {
-      // Try cookies
-      const cookies = request.headers.get('cookie') || ''
-      const accessTokenMatch = cookies.match(/sb-[^-]+-auth-token=([^;]+)/)
-      if (accessTokenMatch) {
-        try {
-          const tokenData = JSON.parse(decodeURIComponent(accessTokenMatch[1]))
-          if (tokenData.access_token) {
-            const { data } = await supabaseAdmin.auth.getUser(tokenData.access_token)
-            userId = data.user?.id || null
-          }
-        } catch {
-          // Token parsing failed
-        }
-      }
-    }
-
     // Aggregate plant counts by plot and species
     // This joins plant_labels with plots and species to get inventory data
 
     // First, get all plots with their species
-    const { data: plots, error: plotsError } = await supabaseAdmin
+    let plotsQuery = supabaseAdmin
       .from('plots')
       .select(`
         id,
@@ -54,18 +31,28 @@ export async function GET(request: NextRequest) {
           barcode_value
         )
       `)
-      .eq('user_id', userId)
+
+    if (!isAdmin) {
+      plotsQuery = plotsQuery.eq('user_id', user.id)
+    }
+
+    const { data: plots, error: plotsError } = await plotsQuery
 
     if (plotsError) {
       console.error('Error fetching plots:', plotsError)
     }
 
     // Get plant labels grouped by orthomosaic
-    const { data: orthomosaics, error: orthoError } = await supabaseAdmin
+    let orthoQuery = supabaseAdmin
       .from('orthomosaics')
       .select('id, name, created_at')
-      .eq('user_id', userId)
       .eq('status', 'completed')
+
+    if (!isAdmin) {
+      orthoQuery = orthoQuery.eq('user_id', user.id)
+    }
+
+    const { data: orthomosaics, error: orthoError } = await orthoQuery
 
     if (orthoError) {
       console.error('Error fetching orthomosaics:', orthoError)
@@ -152,7 +139,7 @@ export async function GET(request: NextRequest) {
         ),
         registered_at
       `)
-      .eq('user_id', userId)
+      .eq('user_id', user.id)
       .eq('is_active', true)
 
     if (!markerError && markerRegs) {

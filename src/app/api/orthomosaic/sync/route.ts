@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { fetchWithWebODMAuth } from '@/lib/webodm/token-manager'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -11,11 +12,17 @@ const WEBODM_URL = (process.env.WEBODM_URL || 'http://localhost:8000').replace(/
 
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { orthomosaicId } = await request.json()
 
     if (!orthomosaicId) {
       return NextResponse.json({ error: 'orthomosaicId required' }, { status: 400 })
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get orthomosaic record
     const { data: ortho, error: orthoError } = await supabaseAdmin

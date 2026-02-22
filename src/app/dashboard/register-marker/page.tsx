@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect } from 'react'
 import { useAuth } from '@/lib/auth/auth-context'
 import Link from 'next/link'
@@ -85,7 +87,7 @@ export default function RegisterMarkerPage() {
     if (!session?.access_token) return
     setIsLoadingSpecies(true)
     try {
-      const response = await fetch('/api/species', {
+      const response = await authFetch('/api/species', {
         headers: {
           Authorization: `Bearer ${session.access_token}`,
         },
@@ -113,7 +115,7 @@ export default function RegisterMarkerPage() {
     // Try to look up species by barcode
     if (session?.access_token) {
       try {
-        const response = await fetch(`/api/species/lookup?barcode=${encodeURIComponent(value)}`, {
+        const response = await authFetch(`/api/species/lookup?barcode=${encodeURIComponent(value)}`, {
           headers: {
             Authorization: `Bearer ${session.access_token}`,
           },
@@ -142,7 +144,7 @@ export default function RegisterMarkerPage() {
     if (!newSpeciesName.trim() || !session?.access_token) return
 
     try {
-      const response = await fetch('/api/species', {
+      const response = await authFetch('/api/species', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -180,7 +182,7 @@ export default function RegisterMarkerPage() {
     setSubmitError(null)
 
     try {
-      const response = await fetch('/api/marker-registrations', {
+      const response = await authFetch('/api/marker-registrations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

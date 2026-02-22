@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import sharp from 'sharp'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Allow up to 5 minutes for large orthomosaics
 export const maxDuration = 300
@@ -130,6 +131,10 @@ async function runTileInference(
 
 // POST: Run plant detection on an orthomosaic with tiling (streams NDJSON progress)
 export async function POST(request: NextRequest) {
+  // Auth check — must be done before parsing body for streaming
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabase)
+  if (errorResponse) return errorResponse
+
   // Parse body upfront so we can return errors as normal JSON
   let body: Record<string, unknown>
   try {
@@ -140,12 +145,10 @@ export async function POST(request: NextRequest) {
 
   const {
     orthomosaicId,
-    userId,
     confidence_threshold = DEFAULT_CONFIDENCE,
     include_classes = ['plant', 'plants'],
   } = body as {
     orthomosaicId?: string
-    userId?: string
     confidence_threshold?: number
     include_classes?: string[]
   }
@@ -177,6 +180,11 @@ export async function POST(request: NextRequest) {
   if (orthoError || !orthomosaic) {
     return NextResponse.json({ error: 'Orthomosaic not found' }, { status: 404 })
   }
+
+  // Verify user owns this orthomosaic
+  const ownershipError = await verifyOrthomosaicOwnership(supabase, orthomosaicId, user.id, isAdmin)
+  if (ownershipError) return ownershipError
+
   if (orthomosaic.status !== 'completed') {
     return NextResponse.json({ error: 'Orthomosaic is not ready for processing' }, { status: 400 })
   }
@@ -364,7 +372,7 @@ export async function POST(request: NextRequest) {
           const gps = pixelToGPS(det.x, det.y, orthomosaic.bounds, imageWidth, imageHeight)
           return {
             orthomosaic_id: orthomosaicId,
-            user_id: userId || null,
+            user_id: user.id,
             latitude: gps.lat,
             longitude: gps.lng,
             pixel_x: Math.round(det.x),
@@ -459,6 +467,9 @@ export async function POST(request: NextRequest) {
 
 // GET: Get detection status/results for an orthomosaic
 export async function GET(request: NextRequest) {
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabase)
+  if (errorResponse) return errorResponse
+
   const { searchParams } = new URL(request.url)
   const orthomosaicId = searchParams.get('orthomosaicId')
 
@@ -468,6 +479,10 @@ export async function GET(request: NextRequest) {
       { status: 400 }
     )
   }
+
+  // Verify user owns this orthomosaic
+  const ownershipError = await verifyOrthomosaicOwnership(supabase, orthomosaicId, user.id, isAdmin)
+  if (ownershipError) return ownershipError
 
   try {
     const batchSize = 1000

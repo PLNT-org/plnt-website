@@ -178,10 +178,12 @@ export async function PATCH(request: NextRequest) {
       .eq('id', id)
       .single()
 
-    if (existingLabel) {
-      const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, existingLabel.orthomosaic_id, user.id, isAdmin)
-      if (ownershipError) return ownershipError
+    if (!existingLabel) {
+      return NextResponse.json({ error: 'Label not found' }, { status: 404 })
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, existingLabel.orthomosaic_id, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     const updates: any = {}
     if (label !== undefined) updates.label = label
@@ -240,10 +242,12 @@ export async function DELETE(request: NextRequest) {
       .eq('id', id)
       .single()
 
-    if (existingLabel) {
-      const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, existingLabel.orthomosaic_id, user.id, isAdmin)
-      if (ownershipError) return ownershipError
+    if (!existingLabel) {
+      return NextResponse.json({ error: 'Label not found' }, { status: 404 })
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, existingLabel.orthomosaic_id, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     const { error } = await supabaseAdmin
       .from('plant_labels')

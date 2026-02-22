@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { ArUcoClient } from '@/lib/aruco/client'
 import { DEFAULT_ARUCO_DICTIONARY, ArUcoDictionary } from '@/lib/aruco/types'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -14,6 +15,9 @@ const arucoClient = new ArUcoClient()
 
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const body = await request.json()
     const { orthomosaicId, dictionary = DEFAULT_ARUCO_DICTIONARY } = body
 
@@ -23,6 +27,9 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       )
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get orthomosaic record
     const { data: ortho, error: orthoError } = await supabaseAdmin

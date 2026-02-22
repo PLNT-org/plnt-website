@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
@@ -125,7 +127,7 @@ export default function OrthomosaicUploadPage() {
       setUploadProgress(95)
 
       // Step 2: Send storage paths to Lightning API (no large payload)
-      const response = await fetch('/api/lightning/create-task', {
+      const response = await authFetch('/api/lightning/create-task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Allow up to 5 minutes for large orthophoto downloads
 export const maxDuration = 300
@@ -20,11 +21,17 @@ const supabaseAdmin = createClient(
 
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { orthomosaicId } = await request.json()
 
     if (!orthomosaicId) {
       return NextResponse.json({ error: 'orthomosaicId required' }, { status: 400 })
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get orthomosaic record
     const { data: ortho, error: orthoError } = await supabaseAdmin
@@ -229,11 +236,21 @@ export async function POST(request: NextRequest) {
  * GET endpoint to check task status without syncing
  */
 export async function GET(request: NextRequest) {
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+  if (errorResponse) return errorResponse
+
   const { searchParams } = new URL(request.url)
   const taskId = searchParams.get('taskId')
 
   if (!taskId) {
     return NextResponse.json({ error: 'taskId required' }, { status: 400 })
+  }
+
+  // Look up orthomosaic by task ID and verify ownership
+  const { data: ortho } = await supabaseAdmin.from('orthomosaics').select('id, user_id').eq('webodm_task_id', taskId).single()
+  if (ortho) {
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, ortho.id, user.id, isAdmin)
+    if (ownershipError) return ownershipError
   }
 
   try {
