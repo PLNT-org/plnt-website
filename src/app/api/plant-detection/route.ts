@@ -23,8 +23,8 @@ const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.rob
 // ensures plants appear at the exact scale the model was trained on.
 const TILE_W = 500               // Width matches training tile size
 const TILE_H = 281               // Height matches training tile size
-const TILE_OVERLAP_X = 250       // 50% horizontal overlap
-const TILE_OVERLAP_Y = 140       // 50% vertical overlap
+const TILE_OVERLAP_X = 300       // 60% horizontal overlap
+const TILE_OVERLAP_Y = 169       // 60% vertical overlap
 const NMS_IOU_THRESHOLD = 0.3    // Lower IoU to preserve nearby distinct plants
 const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 20      // Process 20 tiles in parallel
