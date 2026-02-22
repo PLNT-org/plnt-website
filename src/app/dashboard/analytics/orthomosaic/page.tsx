@@ -365,10 +365,51 @@ export default function OrthomosaicViewerPage() {
 
     const pollStatus = async () => {
       try {
-        // If pending (images still uploading to Lightning), just check DB for status change
+        // If pending, check DB first. If still pending but has a task ID,
+        // the create-task may have timed out on Vercel — poll Lightning directly
+        // and update status so the progress bar appears.
         if (selectedOrthomosaic.status === 'pending') {
           const updated = await reloadOrthomosaic(selectedOrthomosaic.id)
-          if (updated?.status === 'processing' || updated?.status === 'failed') return
+          if (updated?.status === 'processing' || updated?.status === 'failed' || updated?.status === 'completed') return
+          // If task ID exists but status is still pending, create-task likely timed out.
+          // Poll Lightning to see if the task is actually running or completed.
+          if (updated?.webodm_task_id && updated?.webodm_project_id === 'lightning') {
+            try {
+              const statusRes = await authFetch(
+                `/api/webodm/task-status?orthomosaicId=${selectedOrthomosaic.id}`
+              )
+              const statusData = await statusRes.json()
+              if (statusData.progress !== undefined) {
+                setProcessingStatus(statusData)
+              }
+              // task-status endpoint auto-updates DB status for completed/failed/syncing
+              if (statusData.isFailed) {
+                await reloadOrthomosaic(selectedOrthomosaic.id)
+              } else if (statusData.needsSync && !syncing) {
+                // Lightning task is done — trigger sync
+                syncing = true
+                setProcessingStatus((prev: any) => ({
+                  ...prev,
+                  statusLabel: 'Downloading orthophoto...',
+                }))
+                authFetch('/api/lightning/sync', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+                })
+                  .then(async (syncRes) => {
+                    const syncData = await syncRes.json()
+                    if (syncData.success) {
+                      await reloadOrthomosaic(selectedOrthomosaic.id)
+                    }
+                  })
+                  .catch((err) => console.error('Sync error:', err))
+                  .finally(() => { syncing = false })
+              }
+            } catch (e) {
+              console.error('Error checking Lightning status for pending task:', e)
+            }
+          }
           return
         }
 
@@ -1214,6 +1255,42 @@ export default function OrthomosaicViewerPage() {
                 ))}
               </SelectContent>
             </Select>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Pending Status — images uploading to Lightning, or recovering from timeout */}
+      {selectedOrthomosaic?.status === 'pending' && (
+        <Card className={processingStatus ? "border-blue-200 bg-blue-50" : "border-gray-200 bg-gray-50"}>
+          <CardContent className="py-4">
+            <div className="flex items-center gap-4">
+              <Loader2 className={`h-6 w-6 animate-spin ${processingStatus ? 'text-blue-600' : 'text-gray-600'}`} />
+              <div className="flex-1">
+                <div className={`font-medium ${processingStatus ? 'text-blue-900' : 'text-gray-900'}`}>
+                  {processingStatus ? 'Processing Orthomosaic' : 'Uploading Images'}
+                </div>
+                <div className={`text-sm ${processingStatus ? 'text-blue-700' : 'text-gray-700'}`}>
+                  {processingStatus
+                    ? `${processingStatus.statusLabel} - ${Math.round(processingStatus.progress || 0)}%`
+                    : 'Images are being uploaded to the processing server. This may take a few minutes...'}
+                </div>
+              </div>
+              {processingStatus?.imagesCount && (
+                <div className="text-sm text-blue-600">
+                  {processingStatus.imagesCount} images
+                </div>
+              )}
+            </div>
+            <div className={`mt-3 h-2 rounded-full overflow-hidden ${processingStatus ? 'bg-blue-200' : 'bg-gray-200'}`}>
+              {processingStatus ? (
+                <div
+                  className="h-full bg-blue-600 transition-all duration-500"
+                  style={{ width: `${processingStatus.progress || 0}%` }}
+                />
+              ) : (
+                <div className="h-full bg-gray-400 animate-pulse rounded-full" style={{ width: '100%' }} />
+              )}
+            </div>
           </CardContent>
         </Card>
       )}
