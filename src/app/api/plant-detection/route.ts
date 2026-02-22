@@ -18,11 +18,13 @@ const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY
 const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID // e.g., "my-first-project-8qm2b/15"
 const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
 
-// Tiling configuration — SAHI-style sliding window
-// Ortho GSD is ~3cm/px. 480px tiles cover ~14.4m ground area.
-// Roboflow upscales 480→640 (1.33x) — plants at natural scale for model training.
-const TILE_SIZE = 480             // Best empirical results vs 320 and 640
-const TILE_OVERLAP_PX = 240      // 50% overlap for better edge coverage
+// Tiling configuration — matches model training: 4000x2250 raw images → 8x8 grid
+// → 500x281 tiles, letterboxed to 640x640 by Roboflow. Using same tile dimensions
+// ensures plants appear at the exact scale the model was trained on.
+const TILE_W = 500               // Width matches training tile size
+const TILE_H = 281               // Height matches training tile size
+const TILE_OVERLAP_X = 250       // 50% horizontal overlap
+const TILE_OVERLAP_Y = 140       // 50% vertical overlap
 const NMS_IOU_THRESHOLD = 0.5    // IoU threshold for removing duplicates
 const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 20      // Process 20 tiles in parallel
@@ -237,26 +239,27 @@ export async function POST(request: NextRequest) {
         const channels = rawInfo.channels
         console.log(`[Detection] Decoded to raw: ${((Date.now() - t1) / 1000).toFixed(1)}s, ${imageWidth}x${imageHeight}x${channels}, ${(rawPixels.length / 1024 / 1024).toFixed(1)}MB`)
 
-        // Calculate tile grid — matches Colab: 400x400 tiles, 100px overlap, stride 300
-        const stride = TILE_SIZE - TILE_OVERLAP_PX  // 300
+        // Calculate tile grid — rectangular tiles matching training dimensions (500x281)
+        const strideX = TILE_W - TILE_OVERLAP_X
+        const strideY = TILE_H - TILE_OVERLAP_Y
 
-        // Build tile job list (same loop structure as Colab)
+        // Build tile job list
         interface TileJob {
           x: number; y: number
           cropWidth: number; cropHeight: number
         }
         const tileJobs: TileJob[] = []
 
-        for (let y = 0; y < imageHeight; y += stride) {
-          for (let x = 0; x < imageWidth; x += stride) {
-            const cropWidth = Math.min(TILE_SIZE, imageWidth - x)
-            const cropHeight = Math.min(TILE_SIZE, imageHeight - y)
+        for (let y = 0; y < imageHeight; y += strideY) {
+          for (let x = 0; x < imageWidth; x += strideX) {
+            const cropWidth = Math.min(TILE_W, imageWidth - x)
+            const cropHeight = Math.min(TILE_H, imageHeight - y)
             tileJobs.push({ x, y, cropWidth, cropHeight })
           }
         }
 
         const totalTiles = tileJobs.length
-        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${totalTiles} tiles (${TILE_SIZE}x${TILE_SIZE}, stride ${stride}, overlap ${TILE_OVERLAP_PX}px)`)
+        console.log(`[Detection] YOLOv11: ${imageWidth}x${imageHeight}, ${totalTiles} tiles (${TILE_W}x${TILE_H}, stride ${strideX}x${strideY})`)
         console.log(`[Detection] Model: ${ROBOFLOW_MODEL_ID}, confidence: ${confidence_threshold}`)
         console.log(`[Detection] Filtering to classes: ${allowedClasses.join(', ')}`)
 
