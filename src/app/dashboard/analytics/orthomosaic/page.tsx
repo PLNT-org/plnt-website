@@ -911,6 +911,44 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
+  // Deduplicate AI labels using GPS NMS
+  const [deduplicating, setDeduplicating] = useState(false)
+  const handleDeduplicate = async () => {
+    if (!selectedOrthomosaic || isDemo) return
+
+    setDeduplicating(true)
+    try {
+      const response = await authFetch('/api/plant-labels/deduplicate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orthomosaicId: selectedOrthomosaic.id,
+          distance: 0.3,
+        }),
+      })
+      const data = await response.json()
+      if (data.success) {
+        alert(`Deduplicated: ${data.before} → ${data.after} labels (removed ${data.removed} duplicates at ${data.distance}m threshold)`)
+        // Reload labels
+        const labelsResponse = await authFetch(
+          `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
+          { headers: { Authorization: `Bearer ${session?.access_token}` } }
+        )
+        const labelsData = await labelsResponse.json()
+        if (labelsData.labels) {
+          setLabels(labelsData.labels)
+        }
+      } else {
+        alert(data.error || 'Deduplication failed')
+      }
+    } catch (err) {
+      console.error('Error deduplicating:', err)
+      alert('Failed to deduplicate labels')
+    } finally {
+      setDeduplicating(false)
+    }
+  }
+
   // Re-sync camera positions from Lightning task
   const handleResyncCameras = async () => {
     if (!selectedOrthomosaic || isDemo) return
@@ -1428,6 +1466,29 @@ export default function OrthomosaicViewerPage() {
                   >
                     Settings
                   </Button>
+
+                  {labels.filter(l => l.source === 'ai').length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="border-orange-300 text-orange-700 hover:bg-orange-50"
+                      onClick={handleDeduplicate}
+                      disabled={deduplicating}
+                      title="Remove duplicate AI labels using GPS proximity"
+                    >
+                      {deduplicating ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                          Deduplicating...
+                        </>
+                      ) : (
+                        <>
+                          <Layers className="h-4 w-4 mr-1" />
+                          Deduplicate ({labels.filter(l => l.source === 'ai').length})
+                        </>
+                      )}
+                    </Button>
+                  )}
 
                   {plantDetectionResult && (
                     <Button
