@@ -25,7 +25,7 @@ const TILE_OVERLAP_PX = 100
 const NMS_IOU_THRESHOLD = 0.05
 const DEFAULT_CONFIDENCE = 0.17
 const CONCURRENT_TILES = 10
-const GPS_NMS_DISTANCE_METERS = 0.5
+const GPS_NMS_DISTANCE_METERS = 0.15
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.dng']
 
