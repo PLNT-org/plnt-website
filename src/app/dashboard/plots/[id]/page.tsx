@@ -55,7 +55,7 @@ export default function PlotDetailsPage() {
 function PlotDetailsContent() {
   const params = useParams()
   const router = useRouter()
-  const { user, isDemo } = useAuth()
+  const { user, isDemo, isAdmin } = useAuth()
   const [plot, setPlot] = useState<PlotDetails | null>(null)
   const [flights, setFlights] = useState<FlightHistory[]>([])
   const [loading, setLoading] = useState(true)
@@ -102,12 +102,9 @@ function PlotDetailsContent() {
 
     try {
       // Fetch plot details
-      const { data: plotData, error: plotError } = await supabase
-        .from('plots')
-        .select('*')
-        .eq('id', params.id)
-        .eq('user_id', user.id)
-        .single()
+      let plotQuery = supabase.from('plots').select('*').eq('id', params.id)
+      if (!isAdmin) plotQuery = plotQuery.eq('user_id', user.id)
+      const { data: plotData, error: plotError } = await plotQuery.single()
 
       if (plotError) throw plotError
       setPlot(plotData)

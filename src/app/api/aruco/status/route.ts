@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -9,6 +10,9 @@ const supabaseAdmin = createClient(
 
 export async function GET(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { searchParams } = new URL(request.url)
     const orthomosaicId = searchParams.get('orthomosaicId')
 
@@ -18,6 +22,9 @@ export async function GET(request: NextRequest) {
         { status: 400 }
       )
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get orthomosaic ArUco status
     const { data: ortho, error } = await supabaseAdmin

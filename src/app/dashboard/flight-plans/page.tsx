@@ -48,7 +48,7 @@ export default function FlightPlansPage() {
 }
 
 function FlightPlansContent() {
-  const { user, isDemo } = useAuth()
+  const { user, isDemo, isAdmin } = useAuth()
   const router = useRouter()
   const [flightPlans, setFlightPlans] = useState<FlightPlan[]>([])
   const [loading, setLoading] = useState(true)
@@ -107,14 +107,19 @@ function FlightPlansContent() {
     if (!user) return
 
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('flight_plans')
         .select(`
           *,
           plots (name, area_acres)
         `)
-        .eq('user_id', user.id)
         .order('scheduled_for', { ascending: false })
+
+      if (!isAdmin) {
+        query = query.eq('user_id', user.id)
+      }
+
+      const { data, error } = await query
 
       if (error) throw error
 
@@ -146,11 +151,9 @@ function FlightPlansContent() {
     }
 
     try {
-      const { error } = await supabase
-        .from('flight_plans')
-        .delete()
-        .eq('id', planId)
-        .eq('user_id', user!.id)
+      let query = supabase.from('flight_plans').delete().eq('id', planId)
+      if (!isAdmin) query = query.eq('user_id', user!.id)
+      const { error } = await query
 
       if (error) throw error
 

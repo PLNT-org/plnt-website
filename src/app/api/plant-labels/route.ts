@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -10,6 +11,9 @@ const supabaseAdmin = createClient(
 // GET - List labels for an orthomosaic
 export async function GET(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { searchParams } = new URL(request.url)
     const orthomosaicId = searchParams.get('orthomosaicId')
     const source = searchParams.get('source') // 'manual', 'ai', or null for all
@@ -22,6 +26,9 @@ export async function GET(request: NextRequest) {
         { status: 400 }
       )
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Fetch labels in batches to bypass Supabase's default 1000 row limit
     const batchSize = 1000
@@ -86,10 +93,12 @@ export async function GET(request: NextRequest) {
 // POST - Create a new label
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const body = await request.json()
     const {
       orthomosaicId,
-      userId,
       latitude,
       longitude,
       pixelX,
@@ -107,11 +116,14 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
+
     const { data, error } = await supabaseAdmin
       .from('plant_labels')
       .insert({
         orthomosaic_id: orthomosaicId,
-        user_id: userId,
+        user_id: user.id,
         latitude,
         longitude,
         pixel_x: pixelX,
@@ -146,6 +158,9 @@ export async function POST(request: NextRequest) {
 // PATCH - Update a label
 export async function PATCH(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const body = await request.json()
     const { id, label, notes, verified, verifiedBy } = body
 
@@ -154,6 +169,18 @@ export async function PATCH(request: NextRequest) {
         { error: 'id is required' },
         { status: 400 }
       )
+    }
+
+    // Look up the label to verify orthomosaic ownership
+    const { data: existingLabel } = await supabaseAdmin
+      .from('plant_labels')
+      .select('orthomosaic_id')
+      .eq('id', id)
+      .single()
+
+    if (existingLabel) {
+      const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, existingLabel.orthomosaic_id, user.id, isAdmin)
+      if (ownershipError) return ownershipError
     }
 
     const updates: any = {}
@@ -193,6 +220,9 @@ export async function PATCH(request: NextRequest) {
 // DELETE - Remove a label
 export async function DELETE(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { searchParams } = new URL(request.url)
     const id = searchParams.get('id')
 
@@ -201,6 +231,18 @@ export async function DELETE(request: NextRequest) {
         { error: 'id is required' },
         { status: 400 }
       )
+    }
+
+    // Look up the label to verify orthomosaic ownership
+    const { data: existingLabel } = await supabaseAdmin
+      .from('plant_labels')
+      .select('orthomosaic_id')
+      .eq('id', id)
+      .single()
+
+    if (existingLabel) {
+      const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, existingLabel.orthomosaic_id, user.id, isAdmin)
+      if (ownershipError) return ownershipError
     }
 
     const { error } = await supabaseAdmin

@@ -63,7 +63,7 @@ interface FlightDetails {
 export default function FlightResultsPage() {
   const params = useParams()
   const flightId = params.id as string
-  const { user, isDemo } = useAuth()
+  const { user, isDemo, isAdmin } = useAuth()
   const [flight, setFlight] = useState<FlightDetails | null>(null)
   const [loading, setLoading] = useState(true)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
@@ -83,7 +83,7 @@ export default function FlightResultsPage() {
     }
 
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('flights')
         .select(`
           *,
@@ -95,7 +95,12 @@ export default function FlightResultsPage() {
           flight_images (*)
         `)
         .eq('id', flightId)
-        .single()
+
+      if (!isAdmin) {
+        query = query.eq('user_id', user?.id)
+      }
+
+      const { data, error } = await query.single()
 
       if (error) throw error
       setFlight(data)

@@ -94,7 +94,7 @@ interface Orthomosaic {
 }
 
 export default function CanopyHeightPage() {
-  const { user, isDemo } = useAuth()
+  const { user, isDemo, isAdmin } = useAuth()
   const searchParams = useSearchParams()
   const orthomosaicId = searchParams.get('id')
 
@@ -119,12 +119,17 @@ export default function CanopyHeightPage() {
 
       try {
         // Fetch orthomosaics that have DSM/DTM (height data)
-        const { data, error } = await supabase
+        let query = supabase
           .from('orthomosaics')
           .select('*')
-          .eq('user_id', user?.id)
           .or('has_dsm.eq.true,processing_type.eq.height-mapping')
           .order('created_at', { ascending: false })
+
+        if (!isAdmin) {
+          query = query.eq('user_id', user?.id)
+        }
+
+        const { data, error } = await query
 
         if (error) throw error
 

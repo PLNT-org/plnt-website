@@ -173,7 +173,10 @@ export default function InventoryPage() {
     setError(null)
 
     try {
-      const res = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
+      const res = await fetch('/api/orthomosaic/list', {
+        cache: 'no-store',
+        headers: { Authorization: `Bearer ${session?.access_token}` },
+      })
       if (!res.ok) throw new Error('Failed to fetch orthomosaics')
       const data = await res.json()
       const completed = (data.orthomosaics || []).filter(
@@ -200,8 +203,11 @@ export default function InventoryPage() {
     try {
       const res = await fetch('/api/plant-detection/aggregate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orthomosaicId, userId: user?.id }),
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token}`,
+        },
+        body: JSON.stringify({ orthomosaicId }),
       })
 
       if (!res.ok) throw new Error('Failed to fetch plant counts')

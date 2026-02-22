@@ -2,6 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Initialize Supabase with service role for server-side operations
 const supabase = createClient(
@@ -68,8 +69,11 @@ function parseGeoJSONPolygon(boundaries: any): { lat: number; lng: number }[] | 
 // POST: Aggregate plant detections by plot
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabase)
+    if (errorResponse) return errorResponse
+
     const body = await request.json()
-    const { orthomosaicId, userId } = body
+    const { orthomosaicId } = body
 
     if (!orthomosaicId) {
       return NextResponse.json(
@@ -77,6 +81,9 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       )
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabase, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get all AI plant labels for this orthomosaic (with batch fetching)
     const batchSize = 1000
@@ -119,14 +126,14 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Get user's plots with boundaries
+    // Get user's plots with boundaries (admins see all)
     let plotsQuery = supabase
       .from('plots')
       .select('id, name, species_id, boundaries, status')
       .eq('status', 'active')
 
-    if (userId) {
-      plotsQuery = plotsQuery.eq('user_id', userId)
+    if (!isAdmin) {
+      plotsQuery = plotsQuery.eq('user_id', user.id)
     }
 
     const { data: plots, error: plotsError } = await plotsQuery

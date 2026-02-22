@@ -35,7 +35,7 @@ interface Flight {
 }
 
 export default function ImageUploadPage() {
-  const { user, isDemo } = useAuth()
+  const { user, isDemo, isAdmin } = useAuth()
   const router = useRouter()
   
   const [selectedFlight, setSelectedFlight] = useState<string>('')
@@ -87,7 +87,7 @@ export default function ImageUploadPage() {
     }
 
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('flights')
         .select(`
           *,
@@ -98,9 +98,14 @@ export default function ImageUploadPage() {
             )
           )
         `)
-        .eq('user_id', user?.id)
         .order('started_at', { ascending: false })
         .limit(10)
+
+      if (!isAdmin) {
+        query = query.eq('user_id', user?.id)
+      }
+
+      const { data, error } = await query
 
       if (error) throw error
       setFlights(data || [])
@@ -195,6 +200,7 @@ export default function ImageUploadPage() {
           .from('plant_counts')
           .insert({
             flight_id: selectedFlight,
+            user_id: user?.id,
             count: processResult.count,
             confidence: processResult.confidence || 0.95,
             processing_time_s: processResult.processingTime || 10,

@@ -137,7 +137,10 @@ export default function OrthomosaicViewerPage() {
 
   // Reload orthomosaics list and update selected ortho
   const reloadOrthomosaic = async (id: string) => {
-    const response = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
+    const response = await fetch('/api/orthomosaic/list', {
+      cache: 'no-store',
+      headers: { Authorization: `Bearer ${session?.access_token}` },
+    })
     if (!response.ok) return null
     const { orthomosaics: data } = await response.json()
     // Refresh the full list so new orthos appear in the dropdown
@@ -234,8 +237,11 @@ export default function OrthomosaicViewerPage() {
       try {
         setError(null)
 
-        // Fetch orthomosaics via API (uses service role — no auth needed)
-        const response = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
+        // Fetch orthomosaics via API
+        const response = await fetch('/api/orthomosaic/list', {
+          cache: 'no-store',
+          headers: { Authorization: `Bearer ${session?.access_token}` },
+        })
         if (!response.ok) {
           throw new Error('Failed to fetch orthomosaics')
         }
@@ -269,7 +275,8 @@ export default function OrthomosaicViewerPage() {
       setLabelsLoading(true)
       try {
         const response = await fetch(
-          `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`
+          `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
+          { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
         const data = await response.json()
         if (data.labels) {
@@ -293,7 +300,8 @@ export default function OrthomosaicViewerPage() {
       try {
         // Get ArUco status
         const statusResponse = await fetch(
-          `/api/aruco/status?orthomosaicId=${selectedOrthomosaic.id}`
+          `/api/aruco/status?orthomosaicId=${selectedOrthomosaic.id}`,
+          { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
         const statusData = await statusResponse.json()
         setArucoStatus(statusData)
@@ -301,7 +309,8 @@ export default function OrthomosaicViewerPage() {
         // Get markers if detection is completed
         if (statusData.status === 'completed') {
           const markersResponse = await fetch(
-            `/api/aruco/markers?orthomosaicId=${selectedOrthomosaic.id}`
+            `/api/aruco/markers?orthomosaicId=${selectedOrthomosaic.id}`,
+            { headers: { Authorization: `Bearer ${session?.access_token}` } }
           )
           const markersData = await markersResponse.json()
           if (markersData.markers && markersData.markers.length > 0) {
@@ -467,10 +476,12 @@ export default function OrthomosaicViewerPage() {
     try {
       const response = await fetch('/api/plant-labels', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token}`,
+        },
         body: JSON.stringify({
           orthomosaicId: selectedOrthomosaic.id,
-          userId: user?.id,
           latitude: lat,
           longitude: lng,
           pixelX,
@@ -496,7 +507,10 @@ export default function OrthomosaicViewerPage() {
     }
 
     try {
-      await fetch(`/api/plant-labels?id=${labelId}`, { method: 'DELETE' })
+      await fetch(`/api/plant-labels?id=${labelId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${session?.access_token}` },
+      })
       setLabels(prev => prev.filter(l => l.id !== labelId))
     } catch (err) {
       console.error('Error deleting label:', err)
@@ -515,7 +529,10 @@ export default function OrthomosaicViewerPage() {
     try {
       await fetch('/api/plant-labels', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token}`,
+        },
         body: JSON.stringify({ id: labelId, verified, verifiedBy: user?.id }),
       })
       setLabels(prev =>
@@ -549,7 +566,8 @@ export default function OrthomosaicViewerPage() {
         })
         // Reload markers with species info
         const markersResponse = await fetch(
-          `/api/aruco/markers?orthomosaicId=${selectedOrthomosaic.id}`
+          `/api/aruco/markers?orthomosaicId=${selectedOrthomosaic.id}`,
+          { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
         const markersData = await markersResponse.json()
         if (markersData.markers && markersData.markers.length > 0) {
@@ -699,7 +717,8 @@ export default function OrthomosaicViewerPage() {
 
         // Reload labels to include new AI detections
         const labelsResponse = await fetch(
-          `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`
+          `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
+          { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
         const labelsData = await labelsResponse.json()
         if (labelsData.labels) {
@@ -830,7 +849,10 @@ export default function OrthomosaicViewerPage() {
       }
 
       // All batches complete — reload labels
-      const labelsResponse = await fetch(`/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`)
+      const labelsResponse = await fetch(
+        `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
+        { headers: { Authorization: `Bearer ${session?.access_token}` } }
+      )
       const labelsData = await labelsResponse.json()
       if (labelsData.labels) {
         setLabels(labelsData.labels)
@@ -853,10 +875,12 @@ export default function OrthomosaicViewerPage() {
     try {
       const response = await fetch('/api/plant-detection/aggregate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token}`,
+        },
         body: JSON.stringify({
           orthomosaicId: selectedOrthomosaic.id,
-          userId: user?.id,
         }),
       })
 

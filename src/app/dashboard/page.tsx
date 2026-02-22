@@ -60,7 +60,7 @@ const DEMO_INVENTORY: InventoryItem[] = [
 ]
 
 function DashboardContent() {
-  const { user, userProfile, isDemo, signOut } = useAuth()
+  const { user, userProfile, isDemo, isAdmin, signOut } = useAuth()
   const router = useRouter()
   const searchParams = useSearchParams()
   const [activeTab, setActiveTab] = useState(searchParams.get('tab') || 'overview')
@@ -213,13 +213,22 @@ function DashboardContent() {
       return
     }
 
-    // Real data fetch
+    // Real data fetch (admins see all users' data)
     try {
+      let plotsQ = supabase.from('plots').select('*')
+      let flightsQ = supabase.from('flights').select('*, flight_plans(name), plant_counts(count)').order('completed_at', { ascending: false })
+      let countsQ = supabase.from('plant_counts').select('count')
+      let plansQ = supabase.from('flight_plans').select('*, plots(name)').order('scheduled_for', { ascending: false })
+
+      if (!isAdmin) {
+        plotsQ = plotsQ.eq('user_id', user?.id)
+        flightsQ = flightsQ.eq('user_id', user?.id)
+        countsQ = countsQ.eq('user_id', user?.id)
+        plansQ = plansQ.eq('user_id', user?.id)
+      }
+
       const [plotsRes, flightsRes, countsRes, plansRes] = await Promise.all([
-        supabase.from('plots').select('*').eq('user_id', user?.id),
-        supabase.from('flights').select('*, flight_plans(name), plant_counts(count)').eq('user_id', user?.id).order('completed_at', { ascending: false }),
-        supabase.from('plant_counts').select('count').eq('user_id', user?.id),
-        supabase.from('flight_plans').select('*, plots(name)').eq('user_id', user?.id).order('scheduled_for', { ascending: false })
+        plotsQ, flightsQ, countsQ, plansQ
       ])
 
       const totalPlants = countsRes.data?.reduce((sum, pc) => sum + pc.count, 0) || 0
@@ -247,7 +256,13 @@ function DashboardContent() {
 
   const loadInventoryFromDetections = async () => {
     try {
-      const listRes = await fetch('/api/orthomosaic/list', { cache: 'no-store' })
+      const { data: { session: currentSession } } = await supabase.auth.getSession()
+      if (!currentSession?.access_token) return
+
+      const listRes = await fetch('/api/orthomosaic/list', {
+        cache: 'no-store',
+        headers: { Authorization: `Bearer ${currentSession.access_token}` },
+      })
       if (!listRes.ok) return
       const listData = await listRes.json()
       const completed = (listData.orthomosaics || []).filter((o: any) => o.status === 'completed')
@@ -256,8 +271,11 @@ function DashboardContent() {
       const firstOrtho = completed[0]
       const aggRes = await fetch('/api/plant-detection/aggregate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orthomosaicId: firstOrtho.id, userId: user?.id }),
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${currentSession.access_token}`,
+        },
+        body: JSON.stringify({ orthomosaicId: firstOrtho.id }),
       })
       if (!aggRes.ok) return
       const aggData = await aggRes.json()
@@ -291,14 +309,12 @@ function DashboardContent() {
 
   const handleDeletePlot = async (plotId: string) => {
     if (!confirm('Are you sure you want to delete this plot?')) return
-    
+
     try {
-      const { error } = await supabase
-        .from('plots')
-        .delete()
-        .eq('id', plotId)
-        .eq('user_id', user?.id)
-      
+      let query = supabase.from('plots').delete().eq('id', plotId)
+      if (!isAdmin) query = query.eq('user_id', user?.id)
+      const { error } = await query
+
       if (error) throw error
       loadDashboardData()
     } catch (error) {
@@ -308,13 +324,11 @@ function DashboardContent() {
 
   const handleDeleteFlightPlan = async (planId: string) => {
     if (!confirm('Are you sure you want to delete this flight plan?')) return
-    
+
     try {
-      const { error } = await supabase
-        .from('flight_plans')
-        .delete()
-        .eq('id', planId)
-        .eq('user_id', user?.id)
+      let query = supabase.from('flight_plans').delete().eq('id', planId)
+      if (!isAdmin) query = query.eq('user_id', user?.id)
+      const { error } = await query
       
       if (error) throw error
       loadDashboardData()

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { unstable_noStore as noStore } from 'next/cache'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 // Must be dynamic — returns live data from the database
 export const dynamic = 'force-dynamic'
@@ -21,10 +22,19 @@ export async function GET(request: NextRequest) {
   noStore()
 
   try {
-    const { data: orthomosaics, error } = await supabaseAdmin
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
+    let query = supabaseAdmin
       .from('orthomosaics')
       .select('*')
       .order('created_at', { ascending: false })
+
+    if (!isAdmin) {
+      query = query.or(`user_id.eq.${user.id},user_id.is.null`)
+    }
+
+    const { data: orthomosaics, error } = await query
 
     if (error) {
       console.error('Error fetching orthomosaics:', error)

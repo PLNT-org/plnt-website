@@ -18,6 +18,7 @@ interface AuthContextType {
   session: Session | null
   userProfile: UserProfile | null
   loading: boolean
+  isAdmin: boolean
   signIn: (email: string, password: string) => Promise<void>
   signUp: (email: string, password: string) => Promise<void>
   signInWithGoogle: () => Promise<void>
@@ -166,12 +167,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     router.push('/')
   }
 
+  const isAdmin = userProfile?.role === 'admin'
+
   return (
     <AuthContext.Provider value={{
       user,
       session,
       userProfile,
       loading,
+      isAdmin,
       signIn,
       signUp,
       signInWithGoogle,

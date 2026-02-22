@@ -40,7 +40,7 @@ interface PlotSummary {
 }
 
 export default function AnalyticsPage() {
-  const { user, isDemo } = useAuth()
+  const { user, isDemo, isAdmin } = useAuth()
   const [selectedPlot, setSelectedPlot] = useState<string>('all')
   const [dateRange, setDateRange] = useState('30d')
   const [plantCounts, setPlantCounts] = useState<PlantCountData[]>([])
@@ -80,6 +80,10 @@ export default function AnalyticsPage() {
         `)
         .gte('created_at', startDate.toISOString())
         .order('created_at', { ascending: true })
+
+      if (!isAdmin) {
+        query = query.eq('user_id', user?.id)
+      }
 
       if (selectedPlot !== 'all') {
         // Filter by plot - would need to join through flights -> flight_plans -> plots
