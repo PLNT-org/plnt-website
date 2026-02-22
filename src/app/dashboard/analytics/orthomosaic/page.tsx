@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
+import { authFetch } from '@/lib/auth/auth-fetch'
 import { supabase } from '@/lib/supabase/client'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -137,7 +138,7 @@ export default function OrthomosaicViewerPage() {
 
   // Reload orthomosaics list and update selected ortho
   const reloadOrthomosaic = async (id: string) => {
-    const response = await fetch('/api/orthomosaic/list', {
+    const response = await authFetch('/api/orthomosaic/list', {
       cache: 'no-store',
       headers: { Authorization: `Bearer ${session?.access_token}` },
     })
@@ -238,7 +239,7 @@ export default function OrthomosaicViewerPage() {
         setError(null)
 
         // Fetch orthomosaics via API
-        const response = await fetch('/api/orthomosaic/list', {
+        const response = await authFetch('/api/orthomosaic/list', {
           cache: 'no-store',
           headers: { Authorization: `Bearer ${session?.access_token}` },
         })
@@ -274,7 +275,7 @@ export default function OrthomosaicViewerPage() {
 
       setLabelsLoading(true)
       try {
-        const response = await fetch(
+        const response = await authFetch(
           `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
           { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
@@ -299,7 +300,7 @@ export default function OrthomosaicViewerPage() {
 
       try {
         // Get ArUco status
-        const statusResponse = await fetch(
+        const statusResponse = await authFetch(
           `/api/aruco/status?orthomosaicId=${selectedOrthomosaic.id}`,
           { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
@@ -308,7 +309,7 @@ export default function OrthomosaicViewerPage() {
 
         // Get markers if detection is completed
         if (statusData.status === 'completed') {
-          const markersResponse = await fetch(
+          const markersResponse = await authFetch(
             `/api/aruco/markers?orthomosaicId=${selectedOrthomosaic.id}`,
             { headers: { Authorization: `Bearer ${session?.access_token}` } }
           )
@@ -316,7 +317,7 @@ export default function OrthomosaicViewerPage() {
           if (markersData.markers && markersData.markers.length > 0) {
             // Fetch species registrations for these markers
             const markerIds = markersData.markers.map((m: ArUcoMarker) => m.marker_id)
-            const registrationsResponse = await fetch('/api/marker-registrations/batch', {
+            const registrationsResponse = await authFetch('/api/marker-registrations/batch', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ markerIds, userId: user?.id }),
@@ -378,7 +379,7 @@ export default function OrthomosaicViewerPage() {
           return
         }
 
-        const response = await fetch(
+        const response = await authFetch(
           `/api/webodm/task-status?orthomosaicId=${selectedOrthomosaic.id}`
         )
         const data = await response.json()
@@ -393,7 +394,7 @@ export default function OrthomosaicViewerPage() {
             statusLabel: 'Downloading orthophoto...',
           }))
 
-          fetch('/api/lightning/sync', {
+          authFetch('/api/lightning/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
@@ -436,7 +437,7 @@ export default function OrthomosaicViewerPage() {
     setGeneratingTiles(true)
     console.log('[Tiles] Auto-generating tiles for', selectedOrthomosaic.id)
 
-    fetch('/api/orthomosaic/generate-tiles', {
+    authFetch('/api/orthomosaic/generate-tiles', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
@@ -474,7 +475,7 @@ export default function OrthomosaicViewerPage() {
     }
 
     try {
-      const response = await fetch('/api/plant-labels', {
+      const response = await authFetch('/api/plant-labels', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -507,7 +508,7 @@ export default function OrthomosaicViewerPage() {
     }
 
     try {
-      await fetch(`/api/plant-labels?id=${labelId}`, {
+      await authFetch(`/api/plant-labels?id=${labelId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${session?.access_token}` },
       })
@@ -527,7 +528,7 @@ export default function OrthomosaicViewerPage() {
     }
 
     try {
-      await fetch('/api/plant-labels', {
+      await authFetch('/api/plant-labels', {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -551,7 +552,7 @@ export default function OrthomosaicViewerPage() {
     setArucoStatus({ status: 'processing', markerCount: 0 })
 
     try {
-      const response = await fetch('/api/aruco/detect', {
+      const response = await authFetch('/api/aruco/detect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
@@ -565,7 +566,7 @@ export default function OrthomosaicViewerPage() {
           markerCount: data.markerCount,
         })
         // Reload markers with species info
-        const markersResponse = await fetch(
+        const markersResponse = await authFetch(
           `/api/aruco/markers?orthomosaicId=${selectedOrthomosaic.id}`,
           { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
@@ -573,7 +574,7 @@ export default function OrthomosaicViewerPage() {
         if (markersData.markers && markersData.markers.length > 0) {
           // Fetch species registrations for these markers
           const markerIds = markersData.markers.map((m: ArUcoMarker) => m.marker_id)
-          const registrationsResponse = await fetch('/api/marker-registrations/batch', {
+          const registrationsResponse = await authFetch('/api/marker-registrations/batch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ markerIds, userId: user?.id }),
@@ -631,7 +632,7 @@ export default function OrthomosaicViewerPage() {
     setPlotAggregation(null)
 
     try {
-      const response = await fetch('/api/plant-detection', {
+      const response = await authFetch('/api/plant-detection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -716,7 +717,7 @@ export default function OrthomosaicViewerPage() {
         }
 
         // Reload labels to include new AI detections
-        const labelsResponse = await fetch(
+        const labelsResponse = await authFetch(
           `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
           { headers: { Authorization: `Bearer ${session?.access_token}` } }
         )
@@ -758,7 +759,7 @@ export default function OrthomosaicViewerPage() {
       while (!allDone) {
         console.log(`[RawDetection] Starting batch at index ${currentStartIndex}`)
 
-        const response = await fetch('/api/flight-detection', {
+        const response = await authFetch('/api/flight-detection', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -849,7 +850,7 @@ export default function OrthomosaicViewerPage() {
       }
 
       // All batches complete — reload labels
-      const labelsResponse = await fetch(
+      const labelsResponse = await authFetch(
         `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
         { headers: { Authorization: `Bearer ${session?.access_token}` } }
       )
@@ -873,7 +874,7 @@ export default function OrthomosaicViewerPage() {
     if (!selectedOrthomosaic) return
 
     try {
-      const response = await fetch('/api/plant-detection/aggregate', {
+      const response = await authFetch('/api/plant-detection/aggregate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -916,7 +917,7 @@ export default function OrthomosaicViewerPage() {
 
     setResyncingCameras(true)
     try {
-      const response = await fetch('/api/lightning/resync-cameras', {
+      const response = await authFetch('/api/lightning/resync-cameras', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
@@ -966,7 +967,7 @@ export default function OrthomosaicViewerPage() {
       try {
         const reason = hasUtmBounds ? 'UTM bounds' : needsWebpConversion ? 'WebP conversion' : 'missing bounds'
         console.log(`Auto-extracting (${reason}) for orthomosaic:`, selectedOrthomosaic.id)
-        const res = await fetch('/api/orthomosaic/extract-bounds', {
+        const res = await authFetch('/api/orthomosaic/extract-bounds', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds || needsWebpConversion }),
@@ -991,7 +992,7 @@ export default function OrthomosaicViewerPage() {
       if (!selectedOrthomosaic || isDemo) return
 
       try {
-        const response = await fetch(
+        const response = await authFetch(
           `/api/plant-detection?orthomosaicId=${selectedOrthomosaic.id}`
         )
         const data = await response.json()
@@ -1018,7 +1019,7 @@ export default function OrthomosaicViewerPage() {
     if (isDemo) return
 
     try {
-      await fetch(`/api/aruco/markers/${markerId}/verify`, {
+      await authFetch(`/api/aruco/markers/${markerId}/verify`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ verified }),

@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { fromArrayBuffer } from 'geotiff'
 import { convertBoundsToWGS84 } from '@/lib/geo/convert-bounds'
 import { getOrthomosaicStorage } from '@/lib/supabase/storage'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 export const maxDuration = 300
 
@@ -18,11 +19,17 @@ const supabaseAdmin = createClient(
  */
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { orthomosaicId, force } = await request.json()
 
     if (!orthomosaicId) {
       return NextResponse.json({ error: 'orthomosaicId required' }, { status: 400 })
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get orthomosaic record
     const { data: ortho, error: orthoError } = await supabaseAdmin

@@ -9,6 +9,7 @@ import {
 } from '@/lib/webodm/lightning-client'
 import { WebODMStatusCode } from '@/lib/webodm/types'
 import { getOrthomosaicStorage } from '@/lib/supabase/storage'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -18,10 +19,18 @@ const supabaseAdmin = createClient(
 
 export async function GET(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { searchParams } = new URL(request.url)
     const orthomosaicId = searchParams.get('orthomosaicId')
     const taskId = searchParams.get('taskId')
     const projectId = searchParams.get('projectId')
+
+    if (orthomosaicId) {
+      const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+      if (ownershipError) return ownershipError
+    }
 
     // If we have an orthomosaic ID, look up the task details
     let webodmTaskId = taskId
@@ -194,6 +203,9 @@ export async function GET(request: NextRequest) {
 // Also support POST for webhook-style callbacks
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const body = await request.json()
     const { orthomosaicId, taskId, projectId, status } = body
 
@@ -203,6 +215,9 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       )
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Update status based on webhook data
     const updates: any = {

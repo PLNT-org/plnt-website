@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -7,6 +8,9 @@ const supabaseAdmin = createClient(
 )
 
 export async function GET(request: NextRequest) {
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+  if (errorResponse) return errorResponse
+
   const { searchParams } = new URL(request.url)
   const orthomosaicId = searchParams.get('orthomosaicId')
 
@@ -16,6 +20,9 @@ export async function GET(request: NextRequest) {
       { status: 400 }
     )
   }
+
+  const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+  if (ownershipError) return ownershipError
 
   try {
     // Get orthomosaic with height data

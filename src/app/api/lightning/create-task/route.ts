@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { PROCESSING_PRESETS } from '@/lib/webodm/types'
 import { BUCKETS } from '@/lib/supabase/storage'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 // Allow up to 5 minutes for large uploads
 export const maxDuration = 300
@@ -20,6 +21,10 @@ export async function POST(request: NextRequest) {
   const lightningHost = process.env.WEBODM_LIGHTNING_HOST || 'spark1.webodm.net'
   const lightningBase = `https://${lightningHost}`
 
+  // --- Authenticate user via Bearer token ---
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+  if (errorResponse) return errorResponse
+
   try {
     const { flightId, storagePaths, name, quality } = await request.json()
 
@@ -28,24 +33,6 @@ export async function POST(request: NextRequest) {
         { error: 'Either flightId or storagePaths is required' },
         { status: 400 }
       )
-    }
-
-    // --- Authenticate user ---
-    let userId: string | null = null
-    const cookies = request.headers.get('cookie') || ''
-    // Match both regular and chunked Supabase auth cookies
-    const accessTokenMatch = cookies.match(/sb-[^-]+-auth-token(?:\.0)?=([^;]+)/)
-    if (accessTokenMatch) {
-      try {
-        const tokenData = JSON.parse(decodeURIComponent(accessTokenMatch[1]))
-        const token = tokenData.access_token || tokenData
-        if (token && typeof token === 'string') {
-          const { data } = await supabaseAdmin.auth.getUser(token)
-          userId = data.user?.id || null
-        }
-      } catch {
-        console.log('[Lightning] Could not extract user from cookies')
-      }
     }
 
     // --- Resolve image paths ---
@@ -109,7 +96,7 @@ export async function POST(request: NextRequest) {
       .from('orthomosaics')
       .insert({
         flight_id: flightId || null,
-        user_id: userId,
+        user_id: user.id,
         name: taskName,
         webodm_project_id: 'lightning',
         status: 'pending',

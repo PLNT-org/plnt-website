@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,15 +9,18 @@ const supabase = createClient(
 
 // POST /api/marker-registrations/batch - Get registrations for multiple ArUco marker IDs
 export async function POST(request: NextRequest) {
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabase)
+  if (errorResponse) return errorResponse
+
   try {
     const body = await request.json()
-    const { markerIds, userId } = body
+    const { markerIds } = body
 
     if (!markerIds || !Array.isArray(markerIds) || markerIds.length === 0) {
       return NextResponse.json({ error: 'markerIds array is required' }, { status: 400 })
     }
 
-    // Build query - if userId provided, filter by user, otherwise get all
+    // Build query - filter by authenticated user (admins see all)
     let query = supabase
       .from('marker_registrations')
       .select(`
@@ -38,8 +42,8 @@ export async function POST(request: NextRequest) {
       .in('aruco_marker_id', markerIds)
       .eq('is_active', true)
 
-    if (userId) {
-      query = query.eq('user_id', userId)
+    if (!isAdmin) {
+      query = query.eq('user_id', user.id)
     }
 
     const { data, error } = await query

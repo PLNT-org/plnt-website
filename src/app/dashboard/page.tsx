@@ -1,6 +1,8 @@
 // app/dashboard/page.tsx
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
@@ -259,7 +261,7 @@ function DashboardContent() {
       const { data: { session: currentSession } } = await supabase.auth.getSession()
       if (!currentSession?.access_token) return
 
-      const listRes = await fetch('/api/orthomosaic/list', {
+      const listRes = await authFetch('/api/orthomosaic/list', {
         cache: 'no-store',
         headers: { Authorization: `Bearer ${currentSession.access_token}` },
       })
@@ -269,7 +271,7 @@ function DashboardContent() {
       if (completed.length === 0) return
 
       const firstOrtho = completed[0]
-      const aggRes = await fetch('/api/plant-detection/aggregate', {
+      const aggRes = await authFetch('/api/plant-detection/aggregate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

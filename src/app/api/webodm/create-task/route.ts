@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { WebODMClient, webodm } from '@/lib/webodm/client'
 import { PROCESSING_PRESETS } from '@/lib/webodm/types'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -11,6 +12,9 @@ const supabaseAdmin = createClient(
 
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const body = await request.json()
     const { flightId, name, quality = 'balanced' } = body
 
@@ -127,7 +131,7 @@ export async function POST(request: NextRequest) {
       .from('orthomosaics')
       .insert({
         flight_id: flightId,
-        user_id: (flight.flight_plans as any)?.user_id,
+        user_id: user.id,
         name: taskName,
         webodm_task_id: task.id,
         webodm_project_id: String(project.id),

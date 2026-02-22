@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { getOrthomosaicStorage } from '@/lib/supabase/storage'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 export const maxDuration = 300
 
@@ -40,11 +41,17 @@ function tileYToLat(y: number, z: number): number {
  */
 export async function POST(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { orthomosaicId } = await request.json()
 
     if (!orthomosaicId) {
       return NextResponse.json({ error: 'orthomosaicId required' }, { status: 400 })
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get orthomosaic record
     const { data: ortho, error: orthoError } = await supabaseAdmin

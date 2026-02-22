@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 // Use service role to bypass RLS
 const supabaseAdmin = createClient(
@@ -9,6 +10,13 @@ const supabaseAdmin = createClient(
 
 export async function DELETE(request: NextRequest) {
   try {
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
+    if (!isAdmin) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    }
+
     const { id } = await request.json()
 
     if (!id) {

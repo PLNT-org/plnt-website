@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -23,22 +24,9 @@ export async function PATCH(
       )
     }
 
-    // Get user from auth if available (for verified_by tracking)
-    let userId: string | null = null
-    const cookies = request.headers.get('cookie') || ''
-    const accessTokenMatch = cookies.match(/sb-[^-]+-auth-token=([^;]+)/)
-
-    if (accessTokenMatch) {
-      try {
-        const tokenData = JSON.parse(decodeURIComponent(accessTokenMatch[1]))
-        if (tokenData.access_token) {
-          const { data } = await supabaseAdmin.auth.getUser(tokenData.access_token)
-          userId = data.user?.id || null
-        }
-      } catch {
-        // Token parsing failed - continue without user
-      }
-    }
+    // Authenticate user via Bearer token
+    const { user, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
 
     // Update marker verification status
     const updates: Record<string, unknown> = {
@@ -48,8 +36,8 @@ export async function PATCH(
 
     if (verified) {
       updates.verified_at = new Date().toISOString()
-      if (userId) {
-        updates.verified_by = userId
+      if (user.id) {
+        updates.verified_by = user.id
       }
     } else {
       updates.verified_at = null

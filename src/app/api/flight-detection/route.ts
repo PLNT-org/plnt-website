@@ -4,6 +4,7 @@ import sharp from 'sharp'
 import { extractDroneMetadata, pixelToGroundCoordinate } from '@/lib/drone/coordinate-extractor'
 import { applyGPSNMS } from '@/lib/detection/gps-nms'
 import { projectPixelToGPS, CompactReconstruction } from '@/lib/detection/camera-projection'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Allow up to 5 minutes for processing many images
 export const maxDuration = 300
@@ -166,6 +167,10 @@ async function listImagesInStorage(prefix: string): Promise<string[]> {
 }
 
 export async function POST(request: NextRequest) {
+  // Auth check
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabase)
+  if (errorResponse) return errorResponse
+
   let body: Record<string, unknown>
   try {
     body = await request.json()
@@ -176,7 +181,6 @@ export async function POST(request: NextRequest) {
   const {
     orthomosaicId: inputOrthoId,
     storagePath,
-    userId,
     confidence_threshold = DEFAULT_CONFIDENCE,
     maxImages,
     startIndex = 0,
@@ -185,7 +189,6 @@ export async function POST(request: NextRequest) {
   } = body as {
     orthomosaicId?: string
     storagePath?: string
-    userId?: string
     confidence_threshold?: number
     maxImages?: number
     startIndex?: number
@@ -213,6 +216,10 @@ export async function POST(request: NextRequest) {
   let reconstructionData: CompactReconstruction | null = null
 
   if (inputOrthoId) {
+    // Verify user owns this orthomosaic
+    const ownershipError = await verifyOrthomosaicOwnership(supabase, inputOrthoId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
+
     // Look up source_image_paths, camera_positions, and reconstruction_data from the orthomosaic record
     const { data: ortho, error: orthoError } = await supabase
       .from('orthomosaics')
@@ -313,7 +320,7 @@ export async function POST(request: NextRequest) {
             const { data: newOrtho, error: createError } = await supabase
               .from('orthomosaics')
               .insert({
-                user_id: userId || null,
+                user_id: user.id,
                 name: `Raw Detection - ${storagePath!.substring(0, 8)}...`,
                 status: 'completed',
                 webodm_project_id: 'raw-detection',
@@ -564,7 +571,7 @@ export async function POST(request: NextRequest) {
 
               return {
                 orthomosaic_id: orthomosaicId,
-                user_id: userId || null,
+                user_id: user.id,
                 latitude: lat,
                 longitude: lon,
                 pixel_x: Math.round(det.x),

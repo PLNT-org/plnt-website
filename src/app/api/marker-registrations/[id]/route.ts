@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -13,17 +14,8 @@ export async function GET(
 ) {
   try {
     const { id } = await params
-    const authHeader = request.headers.get('authorization')
-    if (!authHeader) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const token = authHeader.replace('Bearer ', '')
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const { user, errorResponse } = await authenticateRequest(request, supabase)
+    if (errorResponse) return errorResponse
 
     const { data, error } = await supabase
       .from('marker_registrations')
@@ -63,17 +55,8 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params
-    const authHeader = request.headers.get('authorization')
-    if (!authHeader) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const token = authHeader.replace('Bearer ', '')
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const { user, errorResponse } = await authenticateRequest(request, supabase)
+    if (errorResponse) return errorResponse
 
     const body = await request.json()
     const { species_id, barcode_value, plot_name, notes, is_active } = body
@@ -123,17 +106,8 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params
-    const authHeader = request.headers.get('authorization')
-    if (!authHeader) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    const token = authHeader.replace('Bearer ', '')
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const { user, errorResponse } = await authenticateRequest(request, supabase)
+    if (errorResponse) return errorResponse
 
     const { error } = await supabase
       .from('marker_registrations')

@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false })
 
     if (!isAdmin) {
-      query = query.or(`user_id.eq.${user.id},user_id.is.null`)
+      query = query.eq('user_id', user.id)
     }
 
     const { data: orthomosaics, error } = await query

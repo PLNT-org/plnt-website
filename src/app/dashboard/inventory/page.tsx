@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect } from 'react'
 import { useAuth } from '@/lib/auth/auth-context'
 import Link from 'next/link'
@@ -173,7 +175,7 @@ export default function InventoryPage() {
     setError(null)
 
     try {
-      const res = await fetch('/api/orthomosaic/list', {
+      const res = await authFetch('/api/orthomosaic/list', {
         cache: 'no-store',
         headers: { Authorization: `Bearer ${session?.access_token}` },
       })
@@ -201,7 +203,7 @@ export default function InventoryPage() {
     setError(null)
 
     try {
-      const res = await fetch('/api/plant-detection/aggregate', {
+      const res = await authFetch('/api/plant-detection/aggregate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { PROCESSING_PRESETS } from '@/lib/webodm/types'
 import { fetchWithWebODMAuth } from '@/lib/webodm/token-manager'
+import { authenticateRequest } from '@/lib/auth/api-auth'
 
 // Use service role for server-side operations
 const supabaseAdmin = createClient(
@@ -12,23 +13,11 @@ const supabaseAdmin = createClient(
 const WEBODM_URL = (process.env.WEBODM_URL || 'http://localhost:8000').replace(/\/$/, '')
 
 export async function POST(request: NextRequest) {
-  try {
-    // Get user from cookies
-    let user = null
-    const cookies = request.headers.get('cookie') || ''
-    const accessTokenMatch = cookies.match(/sb-[^-]+-auth-token=([^;]+)/)
-    if (accessTokenMatch) {
-      try {
-        const tokenData = JSON.parse(decodeURIComponent(accessTokenMatch[1]))
-        if (tokenData.access_token) {
-          const { data } = await supabaseAdmin.auth.getUser(tokenData.access_token)
-          user = data.user
-        }
-      } catch {
-        // Token parsing failed
-      }
-    }
+  // Authenticate via Bearer token
+  const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+  if (errorResponse) return errorResponse
 
+  try {
     const formData = await request.formData()
     const name = formData.get('name') as string
     const quality = formData.get('quality') as string || 'balanced'
@@ -124,7 +113,7 @@ export async function POST(request: NextRequest) {
       .from('orthomosaics')
       .insert({
         flight_id: null, // Direct upload, no associated flight
-        user_id: user?.id || null,
+        user_id: user.id,
         name: name,
         webodm_task_id: task.id,
         webodm_project_id: String(project.id),

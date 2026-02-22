@@ -1,6 +1,8 @@
 // app/dashboard/upload/page.tsx
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useCallback, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
@@ -286,7 +288,7 @@ export default function ImageUploadPage() {
 
     // Real API call would go here
     try {
-      const response = await fetch('/api/process-images', {
+      const response = await authFetch('/api/process-images', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ images: imagePaths, flightId: selectedFlight })

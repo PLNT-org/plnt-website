@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
@@ -164,7 +166,7 @@ export default function CanopyHeightPage() {
     }
 
     try {
-      const response = await fetch(`/api/canopy-height/stats?orthomosaicId=${id}`)
+      const response = await authFetch(`/api/canopy-height/stats?orthomosaicId=${id}`)
       const data = await response.json()
       if (response.ok) {
         setHeightStats(data.stats)

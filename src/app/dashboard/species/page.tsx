@@ -1,5 +1,7 @@
 'use client'
 
+import { authFetch } from '@/lib/auth/auth-fetch'
+
 import { useState, useEffect } from 'react'
 import { useAuth } from '@/lib/auth/auth-context'
 import { Button } from '@/components/ui/button'
@@ -132,7 +134,7 @@ export default function SpeciesPage() {
     setIsLoading(true)
     setError(null)
     try {
-      const response = await fetch('/api/species', {
+      const response = await authFetch('/api/species', {
         headers: {
           Authorization: `Bearer ${session?.access_token}`,
         },
@@ -253,7 +255,7 @@ export default function SpeciesPage() {
 
     setIsDeleting(true)
     try {
-      const response = await fetch(`/api/species/${id}`, {
+      const response = await authFetch(`/api/species/${id}`, {
         method: 'DELETE',
         headers: {
           Authorization: `Bearer ${session?.access_token}`,
