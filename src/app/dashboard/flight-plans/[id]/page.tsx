@@ -20,6 +20,7 @@ import {
   FileDown,
 } from 'lucide-react'
 import dynamic from 'next/dynamic'
+import JSZip from 'jszip'
 
 // Dynamically import the map component to avoid SSR issues
 const FlightPathPreviewMap = dynamic(
@@ -374,6 +375,178 @@ ${waypoints.map(coord => `          ${coord[0]},${coord[1]},${flightPlan.altitud
     console.log(`Downloaded ${filename}`)
   }
 
+  const downloadDjiKmz = async () => {
+    if (!flightPlan?.waypoints?.coordinates || flightPlan.waypoints.coordinates.length === 0) {
+      alert('No waypoints available for download')
+      return
+    }
+
+    const waypoints = flightPlan.waypoints.coordinates
+    const gimbalPitches = flightPlan.waypoints.gimbalPitches || waypoints.map(() => -90)
+    const headings = flightPlan.waypoints.headings || waypoints.map(() => 0)
+    const speedMs = flightPlan.speed_ms || 5
+    const altitudeM = flightPlan.altitude_m || 30
+    const now = Date.now()
+
+    // Mavic 3 Enterprise enum values per DJI WPML spec:
+    // droneEnumValue 77 = M3E/M3T/M3M series
+    // droneSubEnumValue: 0=M3E, 1=M3T, 2=M3M
+    // payloadEnumValue: 66=M3E cam, 67=M3T cam, 68=M3M cam
+    const droneSubEnum = 0  // M3E
+    const payloadEnum = 66  // M3E Camera
+
+    // --- template.kml: mission template with ALL waypoints ---
+    const templateWaypoints = waypoints.map((coord, index) => {
+      const gimbalPitch = gimbalPitches[index] || -90
+      return `      <Placemark>
+        <Point>
+          <coordinates>${coord[0]},${coord[1]}</coordinates>
+        </Point>
+        <wpml:index>${index}</wpml:index>
+        <wpml:executeHeight>${altitudeM}</wpml:executeHeight>
+        <wpml:waypointSpeed>${speedMs}</wpml:waypointSpeed>
+        <wpml:waypointHeadingParam>
+          <wpml:waypointHeadingMode>followWayline</wpml:waypointHeadingMode>
+        </wpml:waypointHeadingParam>
+        <wpml:waypointTurnParam>
+          <wpml:waypointTurnMode>coordinateTurn</wpml:waypointTurnMode>
+          <wpml:waypointTurnDampingDist>0</wpml:waypointTurnDampingDist>
+        </wpml:waypointTurnParam>
+        <wpml:useStraightLine>0</wpml:useStraightLine>
+        <wpml:gimbalPitchAngle>${gimbalPitch}</wpml:gimbalPitchAngle>
+      </Placemark>`
+    }).join('\n')
+
+    const templateKml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"
+     xmlns:wpml="http://www.dji.com/wpmz/1.0.6">
+  <Document>
+    <wpml:author>PLNT Flight Planner</wpml:author>
+    <wpml:createTime>${now}</wpml:createTime>
+    <wpml:updateTime>${now}</wpml:updateTime>
+    <wpml:missionConfig>
+      <wpml:flyToWaylineMode>safely</wpml:flyToWaylineMode>
+      <wpml:finishAction>goHome</wpml:finishAction>
+      <wpml:exitOnRCLost>executeLostAction</wpml:exitOnRCLost>
+      <wpml:executeRCLostAction>goBack</wpml:executeRCLostAction>
+      <wpml:takeOffSecurityHeight>20</wpml:takeOffSecurityHeight>
+      <wpml:globalTransitionalSpeed>${speedMs}</wpml:globalTransitionalSpeed>
+      <wpml:droneInfo>
+        <wpml:droneEnumValue>77</wpml:droneEnumValue>
+        <wpml:droneSubEnumValue>${droneSubEnum}</wpml:droneSubEnumValue>
+      </wpml:droneInfo>
+      <wpml:payloadInfo>
+        <wpml:payloadEnumValue>${payloadEnum}</wpml:payloadEnumValue>
+        <wpml:payloadPositionIndex>0</wpml:payloadPositionIndex>
+      </wpml:payloadInfo>
+    </wpml:missionConfig>
+    <Folder>
+      <wpml:templateType>waypoint</wpml:templateType>
+      <wpml:templateId>0</wpml:templateId>
+      <wpml:autoFlightSpeed>${speedMs}</wpml:autoFlightSpeed>
+      <wpml:gimbalPitchMode>manual</wpml:gimbalPitchMode>
+      <wpml:globalWaypointTurnMode>coordinateTurn</wpml:globalWaypointTurnMode>
+      <wpml:globalUseStraightLine>0</wpml:globalUseStraightLine>
+${templateWaypoints}
+    </Folder>
+  </Document>
+</kml>`
+
+    // --- waylines.wpml: executable waypoints with photo actions ---
+    const execWaypoints = waypoints.map((coord, index) => {
+      const gimbalPitch = gimbalPitches[index] || -90
+      const heading = headings[index] || 0
+      const isFirstOrLast = index === 0 || index === waypoints.length - 1
+      const turnMode = isFirstOrLast ? 'toPointAndStopWithDiscontinuityCurvature' : 'coordinateTurn'
+      const dampingDist = isFirstOrLast ? 0 : 0.2
+
+      return `      <Placemark>
+        <Point>
+          <coordinates>${coord[0]},${coord[1]}</coordinates>
+        </Point>
+        <wpml:index>${index}</wpml:index>
+        <wpml:executeHeight>${altitudeM}</wpml:executeHeight>
+        <wpml:waypointSpeed>${speedMs}</wpml:waypointSpeed>
+        <wpml:waypointHeadingParam>
+          <wpml:waypointHeadingMode>${heading === 0 ? 'followWayline' : 'manually'}</wpml:waypointHeadingMode>
+          <wpml:waypointHeadingAngle>${heading}</wpml:waypointHeadingAngle>
+        </wpml:waypointHeadingParam>
+        <wpml:waypointTurnParam>
+          <wpml:waypointTurnMode>${turnMode}</wpml:waypointTurnMode>
+          <wpml:waypointTurnDampingDist>${dampingDist}</wpml:waypointTurnDampingDist>
+        </wpml:waypointTurnParam>
+        <wpml:waypointGimbalHeadingParam>
+          <wpml:waypointGimbalPitchAngle>${gimbalPitch}</wpml:waypointGimbalPitchAngle>
+        </wpml:waypointGimbalHeadingParam>
+        <wpml:isRisky>0</wpml:isRisky>
+        <wpml:actionGroup>
+          <wpml:actionGroupId>${index}</wpml:actionGroupId>
+          <wpml:actionGroupStartIndex>${index}</wpml:actionGroupStartIndex>
+          <wpml:actionGroupEndIndex>${index}</wpml:actionGroupEndIndex>
+          <wpml:actionGroupMode>sequence</wpml:actionGroupMode>
+          <wpml:actionTrigger>
+            <wpml:actionTriggerType>reachPoint</wpml:actionTriggerType>
+          </wpml:actionTrigger>
+          <wpml:action>
+            <wpml:actionId>0</wpml:actionId>
+            <wpml:actionActuatorFunc>takePhoto</wpml:actionActuatorFunc>
+            <wpml:actionActuatorFuncParam>
+              <wpml:fileSuffix>point${index}</wpml:fileSuffix>
+              <wpml:payloadPositionIndex>0</wpml:payloadPositionIndex>
+            </wpml:actionActuatorFuncParam>
+          </wpml:action>
+        </wpml:actionGroup>
+      </Placemark>`
+    }).join('\n')
+
+    const waylinesWpml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"
+     xmlns:wpml="http://www.dji.com/wpmz/1.0.6">
+  <Document>
+    <wpml:missionConfig>
+      <wpml:flyToWaylineMode>safely</wpml:flyToWaylineMode>
+      <wpml:finishAction>goHome</wpml:finishAction>
+      <wpml:exitOnRCLost>executeLostAction</wpml:exitOnRCLost>
+      <wpml:executeRCLostAction>goBack</wpml:executeRCLostAction>
+      <wpml:takeOffSecurityHeight>20</wpml:takeOffSecurityHeight>
+      <wpml:globalTransitionalSpeed>${speedMs}</wpml:globalTransitionalSpeed>
+      <wpml:droneInfo>
+        <wpml:droneEnumValue>77</wpml:droneEnumValue>
+        <wpml:droneSubEnumValue>${droneSubEnum}</wpml:droneSubEnumValue>
+      </wpml:droneInfo>
+      <wpml:payloadInfo>
+        <wpml:payloadEnumValue>${payloadEnum}</wpml:payloadEnumValue>
+        <wpml:payloadPositionIndex>0</wpml:payloadPositionIndex>
+      </wpml:payloadInfo>
+    </wpml:missionConfig>
+    <Folder>
+      <wpml:templateId>0</wpml:templateId>
+      <wpml:executeHeightMode>relativeToStartPoint</wpml:executeHeightMode>
+      <wpml:waylineId>0</wpml:waylineId>
+      <wpml:autoFlightSpeed>${speedMs}</wpml:autoFlightSpeed>
+${execWaypoints}
+    </Folder>
+  </Document>
+</kml>`
+
+    // Package into KMZ (ZIP with .kmz extension)
+    const zip = new JSZip()
+    const wpmzFolder = zip.folder('wpmz')
+    wpmzFolder!.file('template.kml', templateKml)
+    wpmzFolder!.file('waylines.wpml', waylinesWpml)
+
+    const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.google-earth.kmz' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${flightPlan.name.replace(/\s+/g, '_')}_dji_mission.kmz`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+    console.log('Downloaded DJI KMZ mission file')
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -534,6 +707,13 @@ ${waypoints.map(coord => `          ${coord[0]},${coord[1]},${flightPlan.altitud
                     >
                       <FileDown className="w-4 h-4 mr-2" />
                       Litchi CSV (Maven EVO)
+                    </Button>
+                    <Button
+                      onClick={() => downloadDjiKmz()}
+                      className="bg-blue-600 hover:bg-blue-700 text-white"
+                    >
+                      <FileDown className="w-4 h-4 mr-2" />
+                      DJI KMZ (Pilot 2)
                     </Button>
                     <Button
                       variant="outline"
