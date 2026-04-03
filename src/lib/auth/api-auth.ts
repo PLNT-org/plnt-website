@@ -42,8 +42,7 @@ export async function authenticateRequest(
 }
 
 /**
- * Verify that an orthomosaic belongs to the requesting user.
- * Allows orthomosaics with user_id = null (legacy data visible to all).
+ * Verify that an orthomosaic belongs to the requesting user or is shared with them.
  * Admins bypass the ownership check entirely.
  * Returns an error response if ownership check fails, null if OK.
  */
@@ -65,9 +64,18 @@ export async function verifyOrthomosaicOwnership(
     return NextResponse.json({ error: 'Orthomosaic not found' }, { status: 404 })
   }
 
-  // Allow legacy orthomosaics (user_id is null) for all authenticated users
-  if (ortho.user_id !== null && ortho.user_id !== userId) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  if (ortho.user_id !== userId) {
+    // Check if orthomosaic is shared with this user
+    const { data: share } = await supabase
+      .from('shared_orthomosaics')
+      .select('id')
+      .eq('orthomosaic_id', orthomosaicId)
+      .eq('shared_with_user_id', userId)
+      .single()
+
+    if (!share) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    }
   }
 
   return null

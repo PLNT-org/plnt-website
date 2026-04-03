@@ -31,7 +31,19 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false })
 
     if (!isAdmin) {
-      query = query.or(`user_id.eq.${user.id},user_id.is.null`)
+      // Get IDs of orthomosaics shared with this user
+      const { data: shares } = await supabaseAdmin
+        .from('shared_orthomosaics')
+        .select('orthomosaic_id')
+        .eq('shared_with_user_id', user.id)
+
+      const sharedIds = (shares || []).map(s => s.orthomosaic_id)
+
+      if (sharedIds.length > 0) {
+        query = query.or(`user_id.eq.${user.id},id.in.(${sharedIds.join(',')})`)
+      } else {
+        query = query.eq('user_id', user.id)
+      }
     }
 
     const { data: orthomosaics, error } = await query
@@ -44,8 +56,19 @@ export async function GET(request: NextRequest) {
       )
     }
 
+    // Mark shared orthomosaics for non-admin users
+    let result = orthomosaics || []
+    if (!isAdmin) {
+      const { data: shares } = await supabaseAdmin
+        .from('shared_orthomosaics')
+        .select('orthomosaic_id')
+        .eq('shared_with_user_id', user.id)
+      const sharedSet = new Set((shares || []).map(s => s.orthomosaic_id))
+      result = result.map(o => ({ ...o, shared: sharedSet.has(o.id) }))
+    }
+
     return NextResponse.json(
-      { orthomosaics: orthomosaics || [] },
+      { orthomosaics: result },
       {
         headers: {
           'Cache-Control': 'no-store, no-cache, must-revalidate',

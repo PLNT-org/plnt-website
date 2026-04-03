@@ -6,9 +6,9 @@ import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-import { 
-  LayoutDashboard, Map, Plane, Upload, BarChart3, 
-  Settings, Lock, Database, Brain, Mail
+import {
+  LayoutDashboard, Map, Plane, Upload, BarChart3,
+  Settings, Lock, Database, Brain, Mail, Share2
 } from 'lucide-react'
 
 export default function DashboardLayout({ 
@@ -136,6 +136,13 @@ export default function DashboardLayout({
                         Contact Submissions
                     </Button>
                  </Link>
+
+                  <Link href="/dashboard/admin/share">
+                    <Button variant="ghost" className="w-full justify-start text-red-600 hover:bg-red-50">
+                      <Share2 className="w-4 h-4 mr-2" />
+                      Share Data
+                    </Button>
+                  </Link>
                 </nav>
               </div>
             </div>

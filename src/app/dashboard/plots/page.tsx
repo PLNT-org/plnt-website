@@ -425,6 +425,12 @@ export default function PlotsPage() {
                 Demo Mode
               </Badge>
             )}
+            <Link href="/dashboard/species">
+              <Button variant="outline" className="text-green-700 border-green-300 hover:bg-green-50">
+                <Leaf className="h-4 w-4 mr-2" />
+                Manage Species
+              </Button>
+            </Link>
             <Button
               className="bg-green-600 hover:bg-green-700"
               onClick={handleAddPlot}
