@@ -1,4 +1,4 @@
-"""Pydantic models for ArUco detection API."""
+"""Pydantic models for ArUco detection and homography matching API."""
 
 from typing import Optional
 from pydantic import BaseModel, Field
@@ -62,3 +62,58 @@ class HealthResponse(BaseModel):
     status: str
     opencv_version: str
     rasterio_version: str
+
+
+# ============================================
+# Homography Models
+# ============================================
+
+
+class HomographyRequest(BaseModel):
+    """Request body for homography computation."""
+
+    geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
+    raw_image_url: str = Field(..., description="URL of the raw drone image")
+    image_latitude: float = Field(..., description="GPS latitude of the raw image center")
+    image_longitude: float = Field(..., description="GPS longitude of the raw image center")
+    footprint_width_m: float = Field(..., description="Estimated ground footprint width in meters")
+    footprint_height_m: float = Field(..., description="Estimated ground footprint height in meters")
+    padding_factor: float = Field(default=1.5, description="Multiply footprint by this for search region")
+
+
+class HomographyResponse(BaseModel):
+    """Response from homography computation."""
+
+    success: bool
+    homography: Optional[list[list[float]]] = Field(
+        None, description="3x3 homography matrix (raw image pixels -> ortho crop pixels)"
+    )
+    crop_offset_x: int = Field(0, description="X pixel offset of crop in full ortho")
+    crop_offset_y: int = Field(0, description="Y pixel offset of crop in full ortho")
+    crop_width: int = Field(0, description="Width of the ortho crop in pixels")
+    crop_height: int = Field(0, description="Height of the ortho crop in pixels")
+    good_matches: int = Field(0, description="Number of feature matches after ratio test")
+    inlier_count: int = Field(0, description="Number of RANSAC inliers")
+    inlier_ratio: float = Field(0, description="Ratio of inliers to good matches")
+    error: Optional[str] = None
+
+
+class BatchHomographyRequest(BaseModel):
+    """Request body for batch homography computation (ortho loaded once)."""
+
+    geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
+    images: list[dict] = Field(
+        ...,
+        description="List of {raw_image_url, latitude, longitude, footprint_width_m, footprint_height_m}"
+    )
+    padding_factor: float = Field(default=1.5, description="Multiply footprint by this for search region")
+
+
+class BatchHomographyResponse(BaseModel):
+    """Response from batch homography computation."""
+
+    success: bool
+    results: list[HomographyResponse]
+    ortho_width: int = Field(0, description="Full ortho width in pixels")
+    ortho_height: int = Field(0, description="Full ortho height in pixels")
+    error: Optional[str] = None
