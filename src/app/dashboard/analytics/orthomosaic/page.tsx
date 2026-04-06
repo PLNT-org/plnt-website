@@ -29,6 +29,7 @@ import {
   Camera,
   Focus,
   CheckCheck,
+  Link2,
 } from 'lucide-react'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -131,7 +132,7 @@ interface ArUcoStatus {
 }
 
 export default function OrthomosaicViewerPage() {
-  const { user, session, isDemo, loading: authLoading } = useAuth()
+  const { user, session, isDemo, isAdmin, loading: authLoading } = useAuth()
   const searchParams = useSearchParams()
   const orthomosaicId = searchParams.get('id')
 
@@ -1478,6 +1479,56 @@ export default function OrthomosaicViewerPage() {
                 <div className="h-full bg-gray-400 animate-pulse rounded-full" style={{ width: '100%' }} />
               )}
             </div>
+            {isAdmin && !processingStatus && (
+              <div className="mt-3 pt-3 border-t border-gray-200">
+                <p className="text-xs text-gray-500 mb-2">
+                  Stuck? If the task completed on Lightning but the upload timed out, paste the Lightning task UUID below to resume syncing.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Lightning task UUID"
+                    id="link-task-input"
+                    className="flex-1 h-8 px-2 text-sm border rounded"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      const input = document.getElementById('link-task-input') as HTMLInputElement
+                      const taskId = input?.value?.trim()
+                      if (!taskId) {
+                        alert('Please enter a Lightning task UUID')
+                        return
+                      }
+                      try {
+                        const res = await authFetch('/api/admin/link-task', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            orthomosaicId: selectedOrthomosaic.id,
+                            taskId,
+                          }),
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          alert('Task linked! Sync will start automatically.')
+                          await reloadOrthomosaic(selectedOrthomosaic.id)
+                        } else {
+                          alert(data.error || 'Failed to link task')
+                        }
+                      } catch (err) {
+                        console.error('Error linking task:', err)
+                        alert('Failed to link task')
+                      }
+                    }}
+                  >
+                    <Link2 className="h-4 w-4 mr-1" />
+                    Link Task
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
