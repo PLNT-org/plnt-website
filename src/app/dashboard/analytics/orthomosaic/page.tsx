@@ -1479,7 +1479,7 @@ export default function OrthomosaicViewerPage() {
                 <div className="h-full bg-gray-400 animate-pulse rounded-full" style={{ width: '100%' }} />
               )}
             </div>
-            {isAdmin && !processingStatus && (
+            {!processingStatus && (
               <div className="mt-3 pt-3 border-t border-gray-200">
                 <p className="text-xs text-gray-500 mb-2">
                   Stuck? If the task completed on Lightning but the upload timed out, paste the Lightning task UUID below to resume syncing.
