@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Search, Trash2, Navigation, Layers, Pencil, MapPin } from 'lucide-react'
+import { Search, Trash2, Navigation, Layers, Pencil, MapPin, Leaf } from 'lucide-react'
 
 // Fix Leaflet default marker icon issue
 delete (L.Icon.Default.prototype as any)._getIconUrl
@@ -66,6 +66,16 @@ interface MarkerRegistration {
   plot_name?: string
 }
 
+interface PlantLabel {
+  id: string
+  latitude: number
+  longitude: number
+  source: 'manual' | 'ai'
+  confidence?: number
+  label: string
+  verified: boolean
+}
+
 interface PlotBoundaryMapProps {
   onBoundaryDrawn?: (boundary: GeoJSONPolygon, areaAcres: number) => void
   onBoundaryCleared?: () => void
@@ -87,6 +97,10 @@ interface PlotBoundaryMapProps {
   markers?: MarkerRegistration[]
   showMarkers?: boolean
   onShowMarkersChange?: (show: boolean) => void
+  // Plant label visualization
+  plantLabels?: PlantLabel[]
+  showPlantLabels?: boolean
+  onShowPlantLabelsChange?: (show: boolean) => void
 }
 
 // Generate consistent color from string (for plot colors)
@@ -144,6 +158,9 @@ export default function PlotBoundaryMap({
   markers = [],
   showMarkers: showMarkersProp,
   onShowMarkersChange,
+  plantLabels = [],
+  showPlantLabels: showPlantLabelsProp,
+  onShowPlantLabelsChange,
 }: PlotBoundaryMapProps) {
   const mapContainerId = useRef(`plot-boundary-map-${Math.random().toString(36).substr(2, 9)}`)
   const mapRef = useRef<L.Map | null>(null)
@@ -157,17 +174,26 @@ export default function PlotBoundaryMap({
   const drawingPointsRef = useRef<L.LatLng[]>([])
   const pointMarkersRef = useRef<L.CircleMarker[]>([])
 
+  const plantLabelsLayerRef = useRef<L.LayerGroup | null>(null)
+
   const [searchAddress, setSearchAddress] = useState('')
   const [isDrawing, setIsDrawingInternal] = useState(false)
   const [showOrtho, setShowOrtho] = useState(false)
   const [areaAcres, setAreaAcres] = useState<number | null>(null)
   const [showMarkersInternal, setShowMarkersInternal] = useState(false)
+  const [showPlantLabelsInternal, setShowPlantLabelsInternal] = useState(false)
 
   // Use prop if provided, otherwise use internal state
   const showMarkers = showMarkersProp !== undefined ? showMarkersProp : showMarkersInternal
   const setShowMarkers = (value: boolean) => {
     setShowMarkersInternal(value)
     onShowMarkersChange?.(value)
+  }
+
+  const showPlantLabels = showPlantLabelsProp !== undefined ? showPlantLabelsProp : showPlantLabelsInternal
+  const setShowPlantLabels = (value: boolean) => {
+    setShowPlantLabelsInternal(value)
+    onShowPlantLabelsChange?.(value)
   }
 
   // Wrapper to sync internal drawing state with external control
@@ -217,6 +243,11 @@ export default function PlotBoundaryMap({
     const markersLayer = new L.LayerGroup()
     map.addLayer(markersLayer)
     markersLayerRef.current = markersLayer
+
+    // Layer for plant labels
+    const plantLabelsLayer = new L.LayerGroup()
+    map.addLayer(plantLabelsLayer)
+    plantLabelsLayerRef.current = plantLabelsLayer
 
     // Scale control
     L.control.scale({ position: 'bottomleft', metric: true, imperial: true }).addTo(map)
@@ -400,6 +431,28 @@ export default function PlotBoundaryMap({
       markersLayerRef.current?.addLayer(leafletMarker)
     })
   }, [showMarkers, markers])
+
+  // Render plant labels
+  useEffect(() => {
+    if (!mapRef.current || !plantLabelsLayerRef.current) return
+
+    plantLabelsLayerRef.current.clearLayers()
+
+    if (!showPlantLabels || plantLabels.length === 0) return
+
+    plantLabels.forEach((label) => {
+      const marker = L.circleMarker([label.latitude, label.longitude], {
+        radius: 4,
+        fillColor: '#22c55e',
+        fillOpacity: 1,
+        color: '#ffffff',
+        weight: 1,
+        opacity: 1,
+      })
+
+      plantLabelsLayerRef.current?.addLayer(marker)
+    })
+  }, [showPlantLabels, plantLabels])
 
   // Drawing functions
   const startDrawing = useCallback(() => {
@@ -705,6 +758,23 @@ export default function PlotBoundaryMap({
           >
             <MapPin className="h-4 w-4 mr-1" />
             {markers.length}
+          </Button>
+        )}
+
+        {/* Show plant labels toggle */}
+        {plantLabels.length > 0 && (
+          <Button
+            size="sm"
+            onClick={() => setShowPlantLabels(!showPlantLabels)}
+            className={`h-9 shadow-md ${
+              showPlantLabels
+                ? 'bg-green-600 hover:bg-green-700 text-white'
+                : 'bg-white hover:bg-gray-100 text-gray-700'
+            }`}
+            title={`${showPlantLabels ? 'Hide' : 'Show'} ${plantLabels.length} plant labels`}
+          >
+            <Leaf className="h-4 w-4 mr-1" />
+            {plantLabels.length}
           </Button>
         )}
 

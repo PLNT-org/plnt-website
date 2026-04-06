@@ -153,6 +153,7 @@ export default function PlotsPage() {
   const [species, setSpecies] = useState<Species[]>([])
   const [orthomosaics, setOrthomosaics] = useState<Orthomosaic[]>([])
   const [markers, setMarkers] = useState<MarkerRegistration[]>([])
+  const [plantLabels, setPlantLabels] = useState<any[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -241,6 +242,31 @@ export default function PlotsPage() {
       setIsLoading(false)
     }
   }
+
+  // Load plant labels when orthomosaic changes
+  useEffect(() => {
+    if (!selectedOrthomosaicId || isDemo || !session?.access_token) {
+      setPlantLabels([])
+      return
+    }
+
+    const loadLabels = async () => {
+      try {
+        const res = await authFetch(
+          `/api/plant-labels?orthomosaicId=${selectedOrthomosaicId}`,
+          { headers: { Authorization: `Bearer ${session.access_token}` } }
+        )
+        if (res.ok) {
+          const data = await res.json()
+          setPlantLabels(data.labels || [])
+        }
+      } catch (err) {
+        console.error('Error loading plant labels:', err)
+      }
+    }
+
+    loadLabels()
+  }, [selectedOrthomosaicId, session, isDemo])
 
   // Handle plot click on map
   const handlePlotClick = useCallback((plot: Plot) => {
@@ -530,6 +556,7 @@ export default function PlotsPage() {
                 existingBoundary={sidebarMode === 'edit' ? selectedPlot?.boundaries : undefined}
                 readOnly={!sidebarOpen || sidebarMode === 'view'}
                 markers={markers}
+                plantLabels={plantLabels}
               />
             </div>
           )}
