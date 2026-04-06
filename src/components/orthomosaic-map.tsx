@@ -297,7 +297,7 @@ export default function OrthomosaicMap({
     if (!showLabels) return
 
     labels.forEach((label) => {
-      const color = getLabelColor(label.label)
+      const color = '#22c55e' // Uniform green for all labels
       const isVerified = label.verified
       const opacity = !isVerified ? 0.7 : 1
 
