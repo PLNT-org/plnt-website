@@ -28,6 +28,7 @@ import {
   BarChart3,
   Camera,
   Focus,
+  CheckCheck,
 } from 'lucide-react'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -1139,6 +1140,44 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
+  // Verify all unverified labels at once
+  const [verifyingAll, setVerifyingAll] = useState(false)
+  const handleVerifyAll = async () => {
+    if (!selectedOrthomosaic || isDemo) return
+
+    const unverifiedCount = labels.filter(l => !l.verified).length
+    if (unverifiedCount === 0) {
+      alert('All labels are already verified')
+      return
+    }
+
+    setVerifyingAll(true)
+    try {
+      const response = await authFetch('/api/plant-labels/verify-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+      })
+      const data = await response.json()
+      if (data.success) {
+        // Update local state
+        setLabels(prev => prev.map(l => ({
+          ...l,
+          verified: true,
+          verified_by: user?.id,
+        })))
+        alert(`Verified ${data.verifiedCount} labels`)
+      } else {
+        alert(data.error || 'Failed to verify all labels')
+      }
+    } catch (err) {
+      console.error('Error verifying all labels:', err)
+      alert('Failed to verify all labels')
+    } finally {
+      setVerifyingAll(false)
+    }
+  }
+
   // Re-sync camera positions from Lightning task
   const handleResyncCameras = async () => {
     if (!selectedOrthomosaic || isDemo) return
@@ -1747,6 +1786,29 @@ export default function OrthomosaicViewerPage() {
                         )}
                       </Button>
                     </div>
+                  )}
+
+                  {labels.length > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="border-green-300 text-green-700 hover:bg-green-50"
+                      onClick={handleVerifyAll}
+                      disabled={verifyingAll || labels.filter(l => !l.verified).length === 0}
+                      title="Verify all unverified labels"
+                    >
+                      {verifyingAll ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                          Verifying...
+                        </>
+                      ) : (
+                        <>
+                          <CheckCheck className="h-4 w-4 mr-1" />
+                          Verify All ({labels.filter(l => !l.verified).length})
+                        </>
+                      )}
+                    </Button>
                   )}
 
                   {plantDetectionResult && (

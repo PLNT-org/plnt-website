@@ -298,16 +298,17 @@ export default function OrthomosaicMap({
 
     labels.forEach((label) => {
       const color = getLabelColor(label.label)
-      const opacity = label.source === 'ai' && !label.verified ? 0.7 : 1
-      const radius = label.source === 'manual' ? 6 : 4 // Manual labels slightly larger
+      const isVerified = label.verified
+      const opacity = !isVerified ? 0.7 : 1
 
       // Use circle markers for better performance and cleaner look
+      // Verified labels get the green dot with white perimeter style
       const marker = L.circleMarker([label.latitude, label.longitude], {
-        radius: radius,
+        radius: isVerified ? 4 : 4,
         fillColor: color,
         fillOpacity: opacity,
-        color: label.source === 'ai' ? '#ffffff' : color,
-        weight: label.source === 'ai' ? 1 : 2,
+        color: isVerified ? '#ffffff' : color,
+        weight: isVerified ? 1 : 2,
         opacity: 1,
       })
 
