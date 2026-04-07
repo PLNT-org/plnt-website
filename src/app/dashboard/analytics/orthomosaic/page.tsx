@@ -1443,6 +1443,57 @@ export default function OrthomosaicViewerPage() {
                 ))}
               </SelectContent>
             </Select>
+          {/* Link Task — shown inline when selected ortho is stuck pending */}
+          {selectedOrthomosaic?.status === 'pending' && (
+              <div className="mt-4 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                <p className="text-xs text-gray-500 mb-2">
+                  Stuck pending? Paste the Lightning task UUID to resume syncing.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Lightning task UUID"
+                    id="link-task-input-inline"
+                    className="flex-1 h-8 px-2 text-sm border rounded"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      const input = document.getElementById('link-task-input-inline') as HTMLInputElement
+                      const taskId = input?.value?.trim()
+                      if (!taskId) {
+                        alert('Please enter a Lightning task UUID')
+                        return
+                      }
+                      try {
+                        const res = await authFetch('/api/admin/link-task', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            orthomosaicId: selectedOrthomosaic.id,
+                            taskId,
+                          }),
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          alert('Task linked! Sync will start automatically.')
+                          await reloadOrthomosaic(selectedOrthomosaic.id)
+                        } else {
+                          alert(data.error || 'Failed to link task')
+                        }
+                      } catch (err) {
+                        console.error('Error linking task:', err)
+                        alert('Failed to link task')
+                      }
+                    }}
+                  >
+                    <Link2 className="h-4 w-4 mr-1" />
+                    Link Task
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
