@@ -1725,7 +1725,22 @@ export default function OrthomosaicViewerPage() {
                       return
                     }
                     try {
-                      // Step 1: Get a signed upload URL from the server
+                      // Step 1: Extract metadata from GeoTIFF client-side
+                      console.log('[Upload] Parsing GeoTIFF metadata...')
+                      const { fromBlob } = await import('geotiff')
+                      const { convertBoundsToWGS84 } = await import('@/lib/geo/convert-bounds')
+                      const tiff = await fromBlob(file)
+                      const image = await tiff.getImage()
+                      const bbox = image.getBoundingBox()
+                      const geoKeys = image.getGeoKeys()
+                      const imgWidth = image.getWidth()
+                      const imgHeight = image.getHeight()
+                      const [resX] = image.getResolution()
+                      const bounds = convertBoundsToWGS84(bbox, geoKeys)
+                      const resolutionCm = Math.abs(resX) * 100
+                      console.log(`[Upload] Bounds: ${JSON.stringify(bounds)}, ${imgWidth}x${imgHeight}, ${resolutionCm.toFixed(1)} cm/px`)
+
+                      // Step 2: Get signed URL and upload TIF to Supabase Storage
                       const urlRes = await authFetch('/api/admin/upload-url', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1740,8 +1755,7 @@ export default function OrthomosaicViewerPage() {
                         return
                       }
 
-                      // Step 2: Upload directly to Supabase Storage via signed URL
-                      alert('Uploading to storage — this may take a few minutes for large files. Please wait...')
+                      alert('Uploading GeoTIFF to storage — this may take a few minutes for large files. Please wait...')
                       const uploadRes = await fetch(urlData.signedUrl, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'image/tiff' },
@@ -1752,23 +1766,96 @@ export default function OrthomosaicViewerPage() {
                         alert('Storage upload failed: ' + errText)
                         return
                       }
+                      console.log('[Upload] TIF uploaded to storage')
 
-                      // Step 3: Process the uploaded file (extract bounds, convert to WebP)
-                      alert('Upload complete! Now processing bounds and converting — please wait...')
-                      const res = await authFetch('/api/admin/process-uploaded-ortho', {
+                      // Step 3: Convert to WebP client-side via canvas (downsampled for map display)
+                      let webpPath: string | null = null
+                      try {
+                        console.log('[Upload] Reading raster data for WebP conversion...')
+                        const maxDim = 4096
+                        const scale = Math.min(1, maxDim / Math.max(imgWidth, imgHeight))
+                        const targetW = Math.round(imgWidth * scale)
+                        const targetH = Math.round(imgHeight * scale)
+
+                        const rasters = await image.readRasters({ width: targetW, height: targetH })
+                        const canvas = document.createElement('canvas')
+                        canvas.width = targetW
+                        canvas.height = targetH
+                        const ctx = canvas.getContext('2d')!
+                        const imageData = ctx.createImageData(targetW, targetH)
+                        const numPixels = targetW * targetH
+                        const numBands = rasters.length
+
+                        const r = rasters[0] as Uint8Array | Uint16Array | Float32Array
+                        const g = numBands >= 3 ? rasters[1] as Uint8Array | Uint16Array | Float32Array : r
+                        const b = numBands >= 3 ? rasters[2] as Uint8Array | Uint16Array | Float32Array : r
+                        const a = numBands >= 4 ? rasters[3] as Uint8Array | Uint16Array | Float32Array : null
+
+                        // Detect if values need normalization (uint16/float data)
+                        const isUint8 = r instanceof Uint8Array
+                        const normalize = (v: number) => isUint8 ? v : Math.min(255, Math.round(v / 256))
+
+                        for (let i = 0; i < numPixels; i++) {
+                          imageData.data[i * 4] = normalize(r[i])
+                          imageData.data[i * 4 + 1] = normalize(g[i])
+                          imageData.data[i * 4 + 2] = normalize(b[i])
+                          imageData.data[i * 4 + 3] = a ? normalize(a[i]) : 255
+                        }
+
+                        ctx.putImageData(imageData, 0, 0)
+
+                        const webpBlob = await new Promise<Blob | null>((resolve) => {
+                          canvas.toBlob((blob) => resolve(blob), 'image/webp', 0.85)
+                        })
+
+                        if (webpBlob) {
+                          console.log(`[Upload] WebP: ${(webpBlob.size / 1024 / 1024).toFixed(1)} MB`)
+                          // Get signed URL for WebP upload
+                          const webpUrlRes = await authFetch('/api/admin/upload-url', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              orthomosaicId: selectedOrthomosaic.id,
+                              filename: 'orthophoto.webp',
+                            }),
+                          })
+                          const webpUrlData = await webpUrlRes.json()
+                          if (webpUrlData.signedUrl) {
+                            const webpUploadRes = await fetch(webpUrlData.signedUrl, {
+                              method: 'PUT',
+                              headers: { 'Content-Type': 'image/webp' },
+                              body: webpBlob,
+                            })
+                            if (webpUploadRes.ok) {
+                              webpPath = webpUrlData.storagePath
+                              console.log('[Upload] WebP uploaded to storage')
+                            }
+                          }
+                        }
+                      } catch (webpErr) {
+                        console.warn('[Upload] WebP conversion failed, using TIF for display:', webpErr)
+                      }
+
+                      // Step 4: Save metadata to DB via lightweight API
+                      const res = await authFetch('/api/admin/save-ortho-metadata', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                           orthomosaicId: selectedOrthomosaic.id,
+                          bounds,
+                          imageWidth: imgWidth,
+                          imageHeight: imgHeight,
+                          resolutionCm,
                           storagePath: urlData.storagePath,
+                          webpPath,
                         }),
                       })
                       const data = await res.json()
                       if (data.success) {
-                        alert('Orthophoto processed successfully!')
+                        alert('Orthophoto uploaded and processed successfully!')
                         await reloadOrthomosaic(selectedOrthomosaic.id)
                       } else {
-                        alert(data.error || 'Processing failed')
+                        alert(data.error || 'Failed to save metadata')
                       }
                     } catch (err) {
                       console.error('Upload error:', err)
