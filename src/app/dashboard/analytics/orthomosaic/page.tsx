@@ -1725,24 +1725,42 @@ export default function OrthomosaicViewerPage() {
                       return
                     }
                     try {
-                      alert('Uploading to storage — this may take a few minutes for large files. Please wait...')
-                      // Upload directly to Supabase Storage (bypasses Vercel body limit)
-                      const storagePath = `${selectedOrthomosaic.id}/orthophoto.tif`
-                      const { error: uploadErr } = await supabase.storage
-                        .from('orthomosaics')
-                        .upload(storagePath, file, { upsert: true })
-                      if (uploadErr) {
-                        alert('Storage upload failed: ' + uploadErr.message)
+                      // Step 1: Get a signed upload URL from the server
+                      const urlRes = await authFetch('/api/admin/upload-url', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          orthomosaicId: selectedOrthomosaic.id,
+                          filename: 'orthophoto.tif',
+                        }),
+                      })
+                      const urlData = await urlRes.json()
+                      if (!urlData.signedUrl) {
+                        alert(urlData.error || 'Failed to get upload URL')
                         return
                       }
+
+                      // Step 2: Upload directly to Supabase Storage via signed URL
+                      alert('Uploading to storage — this may take a few minutes for large files. Please wait...')
+                      const uploadRes = await fetch(urlData.signedUrl, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'image/tiff' },
+                        body: file,
+                      })
+                      if (!uploadRes.ok) {
+                        const errText = await uploadRes.text()
+                        alert('Storage upload failed: ' + errText)
+                        return
+                      }
+
+                      // Step 3: Process the uploaded file (extract bounds, convert to WebP)
                       alert('Upload complete! Now processing bounds and converting — please wait...')
-                      // Call server to extract bounds and convert to WebP
                       const res = await authFetch('/api/admin/process-uploaded-ortho', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                           orthomosaicId: selectedOrthomosaic.id,
-                          storagePath,
+                          storagePath: urlData.storagePath,
                         }),
                       })
                       const data = await res.json()
