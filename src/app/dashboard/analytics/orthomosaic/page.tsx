@@ -1724,21 +1724,33 @@ export default function OrthomosaicViewerPage() {
                       alert('Please select a GeoTIFF file')
                       return
                     }
-                    const formData = new FormData()
-                    formData.append('orthomosaicId', selectedOrthomosaic.id)
-                    formData.append('file', file)
                     try {
-                      alert('Uploading and processing — this may take a few minutes. Please wait...')
-                      const res = await authFetch('/api/admin/upload-orthophoto', {
+                      alert('Uploading to storage — this may take a few minutes for large files. Please wait...')
+                      // Upload directly to Supabase Storage (bypasses Vercel body limit)
+                      const storagePath = `${selectedOrthomosaic.id}/orthophoto.tif`
+                      const { error: uploadErr } = await supabase.storage
+                        .from('orthomosaics')
+                        .upload(storagePath, file, { upsert: true })
+                      if (uploadErr) {
+                        alert('Storage upload failed: ' + uploadErr.message)
+                        return
+                      }
+                      alert('Upload complete! Now processing bounds and converting — please wait...')
+                      // Call server to extract bounds and convert to WebP
+                      const res = await authFetch('/api/admin/process-uploaded-ortho', {
                         method: 'POST',
-                        body: formData,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          orthomosaicId: selectedOrthomosaic.id,
+                          storagePath,
+                        }),
                       })
                       const data = await res.json()
                       if (data.success) {
-                        alert('Orthophoto uploaded successfully!')
+                        alert('Orthophoto processed successfully!')
                         await reloadOrthomosaic(selectedOrthomosaic.id)
                       } else {
-                        alert(data.error || 'Upload failed')
+                        alert(data.error || 'Processing failed')
                       }
                     } catch (err) {
                       console.error('Upload error:', err)
