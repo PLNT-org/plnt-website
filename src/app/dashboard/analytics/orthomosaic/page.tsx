@@ -1703,9 +1703,52 @@ export default function OrthomosaicViewerPage() {
             <div className="mt-3 p-3 bg-white/60 border border-blue-200 rounded-lg">
               <p className="text-xs text-blue-700 mb-2">
                 {selectedOrthomosaic.status === 'syncing'
-                  ? 'Sync stuck? Retry the download or paste a different task UUID.'
+                  ? 'Sync stuck? Upload the file directly, retry the download, or paste a different task UUID.'
                   : 'If processing is stuck, paste the Lightning task UUID to re-link.'}
               </p>
+              <div className="flex items-center gap-2 mb-2">
+                <input
+                  type="file"
+                  accept=".tif,.tiff"
+                  id="upload-orthophoto-processing"
+                  className="text-sm file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-blue-300"
+                  onClick={async () => {
+                    const input = document.getElementById('upload-orthophoto-processing') as HTMLInputElement
+                    const file = input?.files?.[0]
+                    if (!file) {
+                      alert('Please select a GeoTIFF file')
+                      return
+                    }
+                    const formData = new FormData()
+                    formData.append('orthomosaicId', selectedOrthomosaic.id)
+                    formData.append('file', file)
+                    try {
+                      alert('Uploading and processing — this may take a few minutes. Please wait...')
+                      const res = await authFetch('/api/admin/upload-orthophoto', {
+                        method: 'POST',
+                        body: formData,
+                      })
+                      const data = await res.json()
+                      if (data.success) {
+                        alert('Orthophoto uploaded successfully!')
+                        await reloadOrthomosaic(selectedOrthomosaic.id)
+                      } else {
+                        alert(data.error || 'Upload failed')
+                      }
+                    } catch (err) {
+                      console.error('Upload error:', err)
+                      alert('Upload failed — check console for details')
+                    }
+                  }}
+                >
+                  Upload GeoTIFF
+                </Button>
+              </div>
               <div className="flex gap-2">
                 {selectedOrthomosaic.status === 'syncing' && (
                   <Button
@@ -1794,8 +1837,53 @@ export default function OrthomosaicViewerPage() {
                 <div className="flex-1">
                   <div className="font-medium text-amber-900">Orthophoto Unavailable</div>
                   <div className="text-sm text-amber-700">
-                    The orthophoto file has expired on the processing server. Please reprocess this orthomosaic to view it on the map.
+                    The orthophoto file has expired on the processing server. Upload the file directly if you have it, or reprocess the orthomosaic.
                   </div>
+                </div>
+              </div>
+              <div className="mt-3 pt-3 border-t border-amber-200">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="file"
+                    accept=".tif,.tiff"
+                    id="upload-orthophoto-input"
+                    className="text-sm file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-sm file:bg-amber-100 file:text-amber-700 hover:file:bg-amber-200"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-amber-300 text-amber-700 hover:bg-amber-100"
+                    onClick={async () => {
+                      const input = document.getElementById('upload-orthophoto-input') as HTMLInputElement
+                      const file = input?.files?.[0]
+                      if (!file) {
+                        alert('Please select a GeoTIFF file')
+                        return
+                      }
+                      const formData = new FormData()
+                      formData.append('orthomosaicId', selectedOrthomosaic.id)
+                      formData.append('file', file)
+                      try {
+                        alert('Uploading and processing — this may take a few minutes. Please wait...')
+                        const res = await authFetch('/api/admin/upload-orthophoto', {
+                          method: 'POST',
+                          body: formData,
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          alert('Orthophoto uploaded successfully!')
+                          await reloadOrthomosaic(selectedOrthomosaic.id)
+                        } else {
+                          alert(data.error || 'Upload failed')
+                        }
+                      } catch (err) {
+                        console.error('Upload error:', err)
+                        alert('Upload failed — check console for details')
+                      }
+                    }}
+                  >
+                    Upload GeoTIFF
+                  </Button>
                 </div>
               </div>
             </CardContent>
