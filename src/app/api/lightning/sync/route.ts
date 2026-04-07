@@ -4,6 +4,8 @@ import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-
 
 // Allow up to 5 minutes for large orthophoto downloads
 export const maxDuration = 300
+// Max memory for large GeoTIFF processing (Pro plan supports up to 3009 MB)
+export const memory = 3009
 import {
   LightningClient,
   LightningStatusCode,
@@ -82,7 +84,7 @@ export async function POST(request: NextRequest) {
       try {
         // Download the orthophoto from Lightning
         console.log(`Downloading orthophoto for task ${taskId}...`)
-        const orthophotoBuffer = await lightning.downloadOrthophoto(taskId)
+        let orthophotoBuffer = await lightning.downloadOrthophoto(taskId)
 
         // Extract geo bounds from the GeoTIFF before uploading
         try {
@@ -126,39 +128,18 @@ export async function POST(request: NextRequest) {
           console.error('Failed to upload original TIF (non-fatal):', tifUploadError)
         }
 
-        // Convert GeoTIFF to WebP with transparency (black no-data → transparent) for map display
-        console.log('Converting GeoTIFF to WebP with transparency...')
+        // Convert GeoTIFF to WebP for map display
+        // Use Sharp pipeline to avoid loading raw pixels into memory
+        console.log('Converting GeoTIFF to WebP...')
         const sharp = (await import('sharp')).default
-        const img = sharp(Buffer.from(orthophotoBuffer))
-        const metadata = await img.metadata()
+        const webpBuffer = await sharp(Buffer.from(orthophotoBuffer), { limitInputPixels: false })
+          .webp({ quality: 85 })
+          .toBuffer()
 
-        let webpBuffer: Buffer
-        if (metadata.channels && metadata.channels >= 4) {
-          // Already has alpha channel — just convert
-          webpBuffer = await sharp(Buffer.from(orthophotoBuffer))
-            .webp({ quality: 85 })
-            .toBuffer()
-        } else {
-          // Add alpha, make near-black pixels transparent
-          const { data, info } = await sharp(Buffer.from(orthophotoBuffer))
-            .ensureAlpha()
-            .raw()
-            .toBuffer({ resolveWithObject: true })
+        // Free the original buffer to reduce memory pressure
+        orthophotoBuffer = new ArrayBuffer(0)
 
-          for (let i = 0; i < data.length; i += 4) {
-            if (data[i] <= 10 && data[i + 1] <= 10 && data[i + 2] <= 10) {
-              data[i + 3] = 0
-            }
-          }
-
-          webpBuffer = await sharp(data, {
-            raw: { width: info.width, height: info.height, channels: 4 },
-          })
-            .webp({ quality: 85 })
-            .toBuffer()
-        }
-
-        console.log(`Converted: ${(orthophotoBuffer.byteLength / 1024 / 1024).toFixed(1)} MB TIF → ${(webpBuffer.byteLength / 1024 / 1024).toFixed(1)} MB WebP`)
+        console.log(`Converted to WebP: ${(webpBuffer.byteLength / 1024 / 1024).toFixed(1)} MB`)
 
         // Upload WebP to Supabase Storage (for map display)
         const { url } = await storage.uploadOrthophoto(
