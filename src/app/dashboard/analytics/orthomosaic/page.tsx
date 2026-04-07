@@ -1664,26 +1664,121 @@ export default function OrthomosaicViewerPage() {
       )}
 
       {/* Processing Status */}
-      {(selectedOrthomosaic?.status === 'processing' || selectedOrthomosaic?.status === 'syncing') && processingStatus && (
+      {(selectedOrthomosaic?.status === 'processing' || selectedOrthomosaic?.status === 'syncing') && (
         <Card className="border-blue-200 bg-blue-50">
           <CardContent className="py-4">
-            <div className="flex items-center gap-4">
-              <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
-              <div className="flex-1">
-                <div className="font-medium text-blue-900">Processing Orthomosaic</div>
-                <div className="text-sm text-blue-700">
-                  {processingStatus.statusLabel} - {Math.round(processingStatus.progress || 0)}%
+            {processingStatus && (
+              <>
+                <div className="flex items-center gap-4">
+                  <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+                  <div className="flex-1">
+                    <div className="font-medium text-blue-900">Processing Orthomosaic</div>
+                    <div className="text-sm text-blue-700">
+                      {processingStatus.statusLabel} - {Math.round(processingStatus.progress || 0)}%
+                    </div>
+                  </div>
+                  <div className="text-sm text-blue-600">
+                    {processingStatus.imagesCount} images
+                  </div>
+                </div>
+                <div className="mt-3 h-2 bg-blue-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-600 transition-all duration-500"
+                    style={{ width: `${processingStatus.progress || 0}%` }}
+                  />
+                </div>
+              </>
+            )}
+            {!processingStatus && (
+              <div className="flex items-center gap-4 mb-3">
+                <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+                <div className="flex-1">
+                  <div className="font-medium text-blue-900">
+                    {selectedOrthomosaic.status === 'syncing' ? 'Syncing Orthomosaic' : 'Processing Orthomosaic'}
+                  </div>
+                  <div className="text-sm text-blue-700">Checking status...</div>
                 </div>
               </div>
-              <div className="text-sm text-blue-600">
-                {processingStatus.imagesCount} images
+            )}
+            <div className="mt-3 p-3 bg-white/60 border border-blue-200 rounded-lg">
+              <p className="text-xs text-blue-700 mb-2">
+                {selectedOrthomosaic.status === 'syncing'
+                  ? 'Sync stuck? Retry the download or paste a different task UUID.'
+                  : 'If processing is stuck, paste the Lightning task UUID to re-link.'}
+              </p>
+              <div className="flex gap-2">
+                {selectedOrthomosaic.status === 'syncing' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-blue-300"
+                    onClick={async () => {
+                      try {
+                        const res = await authFetch('/api/lightning/sync', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
+                        })
+                        const data = await res.json()
+                        if (data.success) {
+                          alert('Sync completed!')
+                          await reloadOrthomosaic(selectedOrthomosaic.id)
+                        } else {
+                          alert(data.error || 'Sync failed')
+                        }
+                      } catch (err) {
+                        console.error('Retry sync error:', err)
+                        alert('Sync failed — check console for details')
+                      }
+                    }}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-1" />
+                    Retry Sync
+                  </Button>
+                )}
+                <input
+                  type="text"
+                  placeholder="Lightning task UUID"
+                  id="link-task-processing"
+                  className="flex-1 h-8 px-2 text-sm border rounded bg-white"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-blue-300"
+                  onClick={async () => {
+                    const input = document.getElementById('link-task-processing') as HTMLInputElement
+                    const taskId = input?.value?.trim()
+                    if (!taskId) {
+                      alert('Please enter a Lightning task UUID')
+                      return
+                    }
+                    try {
+                      const res = await authFetch('/api/admin/link-task', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          orthomosaicId: selectedOrthomosaic.id,
+                          taskId,
+                        }),
+                      })
+                      const data = await res.json()
+                      if (data.success) {
+                        alert('Task linked! Sync will start automatically.')
+                        await reloadOrthomosaic(selectedOrthomosaic.id)
+                      } else {
+                        alert(data.error || 'Failed to link task')
+                      }
+                    } catch (err) {
+                      console.error('Error linking task:', err)
+                      alert('Failed to link task')
+                    }
+                  }}
+                >
+                  <Link2 className="h-4 w-4 mr-1" />
+                  Link
+                </Button>
               </div>
-            </div>
-            <div className="mt-3 h-2 bg-blue-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-600 transition-all duration-500"
-                style={{ width: `${processingStatus.progress || 0}%` }}
-              />
             </div>
           </CardContent>
         </Card>
