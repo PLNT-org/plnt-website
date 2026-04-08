@@ -694,105 +694,80 @@ export default function OrthomosaicViewerPage() {
     setPlotAggregation(null)
 
     try {
-      const response = await authFetch('/api/plant-detection', {
+      // Start async detection job
+      const response = await authFetch('/api/detection-jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           orthomosaicId: selectedOrthomosaic.id,
-          userId: user?.id,
           confidence_threshold: confidenceThreshold,
-          prompt: 'individual plant',
         }),
       })
 
+      const jobData = await response.json()
+
       if (!response.ok) {
-        const errorData = await response.json()
-        console.error('Detection failed:', errorData.error)
-        alert(errorData.error || 'Plant detection failed')
-        return
+        // If a job is already running, poll that one instead
+        if (response.status === 409 && jobData.jobId) {
+          console.log('[Detection] Resuming existing job:', jobData.jobId)
+        } else {
+          alert(jobData.error || 'Failed to start detection')
+          return
+        }
       }
 
-      // Read NDJSON stream line-by-line
-      const reader = response.body?.getReader()
-      if (!reader) throw new Error('No response body')
+      const jobId = jobData.jobId
+      console.log('[Detection] Job started:', jobId)
 
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let finalResult: Record<string, unknown> | null = null
+      // Poll for progress
+      let completed = false
+      while (!completed) {
+        await new Promise(resolve => setTimeout(resolve, 3000))
 
-      const processLine = (line: string) => {
-        if (!line.trim()) return
-        try {
-          const event = JSON.parse(line)
+        const statusRes = await authFetch(`/api/detection-jobs?jobId=${jobId}`)
+        if (!statusRes.ok) continue
 
-          if (event.type === 'progress') {
-            setDetectionProgress({
-              processedTiles: event.processedTiles,
-              totalTiles: event.totalTiles,
-              detectionsCount: event.detectionsCount,
-              phase: event.phase,
-            })
-          } else if (event.type === 'result') {
-            finalResult = event
-          } else if (event.type === 'error') {
-            console.error('Detection error:', event.error)
-            alert(event.error || 'Plant detection failed')
+        const status = await statusRes.json()
+
+        if (status.progress) {
+          setDetectionProgress({
+            processedTiles: status.progress.processedTiles || 0,
+            totalTiles: status.progress.totalTiles || 0,
+            detectionsCount: status.progress.detectionsCount || 0,
+            phase: status.progress.phase || status.status,
+          })
+        }
+
+        if (status.status === 'completed') {
+          completed = true
+          const result = status.result || {}
+
+          setPlantDetectionResult({
+            totalDetections: result.totalDetections || 0,
+            savedCount: result.savedCount || 0,
+            classCounts: result.classCounts || {},
+            averageConfidence: result.averageConfidence || 0,
+          })
+
+          if (result.totalDetections === 0) {
+            alert('No plants detected. Try lowering the confidence threshold.')
           }
-        } catch {
-          // Skip malformed lines
+
+          // Reload labels
+          const labelsResponse = await authFetch(
+            `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
+            { headers: { Authorization: `Bearer ${session?.access_token}` } }
+          )
+          const labelsData = await labelsResponse.json()
+          if (labelsData.labels) {
+            setLabels(labelsData.labels)
+          }
+
+          await handleAggregateByPlot()
+        } else if (status.status === 'failed') {
+          completed = true
+          alert(status.errorMessage || 'Detection failed')
         }
-      }
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-
-        // Process complete lines
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || '' // Keep incomplete line in buffer
-
-        for (const line of lines) {
-          processLine(line)
-        }
-      }
-
-      // Flush any remaining data in the buffer (the final "result" event)
-      buffer += decoder.decode() // flush TextDecoder
-      if (buffer.trim()) {
-        processLine(buffer)
-      }
-
-      console.log('[Detection] Stream complete. finalResult:', finalResult)
-
-      if (finalResult && finalResult.success) {
-        setPlantDetectionResult({
-          totalDetections: finalResult.totalDetections as number,
-          savedCount: finalResult.savedCount as number,
-          classCounts: finalResult.classCounts as Record<string, number>,
-          averageConfidence: finalResult.averageConfidence as number,
-        })
-
-        if ((finalResult.totalDetections as number) === 0) {
-          alert('No plants detected. Try lowering the confidence threshold in Settings.')
-        }
-
-        // Reload labels to include new AI detections
-        const labelsResponse = await authFetch(
-          `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
-          { headers: { Authorization: `Bearer ${session?.access_token}` } }
-        )
-        const labelsData = await labelsResponse.json()
-        if (labelsData.labels) {
-          setLabels(labelsData.labels)
-        }
-
-        // Automatically aggregate by plot
-        await handleAggregateByPlot()
-      } else if (!finalResult) {
-        console.error('[Detection] No result event received from stream')
-        alert('Plant detection completed but no results were received. Check Vercel logs.')
       }
     } catch (err) {
       console.error('Error running plant detection:', err)
@@ -1260,6 +1235,70 @@ export default function OrthomosaicViewerPage() {
       if (!selectedOrthomosaic || isDemo) return
 
       try {
+        // Check for a running detection job first
+        const jobRes = await authFetch(
+          `/api/detection-jobs?orthomosaicId=${selectedOrthomosaic.id}`
+        )
+        if (jobRes.ok) {
+          const jobData = await jobRes.json()
+          if (jobData.status && !['completed', 'failed'].includes(jobData.status)) {
+            // Resume polling an active job
+            console.log('[Detection] Found active job, resuming poll:', jobData.jobId)
+            setPlantDetecting(true)
+            if (jobData.progress) {
+              setDetectionProgress({
+                processedTiles: jobData.progress.processedTiles || 0,
+                totalTiles: jobData.progress.totalTiles || 0,
+                detectionsCount: jobData.progress.detectionsCount || 0,
+                phase: jobData.progress.phase || jobData.status,
+              })
+            }
+            // Poll until done
+            const pollJob = async () => {
+              let done = false
+              while (!done) {
+                await new Promise(resolve => setTimeout(resolve, 3000))
+                const statusRes = await authFetch(`/api/detection-jobs?jobId=${jobData.jobId}`)
+                if (!statusRes.ok) continue
+                const status = await statusRes.json()
+                if (status.progress) {
+                  setDetectionProgress({
+                    processedTiles: status.progress.processedTiles || 0,
+                    totalTiles: status.progress.totalTiles || 0,
+                    detectionsCount: status.progress.detectionsCount || 0,
+                    phase: status.progress.phase || status.status,
+                  })
+                }
+                if (status.status === 'completed') {
+                  done = true
+                  const result = status.result || {}
+                  setPlantDetectionResult({
+                    totalDetections: result.totalDetections || 0,
+                    savedCount: result.savedCount || 0,
+                    classCounts: result.classCounts || {},
+                    averageConfidence: result.averageConfidence || 0,
+                  })
+                  const labelsResponse = await authFetch(
+                    `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
+                    { headers: { Authorization: `Bearer ${session?.access_token}` } }
+                  )
+                  const labelsData = await labelsResponse.json()
+                  if (labelsData.labels) setLabels(labelsData.labels)
+                  await handleAggregateByPlot()
+                } else if (status.status === 'failed') {
+                  done = true
+                  alert(status.errorMessage || 'Detection failed')
+                }
+              }
+              setPlantDetecting(false)
+              setDetectionProgress(null)
+            }
+            pollJob()
+            return
+          }
+        }
+
+        // No active job — check for existing completed detections
         const response = await authFetch(
           `/api/plant-detection?orthomosaicId=${selectedOrthomosaic.id}`
         )
@@ -1271,7 +1310,6 @@ export default function OrthomosaicViewerPage() {
             classCounts: data.classCounts,
             averageConfidence: data.averageConfidence,
           })
-          // Also load aggregation
           handleAggregateByPlot()
         }
       } catch (err) {

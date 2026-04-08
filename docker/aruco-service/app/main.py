@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import cv2
 import rasterio
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -25,6 +25,7 @@ from .models import (
     SyncOrthoRequest,
     SyncOrthoResponse,
     PlantDetectionRequest,
+    AsyncPlantDetectionRequest,
 )
 from .detector import detect_aruco_markers
 from .georef import (
@@ -509,6 +510,11 @@ async def detect_plants_endpoint(request: PlantDetectionRequest):
     async def generate():
         nonlocal temp_file
         try:
+            import asyncio
+            from .plant_detection import (
+                is_tile_empty, run_tile_inference, apply_nms, pixel_to_gps,
+            )
+
             # Download the GeoTIFF
             yield json.dumps({"type": "status", "message": "Downloading orthomosaic..."}) + "\n"
             temp_file = await download_geotiff(request.geotiff_url)
@@ -518,59 +524,138 @@ async def detect_plants_endpoint(request: PlantDetectionRequest):
             # Load image
             yield json.dumps({"type": "status", "message": "Decoding image..."}) + "\n"
             image, _, _ = load_geotiff_for_detection(temp_file)
+            img_height, img_width = image.shape[:2]
             logger.info(f"Image shape: {image.shape}")
 
-            # Progress callback for streaming
-            async def on_progress(processed, total, detections_count):
-                pass  # We'll yield progress from the main loop instead
+            # Build tile jobs
+            tile_w = request.tile_width
+            tile_h = request.tile_height
+            stride_x = tile_w - request.overlap_x
+            stride_y = tile_h - request.overlap_y
+            allowed_classes = [c.lower() for c in request.include_classes]
 
-            # Track progress via a mutable container
-            progress_state = {"processed": 0, "total": 0, "count": 0}
+            tile_jobs = []
+            skipped = 0
+            for ty in range(0, img_height, stride_y):
+                for tx in range(0, img_width, stride_x):
+                    crop_w = min(tile_w, img_width - tx)
+                    crop_h = min(tile_h, img_height - ty)
+                    if is_tile_empty(image, tx, ty, crop_w, crop_h):
+                        skipped += 1
+                    else:
+                        tile_jobs.append((tx, ty, crop_w, crop_h))
 
-            async def progress_cb(processed, total, count):
-                progress_state["processed"] = processed
-                progress_state["total"] = total
-                progress_state["count"] = count
+            total_tiles = len(tile_jobs)
+            logger.info(f"Tiling: {img_width}x{img_height}, {total_tiles} tiles, {skipped} empty skipped")
 
-            # Run detection
-            yield json.dumps({"type": "status", "message": "Starting detection..."}) + "\n"
+            yield json.dumps({
+                "type": "progress",
+                "processedTiles": 0,
+                "totalTiles": total_tiles,
+                "detectionsCount": 0,
+                "phase": "tiling",
+            }) + "\n"
 
-            detections = await detect_plants(
-                image=image,
-                bounds=request.bounds,
-                roboflow_api_key=request.roboflow_api_key,
-                roboflow_model_id=request.roboflow_model_id,
-                roboflow_api_url=request.roboflow_api_url,
-                confidence_threshold=request.confidence_threshold,
-                include_classes=request.include_classes,
-                tile_w=request.tile_width,
-                tile_h=request.tile_height,
-                overlap_x=request.overlap_x,
-                overlap_y=request.overlap_y,
-                nms_iou_threshold=request.nms_iou_threshold,
-                concurrent_tiles=request.concurrent_tiles,
-                progress_callback=progress_cb,
-            )
+            # Process tiles in batches, streaming progress after each batch
+            all_detections = []
+            processed = 0
+            concurrent = request.concurrent_tiles
+
+            import httpx as httpx_client
+            async with httpx_client.AsyncClient(timeout=60.0) as client:
+                for i in range(0, len(tile_jobs), concurrent):
+                    batch = tile_jobs[i:i + concurrent]
+
+                    async def process_tile(job):
+                        x, y, crop_w, crop_h = job
+                        tile = image[y:y+crop_h, x:x+crop_w]
+                        tile_bgr = cv2.cvtColor(tile, cv2.COLOR_RGB2BGR)
+                        _, png_buf = cv2.imencode(".png", tile_bgr)
+                        tile_png = png_buf.tobytes()
+
+                        predictions = await run_tile_inference(
+                            client, tile_png,
+                            request.roboflow_api_url, request.roboflow_model_id,
+                            request.roboflow_api_key, request.confidence_threshold,
+                        )
+
+                        dets = []
+                        for pred in predictions:
+                            pred_class = (pred.get("class") or "plant").lower()
+                            if pred_class not in allowed_classes:
+                                continue
+                            dets.append({
+                                "x": x + pred["x"],
+                                "y": y + pred["y"],
+                                "width": pred["width"],
+                                "height": pred["height"],
+                                "confidence": pred["confidence"],
+                                "class": pred.get("class", "plant"),
+                            })
+                        return dets
+
+                    results = await asyncio.gather(
+                        *[process_tile(job) for job in batch],
+                        return_exceptions=True,
+                    )
+
+                    for result in results:
+                        if isinstance(result, Exception):
+                            logger.error(f"Tile error: {result}")
+                        else:
+                            all_detections.extend(result)
+
+                    processed += len(batch)
+
+                    # Stream progress after every batch to keep connection alive
+                    yield json.dumps({
+                        "type": "progress",
+                        "processedTiles": processed,
+                        "totalTiles": total_tiles,
+                        "detectionsCount": len(all_detections),
+                        "phase": "tiling",
+                    }) + "\n"
+
+            # NMS
+            yield json.dumps({
+                "type": "progress",
+                "processedTiles": total_tiles,
+                "totalTiles": total_tiles,
+                "detectionsCount": len(all_detections),
+                "phase": "nms",
+            }) + "\n"
+
+            logger.info(f"Detections before NMS: {len(all_detections)}")
+            final_detections = apply_nms(all_detections, request.nms_iou_threshold)
+            logger.info(f"Detections after NMS: {len(final_detections)}")
+
+            # Add GPS coordinates
+            for det in final_detections:
+                gps = pixel_to_gps(det["x"], det["y"], request.bounds, img_width, img_height)
+                det["latitude"] = gps["lat"]
+                det["longitude"] = gps["lng"]
+                det["pixel_x"] = round(det["x"])
+                det["pixel_y"] = round(det["y"])
 
             # Build class counts
             class_counts = {}
             total_confidence = 0.0
-            for det in detections:
+            for det in final_detections:
                 cls = det.get("class", "plant")
                 class_counts[cls] = class_counts.get(cls, 0) + 1
                 total_confidence += det["confidence"]
 
-            avg_confidence = total_confidence / len(detections) if detections else 0
+            avg_confidence = total_confidence / len(final_detections) if final_detections else 0
 
             yield json.dumps({
                 "type": "result",
                 "success": True,
-                "totalDetections": len(detections),
+                "totalDetections": len(final_detections),
                 "classCounts": class_counts,
                 "averageConfidence": avg_confidence,
-                "imageWidth": image.shape[1],
-                "imageHeight": image.shape[0],
-                "detections": detections,
+                "imageWidth": img_width,
+                "imageHeight": img_height,
+                "detections": final_detections,
             }) + "\n"
 
         except Exception as e:
@@ -584,6 +669,225 @@ async def detect_plants_endpoint(request: PlantDetectionRequest):
         generate(),
         media_type="application/x-ndjson",
     )
+
+
+@app.post("/detect-plants-async")
+async def detect_plants_async_endpoint(request: AsyncPlantDetectionRequest, background_tasks: BackgroundTasks):
+    """
+    Start plant detection as a background task.
+
+    Returns immediately with 202 Accepted. The detection runs in the background
+    and writes progress/results directly to Supabase.
+    """
+    background_tasks.add_task(
+        run_async_detection, request
+    )
+
+    return {"accepted": True, "job_id": request.job_id}
+
+
+async def run_async_detection(request: AsyncPlantDetectionRequest):
+    """Background task that runs the full detection pipeline and writes to Supabase."""
+    import asyncio
+    from .plant_detection import is_tile_empty, run_tile_inference, apply_nms, pixel_to_gps
+    from .supabase_client import SupabaseClient
+
+    sb = SupabaseClient(request.supabase_url, request.supabase_service_key)
+    temp_file = None
+
+    try:
+        # Update status: downloading
+        await sb.update_job(request.job_id, {
+            "status": "downloading",
+            "updated_at": "now()",
+        })
+
+        logger.info(f"[AsyncDetect] Job {request.job_id}: downloading GeoTIFF...")
+        temp_file = await download_geotiff(request.geotiff_url)
+        file_size = os.path.getsize(temp_file)
+        logger.info(f"[AsyncDetect] Downloaded: {file_size / 1024 / 1024:.1f} MB")
+
+        # Update status: detecting
+        await sb.update_job(request.job_id, {
+            "status": "detecting",
+            "updated_at": "now()",
+        })
+
+        # Load image
+        image, _, _ = load_geotiff_for_detection(temp_file)
+        img_height, img_width = image.shape[:2]
+        logger.info(f"[AsyncDetect] Image: {img_width}x{img_height}")
+
+        # Build tile jobs
+        tile_w = request.tile_width
+        tile_h = request.tile_height
+        stride_x = tile_w - request.overlap_x
+        stride_y = tile_h - request.overlap_y
+        allowed_classes = [c.lower() for c in request.include_classes]
+
+        tile_jobs = []
+        skipped = 0
+        for ty in range(0, img_height, stride_y):
+            for tx in range(0, img_width, stride_x):
+                crop_w = min(tile_w, img_width - tx)
+                crop_h = min(tile_h, img_height - ty)
+                if is_tile_empty(image, tx, ty, crop_w, crop_h):
+                    skipped += 1
+                else:
+                    tile_jobs.append((tx, ty, crop_w, crop_h))
+
+        total_tiles = len(tile_jobs)
+        logger.info(f"[AsyncDetect] {total_tiles} tiles to process, {skipped} empty skipped")
+
+        await sb.update_job(request.job_id, {
+            "progress": {"processedTiles": 0, "totalTiles": total_tiles, "detectionsCount": 0, "phase": "tiling"},
+            "updated_at": "now()",
+        })
+
+        # Process tiles
+        all_detections = []
+        processed = 0
+        concurrent = request.concurrent_tiles
+
+        import httpx as httpx_client
+        async with httpx_client.AsyncClient(timeout=60.0) as client:
+            for i in range(0, len(tile_jobs), concurrent):
+                batch = tile_jobs[i:i + concurrent]
+
+                async def process_tile(job):
+                    x, y, crop_w, crop_h = job
+                    tile = image[y:y+crop_h, x:x+crop_w]
+                    tile_bgr = cv2.cvtColor(tile, cv2.COLOR_RGB2BGR)
+                    _, png_buf = cv2.imencode(".png", tile_bgr)
+                    tile_png = png_buf.tobytes()
+
+                    predictions = await run_tile_inference(
+                        client, tile_png,
+                        request.roboflow_api_url, request.roboflow_model_id,
+                        request.roboflow_api_key, request.confidence_threshold,
+                    )
+
+                    dets = []
+                    for pred in predictions:
+                        pred_class = (pred.get("class") or "plant").lower()
+                        if pred_class not in allowed_classes:
+                            continue
+                        dets.append({
+                            "x": x + pred["x"],
+                            "y": y + pred["y"],
+                            "width": pred["width"],
+                            "height": pred["height"],
+                            "confidence": pred["confidence"],
+                            "class": pred.get("class", "plant"),
+                        })
+                    return dets
+
+                results = await asyncio.gather(
+                    *[process_tile(job) for job in batch],
+                    return_exceptions=True,
+                )
+
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"[AsyncDetect] Tile error: {result}")
+                    else:
+                        all_detections.extend(result)
+
+                processed += len(batch)
+
+                # Update progress every 5 batches to avoid hammering Supabase
+                if processed % (concurrent * 5) < concurrent or processed >= total_tiles:
+                    await sb.update_job(request.job_id, {
+                        "progress": {
+                            "processedTiles": processed,
+                            "totalTiles": total_tiles,
+                            "detectionsCount": len(all_detections),
+                            "phase": "tiling",
+                        },
+                        "updated_at": "now()",
+                    })
+
+        # NMS
+        logger.info(f"[AsyncDetect] Detections before NMS: {len(all_detections)}")
+        final_detections = apply_nms(all_detections, request.nms_iou_threshold)
+        logger.info(f"[AsyncDetect] Detections after NMS: {len(final_detections)}")
+
+        # Add GPS coordinates
+        for det in final_detections:
+            gps = pixel_to_gps(det["x"], det["y"], request.bounds, img_width, img_height)
+            det["latitude"] = gps["lat"]
+            det["longitude"] = gps["lng"]
+            det["pixel_x"] = round(det["x"])
+            det["pixel_y"] = round(det["y"])
+
+        # Save to DB
+        await sb.update_job(request.job_id, {
+            "status": "saving",
+            "progress": {
+                "processedTiles": total_tiles,
+                "totalTiles": total_tiles,
+                "detectionsCount": len(final_detections),
+                "phase": "saving",
+            },
+            "updated_at": "now()",
+        })
+
+        # Delete existing AI labels
+        await sb.delete_ai_labels(request.orthomosaic_id)
+
+        # Insert new labels
+        labels = [{
+            "orthomosaic_id": request.orthomosaic_id,
+            "user_id": request.user_id,
+            "latitude": det["latitude"],
+            "longitude": det["longitude"],
+            "pixel_x": det["pixel_x"],
+            "pixel_y": det["pixel_y"],
+            "source": "ai",
+            "confidence": det["confidence"],
+            "label": det.get("class", "plant"),
+            "verified": False,
+        } for det in final_detections]
+
+        saved_count = await sb.insert_labels(labels)
+        logger.info(f"[AsyncDetect] Saved {saved_count} of {len(labels)} labels")
+
+        # Build class counts
+        class_counts = {}
+        for det in final_detections:
+            cls = det.get("class", "plant")
+            class_counts[cls] = class_counts.get(cls, 0) + 1
+
+        avg_confidence = (
+            sum(d["confidence"] for d in final_detections) / len(final_detections)
+            if final_detections else 0
+        )
+
+        # Mark completed
+        await sb.update_job(request.job_id, {
+            "status": "completed",
+            "result": {
+                "totalDetections": len(final_detections),
+                "savedCount": saved_count,
+                "classCounts": class_counts,
+                "averageConfidence": round(avg_confidence, 4),
+            },
+            "completed_at": "now()",
+            "updated_at": "now()",
+        })
+
+        logger.info(f"[AsyncDetect] Job {request.job_id} completed: {len(final_detections)} detections")
+
+    except Exception as e:
+        logger.error(f"[AsyncDetect] Job {request.job_id} failed: {str(e)}", exc_info=True)
+        await sb.update_job(request.job_id, {
+            "status": "failed",
+            "error_message": str(e)[:1000],
+            "updated_at": "now()",
+        })
+    finally:
+        if temp_file:
+            cleanup_temp_file(temp_file)
 
 
 @app.post("/sync-ortho", response_model=SyncOrthoResponse)

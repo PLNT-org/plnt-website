@@ -181,3 +181,26 @@ class PlantDetectionRequest(BaseModel):
     nms_iou_threshold: float = Field(default=0.2, description="IoU threshold for NMS")
     concurrent_tiles: int = Field(default=20, description="Number of tiles to process concurrently")
     bounds: dict = Field(..., description="Orthomosaic bounds {west, south, east, north}")
+
+
+class AsyncPlantDetectionRequest(BaseModel):
+    """Request body for async plant detection (runs in background, writes to Supabase)."""
+
+    job_id: str = Field(..., description="Detection job ID for status updates")
+    geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
+    roboflow_api_key: str = Field(...)
+    roboflow_model_id: str = Field(...)
+    roboflow_api_url: str = Field(default="https://serverless.roboflow.com")
+    confidence_threshold: float = Field(default=0.17)
+    include_classes: list[str] = Field(default=["plant", "plants"])
+    tile_width: int = Field(default=500)
+    tile_height: int = Field(default=281)
+    overlap_x: int = Field(default=325)
+    overlap_y: int = Field(default=183)
+    nms_iou_threshold: float = Field(default=0.2)
+    concurrent_tiles: int = Field(default=20)
+    bounds: dict = Field(...)
+    orthomosaic_id: str = Field(...)
+    user_id: str = Field(...)
+    supabase_url: str = Field(...)
+    supabase_service_key: str = Field(...)
