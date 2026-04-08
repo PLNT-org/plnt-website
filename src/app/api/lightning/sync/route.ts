@@ -2,24 +2,21 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
-// Allow up to 5 minutes for large orthophoto downloads
 export const maxDuration = 300
-// Max memory for large GeoTIFF processing (Pro plan supports up to 3009 MB)
-export const memory = 3009
+
 import {
   LightningClient,
   LightningStatusCode,
   isLightningTaskComplete,
   isLightningTaskFailed,
 } from '@/lib/webodm/lightning-client'
-import { getOrthomosaicStorage, BUCKETS } from '@/lib/supabase/storage'
-import { fromArrayBuffer } from 'geotiff'
-import { convertBoundsToWGS84 } from '@/lib/geo/convert-bounds'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
+
+const ARUCO_SERVICE_URL = process.env.ARUCO_SERVICE_URL || 'http://localhost:8001'
 
 export async function POST(request: NextRequest) {
   try {
@@ -79,105 +76,78 @@ export async function POST(request: NextRequest) {
       updated_at: new Date().toISOString(),
     }
 
-    // If completed, download and upload to Supabase Storage
+    // If completed, offload download/conversion to Docker service
     if (newStatus === 'completed') {
       try {
-        // Download the orthophoto from Lightning
-        console.log(`Downloading orthophoto for task ${taskId}...`)
-        let orthophotoBuffer = await lightning.downloadOrthophoto(taskId)
+        const geotiffUrl = lightning.getOrthophotoUrl(taskId)
+        const tifPath = `${orthomosaicId}/orthophoto.tif`
+        const cogPath = `${orthomosaicId}/orthophoto_cog.tif`
 
-        // Extract geo bounds from the GeoTIFF before uploading
-        try {
-          console.log('Extracting bounds from GeoTIFF...')
-          const tiff = await fromArrayBuffer(orthophotoBuffer)
-          const image = await tiff.getImage()
-          const bbox = image.getBoundingBox() // [west, south, east, north] in native CRS
-          const geoKeys = image.getGeoKeys()
-          const width = image.getWidth()
-          const height = image.getHeight()
-          const [resX] = image.getResolution() // meters per pixel
+        // Create signed upload URLs for TIF and COG
+        const [tifUpload, cogUpload] = await Promise.all([
+          supabaseAdmin.storage.from('orthomosaics').createSignedUploadUrl(tifPath, { upsert: true }),
+          supabaseAdmin.storage.from('orthomosaics').createSignedUploadUrl(cogPath, { upsert: true }),
+        ])
 
-          console.log(`GeoTIFF CRS: EPSG:${geoKeys.ProjectedCSTypeGeoKey || geoKeys.GeographicTypeGeoKey || 'unknown'}`)
-          console.log(`Raw bbox: [${bbox.join(', ')}]`)
-
-          // Convert from native CRS (usually UTM) to WGS84 lat/lng for Leaflet
-          updateData.bounds = convertBoundsToWGS84(bbox, geoKeys)
-          updateData.image_width = width
-          updateData.image_height = height
-          // Resolution in cm/pixel (GeoTIFF resolution is in CRS units, usually meters)
-          updateData.resolution_cm = Math.abs(resX) * 100
-
-          console.log(`Bounds: ${JSON.stringify(updateData.bounds)}, ${width}x${height}, ${updateData.resolution_cm.toFixed(1)} cm/px`)
-        } catch (boundsError) {
-          console.error('Could not extract GeoTIFF bounds:', boundsError)
-          // Continue without bounds — the viewer has a fallback
+        if (tifUpload.error || !tifUpload.data || cogUpload.error || !cogUpload.data) {
+          throw new Error('Failed to create signed upload URLs')
         }
 
-        // Upload original GeoTIFF for full-quality plant detection
-        console.log('Uploading original GeoTIFF for detection...')
-        const storage = getOrthomosaicStorage()
-        try {
-          const { url: tifUrl } = await storage.uploadOrthophoto(
-            orthomosaicId,
-            orthophotoBuffer,
-            'orthophoto.tif'
-          )
-          updateData.original_tif_url = tifUrl
-          console.log(`Uploaded original TIF: ${tifUrl} (${(orthophotoBuffer.byteLength / 1024 / 1024).toFixed(1)} MB)`)
-        } catch (tifUploadError) {
-          console.error('Failed to upload original TIF (non-fatal):', tifUploadError)
+        // Call Docker service to download, upload TIF, convert COG, upload COG, extract metadata
+        console.log(`[Sync] Calling Docker service for task ${taskId}...`)
+        const syncRes = await fetch(`${ARUCO_SERVICE_URL}/sync-ortho`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            geotiff_url: geotiffUrl,
+            tif_upload_url: tifUpload.data.signedUrl,
+            cog_upload_url: cogUpload.data.signedUrl,
+          }),
+        })
+
+        if (!syncRes.ok) {
+          throw new Error(`Docker service error: ${syncRes.status}`)
         }
 
-        // Convert GeoTIFF to WebP for map display
-        // Use Sharp pipeline to avoid loading raw pixels into memory
-        console.log('Converting GeoTIFF to WebP...')
-        const sharp = (await import('sharp')).default
-        const webpBuffer = await sharp(Buffer.from(orthophotoBuffer), { limitInputPixels: false })
-          .webp({ quality: 85 })
-          .toBuffer()
+        const syncData = await syncRes.json()
 
-        // Free the original buffer to reduce memory pressure
-        orthophotoBuffer = new ArrayBuffer(0)
+        if (!syncData.success) {
+          throw new Error(syncData.error || 'Sync failed')
+        }
 
-        console.log(`Converted to WebP: ${(webpBuffer.byteLength / 1024 / 1024).toFixed(1)} MB`)
+        // Get public URLs
+        const { data: tifUrlData } = supabaseAdmin.storage.from('orthomosaics').getPublicUrl(tifPath)
+        const { data: cogUrlData } = supabaseAdmin.storage.from('orthomosaics').getPublicUrl(cogPath)
 
-        // Upload WebP to Supabase Storage (for map display)
-        const { url } = await storage.uploadOrthophoto(
-          orthomosaicId,
-          webpBuffer,
-          'orthophoto.webp'
-        )
-
-        console.log(`Uploaded orthophoto to: ${url}`)
-
-        // Update with Supabase URL
-        updateData.orthomosaic_url = url
+        updateData.original_tif_url = tifUrlData.publicUrl
+        updateData.orthomosaic_url = cogUrlData.publicUrl
+        updateData.bounds = syncData.bounds
+        updateData.image_width = syncData.image_width
+        updateData.image_height = syncData.image_height
+        updateData.resolution_cm = syncData.resolution_cm
         updateData.completed_at = new Date().toISOString()
+
+        console.log(`[Sync] Done. TIF: ${syncData.tif_size_mb} MB, COG: ${syncData.cog_size_mb} MB`)
 
         // Try to download corrected camera positions AND reconstruction data from ODM output
         try {
-          console.log('Attempting to download camera positions and reconstruction data...')
+          console.log('[Sync] Fetching camera positions and reconstruction data...')
           const { cameraPositions, reconstructionData } = await lightning.downloadReconstructionAndPositions(taskId)
           if (cameraPositions) {
             updateData.camera_positions = cameraPositions
-            console.log(`Saved ${Object.keys(cameraPositions).length} corrected camera positions`)
-          } else {
-            console.log('Camera positions not available — will use EXIF GPS with offset correction')
+            console.log(`[Sync] Saved ${Object.keys(cameraPositions).length} corrected camera positions`)
           }
           if (reconstructionData) {
             updateData.reconstruction_data = reconstructionData
-            console.log(`Saved reconstruction data: ${Object.keys(reconstructionData.shots).length} shots, ${Object.keys(reconstructionData.cameras).length} cameras`)
-          } else {
-            console.log('Reconstruction data not available — will use EXIF-based projection')
+            console.log(`[Sync] Saved reconstruction data: ${Object.keys(reconstructionData.shots).length} shots`)
           }
         } catch (camErr) {
-          console.error('Failed to fetch camera positions/reconstruction (non-fatal):', camErr)
+          console.error('[Sync] Failed to fetch camera positions (non-fatal):', camErr)
         }
 
-      } catch (uploadError) {
-        console.error('Error uploading to Supabase:', uploadError)
-        // Still mark as completed but note the upload failure
-        updateData.error_message = `Upload to storage failed: ${uploadError instanceof Error ? uploadError.message : 'Unknown error'}`
+      } catch (syncError) {
+        console.error('[Sync] Error:', syncError)
+        updateData.error_message = `Sync failed: ${syncError instanceof Error ? syncError.message : 'Unknown error'}`
         // Keep the Lightning URL as fallback
         updateData.orthomosaic_url = lightning.getOrthophotoUrl(taskId)
       }

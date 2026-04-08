@@ -17,6 +17,10 @@ from .models import (
     HomographyResponse,
     BatchHomographyRequest,
     BatchHomographyResponse,
+    CogConvertRequest,
+    CogConvertResponse,
+    SyncOrthoRequest,
+    SyncOrthoResponse,
 )
 from .detector import detect_aruco_markers
 from .georef import (
@@ -172,15 +176,32 @@ async def compute_image_homography(request: HomographyRequest):
             "north": 0, "south": 0, "east": 0, "west": 0
         }
 
-        # Extract bounds from GeoTIFF
+        # Extract bounds from GeoTIFF, converting to WGS84 if needed
         with rasterio.open(temp_ortho) as src:
             bounds = src.bounds
-            ortho_bounds = {
-                "north": bounds.top,
-                "south": bounds.bottom,
-                "east": bounds.right,
-                "west": bounds.left,
-            }
+            crs = src.crs
+
+            if crs and not crs.is_geographic:
+                # Projected CRS (e.g. UTM) — convert corners to WGS84
+                from rasterio.warp import transform_bounds
+                west, south, east, north = transform_bounds(
+                    crs, "EPSG:4326",
+                    bounds.left, bounds.bottom, bounds.right, bounds.top
+                )
+                logger.info(f"Converted bounds from {crs} to WGS84: N={north:.6f} S={south:.6f} E={east:.6f} W={west:.6f}")
+                ortho_bounds = {
+                    "north": north,
+                    "south": south,
+                    "east": east,
+                    "west": west,
+                }
+            else:
+                ortho_bounds = {
+                    "north": bounds.top,
+                    "south": bounds.bottom,
+                    "east": bounds.right,
+                    "west": bounds.left,
+                }
 
         image_gps = {
             "latitude": request.image_latitude,
@@ -259,15 +280,31 @@ async def compute_batch_homography(request: BatchHomographyRequest):
         ortho_image, _, _ = load_geotiff_for_detection(temp_ortho)
         ortho_bgr = cv2.cvtColor(ortho_image, cv2.COLOR_RGB2BGR)
 
-        # Extract bounds
+        # Extract bounds, converting to WGS84 if needed
         with rasterio.open(temp_ortho) as src:
             bounds = src.bounds
-            ortho_bounds = {
-                "north": bounds.top,
-                "south": bounds.bottom,
-                "east": bounds.right,
-                "west": bounds.left,
-            }
+            crs = src.crs
+
+            if crs and not crs.is_geographic:
+                from rasterio.warp import transform_bounds
+                west, south, east, north = transform_bounds(
+                    crs, "EPSG:4326",
+                    bounds.left, bounds.bottom, bounds.right, bounds.top
+                )
+                logger.info(f"Converted bounds from {crs} to WGS84")
+                ortho_bounds = {
+                    "north": north,
+                    "south": south,
+                    "east": east,
+                    "west": west,
+                }
+            else:
+                ortho_bounds = {
+                    "north": bounds.top,
+                    "south": bounds.bottom,
+                    "east": bounds.right,
+                    "west": bounds.left,
+                }
 
         ortho_h, ortho_w = ortho_bgr.shape[:2]
         logger.info(f"Ortho loaded: {ortho_w}x{ortho_h}")
@@ -363,16 +400,245 @@ async def compute_batch_homography(request: BatchHomographyRequest):
             cleanup_temp_file(f)
 
 
+@app.post("/convert-cog", response_model=CogConvertResponse)
+async def convert_to_cog(request: CogConvertRequest):
+    """
+    Convert a GeoTIFF to Cloud-Optimized GeoTIFF (COG).
+
+    Downloads the source TIF, converts it using GDAL via rasterio,
+    then uploads the COG to the provided signed URL.
+    """
+    temp_input = None
+    temp_output = None
+
+    try:
+        import subprocess
+
+        # Download source GeoTIFF
+        logger.info(f"Downloading source GeoTIFF for COG conversion...")
+        temp_input = await download_geotiff(request.geotiff_url)
+        file_size = os.path.getsize(temp_input)
+        logger.info(f"Downloaded: {file_size / 1024 / 1024:.1f} MB")
+
+        # Create output path
+        temp_output = temp_input.replace(".tif", "_cog.tif")
+
+        # Convert to COG using gdal_translate
+        # JPEG compression for RGB orthomosaics with quality 85
+        # Internal tiling (512x512) and overviews for progressive loading
+        cmd = [
+            "gdal_translate",
+            "-of", "COG",
+            "-co", "COMPRESS=JPEG",
+            "-co", "QUALITY=85",
+            "-co", "OVERVIEWS=AUTO",
+            "-co", "BLOCKSIZE=512",
+            temp_input,
+            temp_output,
+        ]
+
+        logger.info(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+        if result.returncode != 0:
+            logger.error(f"gdal_translate failed: {result.stderr}")
+            return CogConvertResponse(
+                success=False,
+                error=f"GDAL conversion failed: {result.stderr[:500]}",
+            )
+
+        cog_size = os.path.getsize(temp_output)
+        logger.info(f"COG created: {cog_size / 1024 / 1024:.1f} MB")
+
+        # Upload COG to signed URL
+        logger.info("Uploading COG to storage...")
+        import httpx
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            with open(temp_output, "rb") as f:
+                upload_response = await client.put(
+                    request.upload_url,
+                    content=f.read(),
+                    headers={"Content-Type": "image/tiff"},
+                )
+
+            if upload_response.status_code >= 400:
+                error_text = upload_response.text[:500]
+                logger.error(f"Upload failed ({upload_response.status_code}): {error_text}")
+                return CogConvertResponse(
+                    success=False,
+                    error=f"Upload failed: {error_text}",
+                )
+
+        logger.info("COG uploaded successfully")
+        return CogConvertResponse(
+            success=True,
+            file_size_mb=round(cog_size / 1024 / 1024, 1),
+        )
+
+    except subprocess.TimeoutExpired:
+        logger.error("COG conversion timed out after 600s")
+        return CogConvertResponse(success=False, error="Conversion timed out")
+    except Exception as e:
+        logger.error(f"COG conversion failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"COG conversion failed: {str(e)}",
+        )
+    finally:
+        if temp_input:
+            cleanup_temp_file(temp_input)
+        if temp_output:
+            cleanup_temp_file(temp_output)
+
+
+@app.post("/sync-ortho", response_model=SyncOrthoResponse)
+async def sync_orthophoto(request: SyncOrthoRequest):
+    """
+    Full orthophoto sync: download from source, upload TIF, convert to COG, extract metadata.
+
+    Used by the Lightning sync flow to offload all heavy processing from Vercel.
+    Downloads the GeoTIFF from the source URL (e.g. WebODM Lightning), uploads the
+    original TIF to Supabase, converts to COG, uploads the COG, and returns metadata.
+    """
+    temp_input = None
+    temp_cog = None
+
+    try:
+        import subprocess
+        import httpx as httpx_client
+        from rasterio.warp import transform_bounds
+
+        # Step 1: Download source GeoTIFF
+        logger.info(f"Downloading source GeoTIFF...")
+        temp_input = await download_geotiff(request.geotiff_url)
+        tif_size = os.path.getsize(temp_input)
+        logger.info(f"Downloaded: {tif_size / 1024 / 1024:.1f} MB")
+
+        # Step 2: Extract metadata
+        logger.info("Extracting metadata...")
+        bounds_dict = None
+        img_width = 0
+        img_height = 0
+        resolution_cm = 0.0
+
+        with rasterio.open(temp_input) as src:
+            img_width = src.width
+            img_height = src.height
+            res_x = src.res[0]
+            resolution_cm = abs(res_x) * 100
+
+            raw_bounds = src.bounds
+            crs = src.crs
+
+            if crs and not crs.is_geographic:
+                west, south, east, north = transform_bounds(
+                    crs, "EPSG:4326",
+                    raw_bounds.left, raw_bounds.bottom, raw_bounds.right, raw_bounds.top
+                )
+                # Resolution was in projected units (meters), convert correctly
+                resolution_cm = abs(res_x) * 100
+            else:
+                west, south, east, north = raw_bounds.left, raw_bounds.bottom, raw_bounds.right, raw_bounds.top
+                # If geographic CRS, resolution is in degrees — approximate to cm
+                resolution_cm = abs(res_x) * 111320 * 100
+
+            bounds_dict = {"west": west, "south": south, "east": east, "north": north}
+
+        logger.info(f"Metadata: {img_width}x{img_height}, {resolution_cm:.1f} cm/px, bounds={bounds_dict}")
+
+        # Step 3: Upload original TIF to Supabase
+        logger.info("Uploading original TIF to storage...")
+        async with httpx_client.AsyncClient(timeout=600.0) as client:
+            with open(temp_input, "rb") as f:
+                tif_upload_res = await client.put(
+                    request.tif_upload_url,
+                    content=f.read(),
+                    headers={"Content-Type": "image/tiff"},
+                )
+            if tif_upload_res.status_code >= 400:
+                logger.error(f"TIF upload failed: {tif_upload_res.text[:500]}")
+                return SyncOrthoResponse(success=False, error="Failed to upload TIF to storage")
+
+        logger.info("TIF uploaded")
+
+        # Step 4: Convert to COG
+        temp_cog = temp_input.replace(".tif", "_cog.tif")
+        cmd = [
+            "gdal_translate",
+            "-of", "COG",
+            "-co", "COMPRESS=JPEG",
+            "-co", "QUALITY=85",
+            "-co", "OVERVIEWS=AUTO",
+            "-co", "BLOCKSIZE=512",
+            temp_input,
+            temp_cog,
+        ]
+        logger.info(f"Converting to COG...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+        if result.returncode != 0:
+            logger.error(f"gdal_translate failed: {result.stderr}")
+            return SyncOrthoResponse(
+                success=False,
+                error=f"COG conversion failed: {result.stderr[:500]}",
+            )
+
+        cog_size = os.path.getsize(temp_cog)
+        logger.info(f"COG created: {cog_size / 1024 / 1024:.1f} MB")
+
+        # Step 5: Upload COG to Supabase
+        logger.info("Uploading COG to storage...")
+        async with httpx_client.AsyncClient(timeout=600.0) as client:
+            with open(temp_cog, "rb") as f:
+                cog_upload_res = await client.put(
+                    request.cog_upload_url,
+                    content=f.read(),
+                    headers={"Content-Type": "image/tiff"},
+                )
+            if cog_upload_res.status_code >= 400:
+                logger.error(f"COG upload failed: {cog_upload_res.text[:500]}")
+                return SyncOrthoResponse(
+                    success=False,
+                    error="Failed to upload COG to storage",
+                )
+
+        logger.info("COG uploaded successfully")
+
+        return SyncOrthoResponse(
+            success=True,
+            tif_size_mb=round(tif_size / 1024 / 1024, 1),
+            cog_size_mb=round(cog_size / 1024 / 1024, 1),
+            bounds=bounds_dict,
+            image_width=img_width,
+            image_height=img_height,
+            resolution_cm=round(resolution_cm, 2),
+        )
+
+    except Exception as e:
+        logger.error(f"Sync ortho failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Sync ortho failed: {str(e)}",
+        )
+    finally:
+        if temp_input:
+            cleanup_temp_file(temp_input)
+        if temp_cog:
+            cleanup_temp_file(temp_cog)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "service": "ArUco Detection Service",
-        "version": "1.1.0",
+        "version": "1.3.0",
         "endpoints": {
             "health": "/health",
             "detect": "/detect (POST)",
             "homography": "/homography (POST)",
             "homography_batch": "/homography/batch (POST)",
+            "convert_cog": "/convert-cog (POST)",
+            "sync_ortho": "/sync-ortho (POST)",
         }
     }

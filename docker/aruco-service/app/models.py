@@ -117,3 +117,44 @@ class BatchHomographyResponse(BaseModel):
     ortho_width: int = Field(0, description="Full ortho width in pixels")
     ortho_height: int = Field(0, description="Full ortho height in pixels")
     error: Optional[str] = None
+
+
+# ============================================
+# COG Conversion Models
+# ============================================
+
+
+class CogConvertRequest(BaseModel):
+    """Request body for COG conversion."""
+
+    geotiff_url: str = Field(..., description="URL of the source GeoTIFF to convert")
+    upload_url: str = Field(..., description="Signed URL to upload the resulting COG")
+
+
+class CogConvertResponse(BaseModel):
+    """Response from COG conversion."""
+
+    success: bool
+    file_size_mb: float = Field(0, description="Size of the output COG in MB")
+    error: Optional[str] = None
+
+
+class SyncOrthoRequest(BaseModel):
+    """Request body for full orthophoto sync (download, upload TIF, convert COG, extract metadata)."""
+
+    geotiff_url: str = Field(..., description="URL to download the source GeoTIFF from (e.g. Lightning)")
+    tif_upload_url: str = Field(..., description="Signed URL to upload the original TIF")
+    cog_upload_url: str = Field(..., description="Signed URL to upload the COG")
+
+
+class SyncOrthoResponse(BaseModel):
+    """Response from orthophoto sync."""
+
+    success: bool
+    tif_size_mb: float = Field(0, description="Size of the original TIF in MB")
+    cog_size_mb: float = Field(0, description="Size of the COG in MB")
+    bounds: Optional[dict] = Field(None, description="Extracted WGS84 bounds {west, south, east, north}")
+    image_width: int = Field(0, description="Image width in pixels")
+    image_height: int = Field(0, description="Image height in pixels")
+    resolution_cm: float = Field(0, description="Ground resolution in cm/pixel")
+    error: Optional[str] = None

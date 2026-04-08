@@ -1768,75 +1768,7 @@ export default function OrthomosaicViewerPage() {
                       }
                       console.log('[Upload] TIF uploaded to storage')
 
-                      // Step 3: Convert to WebP client-side via canvas (downsampled for map display)
-                      let webpPath: string | null = null
-                      try {
-                        console.log('[Upload] Reading raster data for WebP conversion...')
-                        const maxDim = 4096
-                        const scale = Math.min(1, maxDim / Math.max(imgWidth, imgHeight))
-                        const targetW = Math.round(imgWidth * scale)
-                        const targetH = Math.round(imgHeight * scale)
-
-                        const rasters = await image.readRasters({ width: targetW, height: targetH })
-                        const canvas = document.createElement('canvas')
-                        canvas.width = targetW
-                        canvas.height = targetH
-                        const ctx = canvas.getContext('2d')!
-                        const imageData = ctx.createImageData(targetW, targetH)
-                        const numPixels = targetW * targetH
-                        const numBands = rasters.length
-
-                        const r = rasters[0] as Uint8Array | Uint16Array | Float32Array
-                        const g = numBands >= 3 ? rasters[1] as Uint8Array | Uint16Array | Float32Array : r
-                        const b = numBands >= 3 ? rasters[2] as Uint8Array | Uint16Array | Float32Array : r
-                        const a = numBands >= 4 ? rasters[3] as Uint8Array | Uint16Array | Float32Array : null
-
-                        // Detect if values need normalization (uint16/float data)
-                        const isUint8 = r instanceof Uint8Array
-                        const normalize = (v: number) => isUint8 ? v : Math.min(255, Math.round(v / 256))
-
-                        for (let i = 0; i < numPixels; i++) {
-                          imageData.data[i * 4] = normalize(r[i])
-                          imageData.data[i * 4 + 1] = normalize(g[i])
-                          imageData.data[i * 4 + 2] = normalize(b[i])
-                          imageData.data[i * 4 + 3] = a ? normalize(a[i]) : 255
-                        }
-
-                        ctx.putImageData(imageData, 0, 0)
-
-                        const webpBlob = await new Promise<Blob | null>((resolve) => {
-                          canvas.toBlob((blob) => resolve(blob), 'image/webp', 0.85)
-                        })
-
-                        if (webpBlob) {
-                          console.log(`[Upload] WebP: ${(webpBlob.size / 1024 / 1024).toFixed(1)} MB`)
-                          // Get signed URL for WebP upload
-                          const webpUrlRes = await authFetch('/api/admin/upload-url', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              orthomosaicId: selectedOrthomosaic.id,
-                              filename: 'orthophoto.webp',
-                            }),
-                          })
-                          const webpUrlData = await webpUrlRes.json()
-                          if (webpUrlData.signedUrl) {
-                            const webpUploadRes = await fetch(webpUrlData.signedUrl, {
-                              method: 'PUT',
-                              headers: { 'Content-Type': 'image/webp' },
-                              body: webpBlob,
-                            })
-                            if (webpUploadRes.ok) {
-                              webpPath = webpUrlData.storagePath
-                              console.log('[Upload] WebP uploaded to storage')
-                            }
-                          }
-                        }
-                      } catch (webpErr) {
-                        console.warn('[Upload] WebP conversion failed, using TIF for display:', webpErr)
-                      }
-
-                      // Step 4: Save metadata to DB via lightweight API
+                      // Step 3: Save metadata to DB via lightweight API
                       const res = await authFetch('/api/admin/save-ortho-metadata', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -1847,16 +1779,37 @@ export default function OrthomosaicViewerPage() {
                           imageHeight: imgHeight,
                           resolutionCm,
                           storagePath: urlData.storagePath,
-                          webpPath,
                         }),
                       })
                       const data = await res.json()
-                      if (data.success) {
-                        alert('Orthophoto uploaded and processed successfully!')
-                        await reloadOrthomosaic(selectedOrthomosaic.id)
-                      } else {
+                      if (!data.success) {
                         alert(data.error || 'Failed to save metadata')
+                        return
                       }
+
+                      // Step 4: Trigger COG conversion via Docker service (runs in background)
+                      console.log('[Upload] Triggering COG conversion...')
+                      try {
+                        const cogRes = await authFetch('/api/admin/convert-to-cog', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            orthomosaicId: selectedOrthomosaic.id,
+                            tifStoragePath: urlData.storagePath,
+                          }),
+                        })
+                        const cogData = await cogRes.json()
+                        if (cogData.success) {
+                          console.log(`[Upload] COG created: ${cogData.fileSizeMb} MB`)
+                        } else {
+                          console.warn('[Upload] COG conversion failed:', cogData.error, '— TIF will be used for display')
+                        }
+                      } catch (cogErr) {
+                        console.warn('[Upload] COG conversion unavailable:', cogErr, '— TIF will be used for display')
+                      }
+
+                      alert('Orthophoto uploaded and processed successfully!')
+                      await reloadOrthomosaic(selectedOrthomosaic.id)
                     } catch (err) {
                       console.error('Upload error:', err)
                       alert('Upload failed — check console for details')

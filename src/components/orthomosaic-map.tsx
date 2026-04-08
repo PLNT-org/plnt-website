@@ -208,6 +208,31 @@ export default function OrthomosaicMap({
         })
         orthophotoLayer.addTo(map)
         orthophotoLayerRef.current = orthophotoLayer
+      } else if (orthomosaic.orthomosaic_url.includes('_cog.tif')) {
+        // Cloud-Optimized GeoTIFF — use georaster for progressive tile loading
+        const loadCog = async () => {
+          try {
+            const parseGeoRaster = (await import('georaster')).default
+            const GeoRasterLayer = (await import('georaster-layer-for-leaflet')).default
+            const georaster = await parseGeoRaster(orthomosaic.orthomosaic_url)
+            const cogLayer = new GeoRasterLayer({
+              georaster,
+              opacity: 0.9,
+              resolution: 512,
+            })
+            cogLayer.addTo(map)
+            orthophotoLayerRef.current = cogLayer
+          } catch (err) {
+            console.error('Failed to load COG, falling back to image overlay:', err)
+            const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
+            const imageLayer = L.imageOverlay(orthomosaic.orthomosaic_url, bounds, {
+              opacity: 0.9,
+            }) as any
+            imageLayer.addTo(map)
+            orthophotoLayerRef.current = imageLayer
+          }
+        }
+        loadCog()
       } else {
         // Direct image overlay (Supabase Storage URL, demo image, etc.)
         const bounds: L.LatLngBoundsExpression = [[south, west], [north, east]]
