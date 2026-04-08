@@ -158,3 +158,26 @@ class SyncOrthoResponse(BaseModel):
     image_height: int = Field(0, description="Image height in pixels")
     resolution_cm: float = Field(0, description="Ground resolution in cm/pixel")
     error: Optional[str] = None
+
+
+# ============================================
+# Plant Detection Models
+# ============================================
+
+
+class PlantDetectionRequest(BaseModel):
+    """Request body for plant detection on an orthomosaic."""
+
+    geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
+    roboflow_api_key: str = Field(..., description="Roboflow API key")
+    roboflow_model_id: str = Field(..., description="Roboflow model ID (e.g. project/version)")
+    roboflow_api_url: str = Field(default="https://serverless.roboflow.com", description="Roboflow API URL")
+    confidence_threshold: float = Field(default=0.17, description="Minimum confidence threshold")
+    include_classes: list[str] = Field(default=["plant", "plants"], description="Classes to include")
+    tile_width: int = Field(default=500, description="Tile width in pixels")
+    tile_height: int = Field(default=281, description="Tile height in pixels")
+    overlap_x: int = Field(default=325, description="Horizontal overlap in pixels")
+    overlap_y: int = Field(default=183, description="Vertical overlap in pixels")
+    nms_iou_threshold: float = Field(default=0.2, description="IoU threshold for NMS")
+    concurrent_tiles: int = Field(default=20, description="Number of tiles to process concurrently")
+    bounds: dict = Field(..., description="Orthomosaic bounds {west, south, east, north}")

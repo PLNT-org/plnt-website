@@ -1,12 +1,15 @@
 """FastAPI application for ArUco marker detection service."""
 
+import json
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import cv2
 import rasterio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from .models import (
     DetectionRequest,
@@ -21,6 +24,7 @@ from .models import (
     CogConvertResponse,
     SyncOrthoRequest,
     SyncOrthoResponse,
+    PlantDetectionRequest,
 )
 from .detector import detect_aruco_markers
 from .georef import (
@@ -28,6 +32,7 @@ from .georef import (
     load_geotiff_for_detection,
     cleanup_temp_file,
 )
+from .plant_detection import detect_plants
 from .homography import compute_homography, crop_ortho_by_bounds
 
 
@@ -491,6 +496,96 @@ async def convert_to_cog(request: CogConvertRequest):
             cleanup_temp_file(temp_output)
 
 
+@app.post("/detect-plants")
+async def detect_plants_endpoint(request: PlantDetectionRequest):
+    """
+    Run tiled plant detection on an orthomosaic via Roboflow YOLO.
+
+    Downloads the GeoTIFF, tiles it, sends tiles to Roboflow for inference,
+    runs NMS, and streams NDJSON progress events followed by the final result.
+    """
+    temp_file = None
+
+    async def generate():
+        nonlocal temp_file
+        try:
+            # Download the GeoTIFF
+            yield json.dumps({"type": "status", "message": "Downloading orthomosaic..."}) + "\n"
+            temp_file = await download_geotiff(request.geotiff_url)
+            file_size = os.path.getsize(temp_file)
+            logger.info(f"Downloaded: {file_size / 1024 / 1024:.1f} MB")
+
+            # Load image
+            yield json.dumps({"type": "status", "message": "Decoding image..."}) + "\n"
+            image, _, _ = load_geotiff_for_detection(temp_file)
+            logger.info(f"Image shape: {image.shape}")
+
+            # Progress callback for streaming
+            async def on_progress(processed, total, detections_count):
+                pass  # We'll yield progress from the main loop instead
+
+            # Track progress via a mutable container
+            progress_state = {"processed": 0, "total": 0, "count": 0}
+
+            async def progress_cb(processed, total, count):
+                progress_state["processed"] = processed
+                progress_state["total"] = total
+                progress_state["count"] = count
+
+            # Run detection
+            yield json.dumps({"type": "status", "message": "Starting detection..."}) + "\n"
+
+            detections = await detect_plants(
+                image=image,
+                bounds=request.bounds,
+                roboflow_api_key=request.roboflow_api_key,
+                roboflow_model_id=request.roboflow_model_id,
+                roboflow_api_url=request.roboflow_api_url,
+                confidence_threshold=request.confidence_threshold,
+                include_classes=request.include_classes,
+                tile_w=request.tile_width,
+                tile_h=request.tile_height,
+                overlap_x=request.overlap_x,
+                overlap_y=request.overlap_y,
+                nms_iou_threshold=request.nms_iou_threshold,
+                concurrent_tiles=request.concurrent_tiles,
+                progress_callback=progress_cb,
+            )
+
+            # Build class counts
+            class_counts = {}
+            total_confidence = 0.0
+            for det in detections:
+                cls = det.get("class", "plant")
+                class_counts[cls] = class_counts.get(cls, 0) + 1
+                total_confidence += det["confidence"]
+
+            avg_confidence = total_confidence / len(detections) if detections else 0
+
+            yield json.dumps({
+                "type": "result",
+                "success": True,
+                "totalDetections": len(detections),
+                "classCounts": class_counts,
+                "averageConfidence": avg_confidence,
+                "imageWidth": image.shape[1],
+                "imageHeight": image.shape[0],
+                "detections": detections,
+            }) + "\n"
+
+        except Exception as e:
+            logger.error(f"Plant detection failed: {str(e)}", exc_info=True)
+            yield json.dumps({"type": "error", "error": str(e)}) + "\n"
+        finally:
+            if temp_file:
+                cleanup_temp_file(temp_file)
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+    )
+
+
 @app.post("/sync-ortho", response_model=SyncOrthoResponse)
 async def sync_orthophoto(request: SyncOrthoRequest):
     """
@@ -632,10 +727,11 @@ async def root():
     """Root endpoint with service info."""
     return {
         "service": "ArUco Detection Service",
-        "version": "1.3.0",
+        "version": "1.4.0",
         "endpoints": {
             "health": "/health",
             "detect": "/detect (POST)",
+            "detect_plants": "/detect-plants (POST)",
             "homography": "/homography (POST)",
             "homography_batch": "/homography/batch (POST)",
             "convert_cog": "/convert-cog (POST)",
