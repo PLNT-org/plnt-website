@@ -348,66 +348,7 @@ function DashboardContent() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <Link href="/">
-              <Image 
-                src="/images/plnt-logo.svg" 
-                alt="PLNT Logo" 
-                width={150} 
-                height={50} 
-                className="h-12 w-auto" 
-                priority 
-              />
-            </Link>
-          </div>
-          
-          {/* Navigation Tabs */}
-          <nav className="hidden md:flex space-x-8">
-            <button
-              onClick={() => setActiveTab('overview')}
-              className={`font-medium ${activeTab === 'overview' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
-            >
-              Overview
-            </button>
-            <Link href="/dashboard/plots" className="text-gray-700 hover:text-green-700 font-medium">
-              Maps
-            </Link>
-            <Link href="/dashboard/inventory" className="text-gray-700 hover:text-green-700 font-medium">
-              Inventory
-            </Link>
-            {userRole === 'admin' && (
-              <button
-                onClick={() => setActiveTab('flights')}
-                className={`font-medium ${activeTab === 'flights' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
-              >
-                Flight Plans
-              </button>
-            )}
-          </nav>
-          
-          {/* User Menu */}
-          <div className="flex items-center space-x-3">
-            {userRole === 'admin' && (
-              <Link href="/dashboard/register-marker">
-                <Button className="bg-green-700 hover:bg-green-800 text-white">
-                  <QrCode className="w-4 h-4 mr-2" />
-                  Register Marker
-                </Button>
-              </Link>
-            )}
-
-            <Link href="/dashboard/profile">
-              <Button variant="outline" className="border-green-700 text-green-800 hover:bg-green-50">
-                <UserCircle className="w-5 h-5" />
-              </Button>
-            </Link>
-          </div>
-        </div>
-      </header>
+    <div className="bg-gray-50">
 
       {/* Admin Quick Access (only for admins) */}
       {userRole === 'admin' && (

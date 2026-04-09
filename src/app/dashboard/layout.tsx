@@ -167,13 +167,9 @@ function RegularUserLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const { signOut } = useAuth()
 
-  // Don't show the shared header on the main dashboard page (it has its own)
-  const isDashboardHome = pathname === '/dashboard'
-
   return (
     <div className="min-h-screen bg-gray-50">
-      {!isDashboardHome && (
-        <header className="bg-white shadow-sm border-b">
+      <header className="bg-white shadow-sm border-b">
           <div className="container mx-auto px-4 py-4 flex items-center justify-between">
             <div className="flex items-center space-x-3">
               <Link href="/dashboard">
@@ -191,32 +187,31 @@ function RegularUserLayout({ children }: { children: React.ReactNode }) {
             <nav className="hidden md:flex space-x-8">
               <Link
                 href="/dashboard"
-                className={`font-medium ${pathname === '/dashboard' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
+                className={`text-lg font-medium ${pathname === '/dashboard' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
               >
                 Overview
               </Link>
               <Link
                 href="/dashboard/plots"
-                className={`font-medium ${pathname.startsWith('/dashboard/plots') ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
+                className={`text-lg font-medium ${pathname.startsWith('/dashboard/plots') ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
               >
                 Maps
               </Link>
               <Link
                 href="/dashboard/inventory"
-                className={`font-medium ${pathname.startsWith('/dashboard/inventory') ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
+                className={`text-lg font-medium ${pathname.startsWith('/dashboard/inventory') ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
               >
                 Inventory
               </Link>
             </nav>
 
             <Link href="/dashboard/profile">
-              <Button variant="outline" className="border-green-700 text-green-800 hover:bg-green-50">
+              <Button variant="outline" size="sm" className="border-green-700 text-green-800 hover:bg-green-50">
                 <UserCircle className="w-5 h-5" />
               </Button>
             </Link>
           </div>
-        </header>
-      )}
+      </header>
       {children}
     </div>
   )

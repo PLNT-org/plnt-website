@@ -425,7 +425,7 @@ export default function PlotsPage() {
   }
 
   return (
-    <div className="h-[calc(100vh-64px)] flex flex-col">
+    <div className="h-[calc(100vh-65px)] flex flex-col">
       {/* Header */}
       <div className="flex-shrink-0 p-4 border-b bg-white">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -457,22 +457,9 @@ export default function PlotsPage() {
 
         {/* Filters */}
         <div className="flex flex-wrap items-center justify-between gap-4 mt-4">
-          <div className="flex items-center gap-4">
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[140px]">
-                <SelectValue placeholder="All Status" />
-              </SelectTrigger>
-              <SelectContent className="z-[1100]">
-                <SelectItem value="all">All Status</SelectItem>
-                <SelectItem value="active">Active</SelectItem>
-                <SelectItem value="planning">Planning</SelectItem>
-                <SelectItem value="archived">Archived</SelectItem>
-              </SelectContent>
-            </Select>
-            <span className="text-sm text-gray-500">
-              {filteredPlots.length} plot{filteredPlots.length !== 1 ? 's' : ''}
-            </span>
-          </div>
+          <span className="text-sm text-gray-500">
+            {filteredPlots.length} plot{filteredPlots.length !== 1 ? 's' : ''}
+          </span>
 
           <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
             <Button
