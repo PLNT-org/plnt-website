@@ -148,10 +148,10 @@ export default function AboutPage() {
               <div className="w-32 h-32 bg-gray-200 rounded-full mx-auto mb-4 flex items-center justify-center">
                 <Users className="w-16 h-16 text-gray-400" />
               </div>
-              <h3 className="text-xl font-semibold">Porter</h3>
+              <h3 className="text-xl font-semibold">Porter Comstock</h3>
               <p className="text-gray-600">Founder & CEO</p>
               <p className="text-sm text-gray-500 mt-2">
-                Agricultural technology expert with 10+ years in precision farming
+                Agricultural technology expert with 5+ years in precision farming
               </p>
             </div>
             <div className="text-center">
@@ -206,14 +206,58 @@ export default function AboutPage() {
       </section>
 
       {/* Footer */}
-      <footer className="bg-gray-900 text-white py-12">
+      <footer className="bg-green-900 text-white py-12">
         <div className="container mx-auto px-4">
-          <div className="text-center">
-            <p>&copy; 2024 PLNT Technologies. All rights reserved.</p>
-            <p className="mt-2">
-              <Link href="mailto:porter@plnt.net" className="hover:underline">porter@plnt.net</Link> • 
-              <Link href="tel:+13108900846" className="hover:underline ml-2">(310) 890-0846</Link>
-            </p>
+          <div className="grid md:grid-cols-4 gap-8">
+            <div>
+              <div className="flex items-center space-x-3 mb-4">
+                <Image
+                  src="/images/plnt-logo.svg"
+                  alt="PLNT Logo"
+                  width={150}
+                  height={50}
+                  className="h-12 w-auto brightness-0 invert"
+                  priority
+                />
+              </div>
+              <p className="text-white/70">
+                Advanced drone technology for precision plant counting and nursery analytics.
+              </p>
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold mb-4">Services</h4>
+              <ul className="space-y-2 text-white/70">
+                <li>Plant Counting</li>
+                <li>Plant Count Trends</li>
+                <li>Flight Planning</li>
+                <li>Business Intelligence</li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold mb-4">Technology</h4>
+              <ul className="space-y-2 text-white/70">
+                <li>Drone Integration</li>
+                <li>AI Recognition</li>
+                <li>Weather Monitoring</li>
+                <li>
+                  <Link href="/dashboard" className="hover:text-white">
+                    Flight Planner
+                  </Link>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="text-lg font-semibold mb-4">Support</h4>
+              <ul className="space-y-2 text-white/70">
+                <li>(310) 890-0846</li>
+                <li>porter@plnt.net</li>
+                <li>Documentation</li>
+                <li>Training Videos</li>
+              </ul>
+            </div>
+          </div>
+          <div className="border-t border-green-800 mt-8 pt-8 text-center text-white/70">
+            <p>&copy; 2024-2026 PLNT Network LLC. All rights reserved.</p>
           </div>
         </div>
       </footer>

@@ -476,28 +476,27 @@ export default function PLNTHomepage() {
       </section>
 
       {/* Footer */}
-      <footer className="bg-gray-900 text-white py-12">
+      <footer className="bg-green-900 text-white py-12">
         <div className="container mx-auto px-4">
           <div className="grid md:grid-cols-4 gap-8">
             <div>
               <div className="flex items-center space-x-3 mb-4">
-                <div className="bg-gray-900">
-                  <Image
-                    src="/images/plnt-logo-white.svg"
-                    alt="PLNT Logo"
-                    width={150}
-                    height={50}
-                    className="h-12 w-auto" priority
-                  />
-                </div>
+                <Image
+                  src="/images/plnt-logo.svg"
+                  alt="PLNT Logo"
+                  width={150}
+                  height={50}
+                  className="h-12 w-auto brightness-0 invert"
+                  priority
+                />
               </div>
-              <p className="text-gray-400">
+              <p className="text-white/70">
                 Advanced drone technology for precision plant counting and nursery analytics.
               </p>
             </div>
             <div>
               <h4 className="text-lg font-semibold mb-4">Services</h4>
-              <ul className="space-y-2 text-gray-400">
+              <ul className="space-y-2 text-white/70">
                 <li>Plant Counting</li>
                 <li>Plant Count Trends</li>
                 <li>Flight Planning</li>
@@ -506,7 +505,7 @@ export default function PLNTHomepage() {
             </div>
             <div>
               <h4 className="text-lg font-semibold mb-4">Technology</h4>
-              <ul className="space-y-2 text-gray-400">
+              <ul className="space-y-2 text-white/70">
                 <li>Drone Integration</li>
                 <li>AI Recognition</li>
                 <li>Weather Monitoring</li>
@@ -519,7 +518,7 @@ export default function PLNTHomepage() {
             </div>
             <div>
               <h4 className="text-lg font-semibold mb-4">Support</h4>
-              <ul className="space-y-2 text-gray-400">
+              <ul className="space-y-2 text-white/70">
                 <li>(310) 890-0846</li>
                 <li>porter@plnt.net</li>
                 <li>Documentation</li>
@@ -527,8 +526,8 @@ export default function PLNTHomepage() {
               </ul>
             </div>
           </div>
-          <div className="border-t border-gray-800 mt-8 pt-8 text-center text-gray-400">
-            <p>&copy; 2024 PLNT Technologies. All rights reserved.</p>
+          <div className="border-t border-green-800 mt-8 pt-8 text-center text-white/70">
+            <p>&copy; 2024-2026 PLNT Network LLC. All rights reserved.</p>
           </div>
         </div>
       </footer>
