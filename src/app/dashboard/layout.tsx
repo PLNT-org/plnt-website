@@ -2,13 +2,15 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
+import { useAuth } from '@/lib/auth/auth-context'
 import Link from 'next/link'
+import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import {
   LayoutDashboard, Map, Plane, Upload, BarChart3,
-  Settings, Lock, Database, Brain, Mail, Share2
+  Settings, Lock, Database, Brain, Mail, Share2, LogOut, UserCircle
 } from 'lucide-react'
 
 export default function DashboardLayout({ 
@@ -157,9 +159,64 @@ export default function DashboardLayout({
     )
   }
 
-  // For regular users - no sidebar, just render children
+  // For regular users - shared header with 3 tabs
+  return <RegularUserLayout>{children}</RegularUserLayout>
+}
+
+function RegularUserLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname()
+  const { signOut } = useAuth()
+
+  // Don't show the shared header on the main dashboard page (it has its own)
+  const isDashboardHome = pathname === '/dashboard'
+
   return (
     <div className="min-h-screen bg-gray-50">
+      {!isDashboardHome && (
+        <header className="bg-white shadow-sm border-b">
+          <div className="container mx-auto px-4 py-4 flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <Link href="/dashboard">
+                <Image
+                  src="/images/plnt-logo.svg"
+                  alt="PLNT Logo"
+                  width={150}
+                  height={50}
+                  className="h-12 w-auto"
+                  priority
+                />
+              </Link>
+            </div>
+
+            <nav className="hidden md:flex space-x-8">
+              <Link
+                href="/dashboard"
+                className={`font-medium ${pathname === '/dashboard' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
+              >
+                Overview
+              </Link>
+              <Link
+                href="/dashboard/plots"
+                className={`font-medium ${pathname.startsWith('/dashboard/plots') ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
+              >
+                Maps
+              </Link>
+              <Link
+                href="/dashboard/inventory"
+                className={`font-medium ${pathname.startsWith('/dashboard/inventory') ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
+              >
+                Inventory
+              </Link>
+            </nav>
+
+            <Link href="/dashboard/profile">
+              <Button variant="outline" className="border-green-700 text-green-800 hover:bg-green-50">
+                <UserCircle className="w-5 h-5" />
+              </Button>
+            </Link>
+          </div>
+        </header>
+      )}
       {children}
     </div>
   )

@@ -28,7 +28,7 @@ import {
   Clock, Search, Filter, MoreVertical, Edit, Trash2,
   CheckCircle2, AlertCircle, PlayCircle, FileText,
   Activity, Users, Settings, HelpCircle, LogOut,
-  Home, Map, Eye, Lock, Layers, QrCode, Table2
+  Home, Map, Eye, Lock, Layers, QrCode, Table2, UserCircle
 } from 'lucide-react'
 import Link from 'next/link'
 
@@ -374,36 +374,37 @@ function DashboardContent() {
               Overview
             </button>
             <Link href="/dashboard/plots" className="text-gray-700 hover:text-green-700 font-medium">
-              Plots
+              Maps
             </Link>
             <Link href="/dashboard/inventory" className="text-gray-700 hover:text-green-700 font-medium">
               Inventory
             </Link>
-            <button
-              onClick={() => setActiveTab('flights')}
-              className={`font-medium ${activeTab === 'flights' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
-            >
-              Flight Plans
-            </button>
+            {userRole === 'admin' && (
+              <button
+                onClick={() => setActiveTab('flights')}
+                className={`font-medium ${activeTab === 'flights' ? 'text-green-700' : 'text-gray-700 hover:text-green-700'}`}
+              >
+                Flight Plans
+              </button>
+            )}
           </nav>
           
           {/* User Menu */}
           <div className="flex items-center space-x-3">
-            <Link href="/dashboard/register-marker">
-              <Button className="bg-green-700 hover:bg-green-800 text-white">
-                <QrCode className="w-4 h-4 mr-2" />
-                Register Marker
+            {userRole === 'admin' && (
+              <Link href="/dashboard/register-marker">
+                <Button className="bg-green-700 hover:bg-green-800 text-white">
+                  <QrCode className="w-4 h-4 mr-2" />
+                  Register Marker
+                </Button>
+              </Link>
+            )}
+
+            <Link href="/dashboard/profile">
+              <Button variant="outline" className="border-green-700 text-green-800 hover:bg-green-50">
+                <UserCircle className="w-5 h-5" />
               </Button>
             </Link>
-            
-            <Button 
-              variant="outline" 
-              onClick={() => signOut()}
-              className="text-gray-700 hover:text-red-600"
-            >
-              <LogOut className="w-4 h-4 mr-2" />
-              Sign Out
-            </Button>
           </div>
         </div>
       </header>
@@ -443,48 +444,63 @@ function DashboardContent() {
           {/* Overview Tab */}
           {activeTab === 'overview' && (
             <>
-              {/* Quick Actions - 4 cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-                <Link href="/dashboard/register-marker">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
-                    <CardContent className="pt-6 text-center">
-                      <QrCode className="w-10 h-10 text-pink-600 mb-2 mx-auto" />
-                      <h3 className="font-semibold">Register Marker</h3>
-                      <p className="text-sm text-gray-500 mt-1">Tag plants in field</p>
-                    </CardContent>
-                  </Card>
-                </Link>
-
-                <Link href="/dashboard/orthomosaic">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
-                    <CardContent className="pt-6 text-center">
-                      <Layers className="w-10 h-10 text-teal-600 mb-2 mx-auto" />
-                      <h3 className="font-semibold">Create Orthomosaic</h3>
-                      <p className="text-sm text-gray-500 mt-1">Stitch drone images</p>
-                    </CardContent>
-                  </Card>
-                </Link>
-
-                <Link href="/dashboard/analytics/orthomosaic">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
-                    <CardContent className="pt-6 text-center">
-                      <Map className="w-10 h-10 text-indigo-600 mb-2 mx-auto" />
-                      <h3 className="font-semibold">View Orthomosaics</h3>
-                      <p className="text-sm text-gray-500 mt-1">Label plants on maps</p>
-                    </CardContent>
-                  </Card>
-                </Link>
-
-                <Link href="/dashboard/upload">
-                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
-                    <CardContent className="pt-6 text-center">
-                      <Camera className="w-10 h-10 text-orange-600 mb-2 mx-auto" />
-                      <h3 className="font-semibold">Upload Images</h3>
-                      <p className="text-sm text-gray-500 mt-1">Process drone photos</p>
-                    </CardContent>
-                  </Card>
-                </Link>
+              {/* Greeting */}
+              <div className="mb-8">
+                <h1 className="text-2xl font-semibold text-gray-900">
+                  Hey {(() => {
+                    const name = userProfile?.display_name?.split(' ')[0] || user?.email?.split('@')[0] || 'there'
+                    return name.charAt(0).toUpperCase() + name.slice(1)
+                  })()}!
+                </h1>
+                <p className="text-gray-500 mt-1">
+                  Ready to update your inventory? <Link href="/dashboard/flight-planner" className="text-green-700 hover:text-green-800 underline underline-offset-2">Make a new flight here</Link>.
+                </p>
               </div>
+
+              {/* Quick Actions - admin only */}
+              {userRole === 'admin' && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                  <Link href="/dashboard/register-marker">
+                    <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                      <CardContent className="pt-6 text-center">
+                        <QrCode className="w-10 h-10 text-pink-600 mb-2 mx-auto" />
+                        <h3 className="font-semibold">Register Marker</h3>
+                        <p className="text-sm text-gray-500 mt-1">Tag plants in field</p>
+                      </CardContent>
+                    </Card>
+                  </Link>
+
+                  <Link href="/dashboard/orthomosaic">
+                    <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                      <CardContent className="pt-6 text-center">
+                        <Layers className="w-10 h-10 text-teal-600 mb-2 mx-auto" />
+                        <h3 className="font-semibold">Create Orthomosaic</h3>
+                        <p className="text-sm text-gray-500 mt-1">Stitch drone images</p>
+                      </CardContent>
+                    </Card>
+                  </Link>
+
+                  <Link href="/dashboard/analytics/orthomosaic">
+                    <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                      <CardContent className="pt-6 text-center">
+                        <Map className="w-10 h-10 text-indigo-600 mb-2 mx-auto" />
+                        <h3 className="font-semibold">View Orthomosaics</h3>
+                        <p className="text-sm text-gray-500 mt-1">Label plants on maps</p>
+                      </CardContent>
+                    </Card>
+                  </Link>
+
+                  <Link href="/dashboard/upload">
+                    <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                      <CardContent className="pt-6 text-center">
+                        <Camera className="w-10 h-10 text-orange-600 mb-2 mx-auto" />
+                        <h3 className="font-semibold">Upload Images</h3>
+                        <p className="text-sm text-gray-500 mt-1">Process drone photos</p>
+                      </CardContent>
+                    </Card>
+                  </Link>
+                </div>
+              )}
 
               {/* Inventory Table */}
               <Card>

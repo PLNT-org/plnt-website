@@ -429,21 +429,9 @@ export default function PlotsPage() {
       {/* Header */}
       <div className="flex-shrink-0 p-4 border-b bg-white">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-          <div className="flex items-center gap-6">
-            <Link href="/dashboard">
-              <Image
-                src="/images/plnt-logo.svg"
-                alt="PLNT Logo"
-                width={120}
-                height={40}
-                className="h-10 w-auto"
-                priority
-              />
-            </Link>
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">Plot Management</h1>
-              <p className="text-gray-600">Manage your nursery plots and boundaries</p>
-            </div>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Plot Management</h1>
+            <p className="text-gray-600">Manage your nursery plots and boundaries</p>
           </div>
           <div className="flex items-center gap-2">
             {isDemo && (

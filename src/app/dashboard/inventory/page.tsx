@@ -340,24 +340,9 @@ export default function InventoryPage() {
       <div className="bg-white border-b">
         <div className="container mx-auto px-4 py-4">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-            <div className="flex items-center gap-6">
-              <Link href="/dashboard">
-                <Image
-                  src="/images/plnt-logo.svg"
-                  alt="PLNT Logo"
-                  width={120}
-                  height={40}
-                  className="h-10 w-auto"
-                  priority
-                />
-              </Link>
-              <div>
-                <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-                  <Table2 className="h-6 w-6 text-purple-600" />
-                  Inventory
-                </h1>
-                <p className="text-gray-600">View and manage plant inventory</p>
-              </div>
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
+              <p className="text-gray-600">View and manage plant inventory</p>
             </div>
             <div className="flex items-center gap-2">
               {isDemo && (
