@@ -10,6 +10,11 @@ export const metadata: Metadata = {
   title: "PLNT - AI-Powered Nursery Management",
   description: "Optimize your plant nursery operations with drone surveys and AI plant counting",
   keywords: "plant nursery, drone survey, plant counting, AI, agriculture technology",
+  icons: {
+    icon: "/favicon.png",
+    apple: "/apple-touch-icon.png",
+  },
+
 }
 
 export default function RootLayout({
