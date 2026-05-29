@@ -1,0 +1,26 @@
+{
+  "title": "North Field — Spring 2026",
+  "client_name": "Green Valley Nursery",
+  "allowed_emails": ["client@example.com", "manager@example.com"],
+  "expires_at": null,
+  "zoom": "13-22",
+  "upload_cogs": true,
+  "layers": {
+    "rgb": {
+      "input": "/absolute/path/to/rgb_orthophoto.tif"
+    },
+    "ndvi": {
+      "input": "/absolute/path/to/nir_red_orthophoto.tif",
+      "nir_band": 2,
+      "red_band": 1,
+      "alpha_band": 3,
+      "value_min": -0.1,
+      "value_max": 0.9
+    },
+    "chm": {
+      "input": "/absolute/path/to/canopy_height.tif",
+      "value_min": 0,
+      "value_max": 5
+    }
+  }
+}

@@ -1,0 +1,8 @@
+# Canopy Height color ramp (green -> tan -> brown), 0 .. 5 m display range.
+# Heights above 5 m clamp to the top color. Format: value R G B
+nv 0 0 0 0
+0 26 93 26
+1.25 74 127 74
+2.5 143 188 143
+3.75 222 184 135
+5 139 69 19

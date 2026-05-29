@@ -14,7 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Search, Share2, Copy, Loader2, Check, X, ArrowLeft } from 'lucide-react'
+import { Search, Share2, Copy, Loader2, Check, X, ArrowLeft, Link as LinkIcon } from 'lucide-react'
 import Link from 'next/link'
 
 interface LookedUpUser {
@@ -194,10 +194,16 @@ export default function AdminSharePage() {
             <ArrowLeft className="h-4 w-4" />
           </Button>
         </Link>
-        <div>
+        <div className="flex-1">
           <h1 className="text-2xl font-bold text-gray-900">Share Data</h1>
           <p className="text-sm text-gray-500">Share orthomosaics and copy species lists to client accounts</p>
         </div>
+        <Link href="/dashboard/admin/share-links">
+          <Button variant="outline" size="sm">
+            <LinkIcon className="h-4 w-4 mr-2" />
+            Email-gated links
+          </Button>
+        </Link>
       </div>
 
       {/* User Lookup */}

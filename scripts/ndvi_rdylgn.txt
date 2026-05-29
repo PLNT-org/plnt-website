@@ -1,0 +1,14 @@
+# NDVI color ramp (RdYlGn): red = low/stressed, green = high/healthy.
+# Tuned for the -0.1 .. 0.9 display range. Format: value R G B
+nv 0 0 0 0
+-0.1 165 0 38
+0.0 215 48 39
+0.1 244 109 67
+0.2 253 174 97
+0.3 254 224 139
+0.4 255 255 191
+0.5 217 239 139
+0.6 166 217 106
+0.7 102 189 99
+0.8 26 152 80
+0.9 0 104 55

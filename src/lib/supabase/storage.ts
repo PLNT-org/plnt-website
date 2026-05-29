@@ -6,6 +6,7 @@ export const BUCKETS = {
   ORTHOMOSAICS: 'orthomosaics',
   TILES: 'orthomosaic-tiles',
   FLIGHT_IMAGES: 'flight-images',
+  PROPERTY_SHARES: 'property-shares',
 } as const
 
 /**
