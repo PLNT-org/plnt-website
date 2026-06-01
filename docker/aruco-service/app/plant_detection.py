@@ -58,7 +58,13 @@ def run_tile_inference(model, tile_rgb: np.ndarray, imgsz: int = INFER_IMGSZ, co
     {x, y, width, height} right here at the boundary so everything downstream
     (GPS conversion, Supabase schema, Leaflet rendering) is untouched.
     """
-    r = model.predict(tile_rgb, imgsz=imgsz, conf=conf, verbose=False)[0]
+    # Ultralytics treats a numpy-array input as BGR (OpenCV convention) and flips
+    # it BGR->RGB internally before the network. Our tile comes from rasterio as
+    # RGB, so we hand the model BGR, which Ultralytics flips back to the RGB it was
+    # trained on. Passing RGB directly silently swaps the R/B channels and tanks
+    # recall — measured 1,420 detections (RGB) vs 13,266 (BGR) on the same ortho.
+    tile_bgr = np.ascontiguousarray(tile_rgb[:, :, ::-1])
+    r = model.predict(tile_bgr, imgsz=imgsz, conf=conf, verbose=False)[0]
     if r.boxes is None or len(r.boxes) == 0:
         return []
 
