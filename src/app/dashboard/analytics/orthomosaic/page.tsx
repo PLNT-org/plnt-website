@@ -934,9 +934,14 @@ export default function OrthomosaicViewerPage() {
       Math.abs(selectedOrthomosaic.bounds.west) > 180 ||
       Math.abs(selectedOrthomosaic.bounds.south) > 90
     )
-    // Re-extract if URL is .tif or .jpg (needs WebP with transparency)
-    const needsWebpConversion = selectedOrthomosaic.orthomosaic_url.endsWith('.tif')
+    // Re-extract if URL is .tif or .jpg (needs WebP with transparency) — but skip
+    // when pre-rendered tiles already exist: tiles are the display source, so the
+    // WebP convert is pointless, and retrying a failing convert loops (re-render →
+    // re-fire → still .tif → ...), which flashes the map.
+    const needsWebpConversion = !selectedOrthomosaic.tiles_url && (
+      selectedOrthomosaic.orthomosaic_url.endsWith('.tif')
       || selectedOrthomosaic.orthomosaic_url.endsWith('.jpg')
+    )
     if (!needsBounds && !hasUtmBounds && !needsWebpConversion) return
 
     const extractBounds = async () => {
