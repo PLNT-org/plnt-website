@@ -24,6 +24,8 @@ from .models import (
     AsyncPlantDetectionRequest,
     GenerateTilesRequest,
     GenerateTilesResponse,
+    RecomputeCoordsRequest,
+    RecomputeCoordsResponse,
 )
 from .detector import detect_aruco_markers
 from .georef import (
@@ -258,14 +260,15 @@ async def detect_plants_endpoint(request: PlantDetectionRequest):
 
             # Load image
             yield json.dumps({"type": "status", "message": "Decoding image..."}) + "\n"
-            image, _, _ = load_geotiff_for_detection(temp_file)
-            logger.info(f"Image shape: {image.shape}")
+            image, transform, crs = load_geotiff_for_detection(temp_file)
+            logger.info(f"Image shape: {image.shape}, CRS: {crs}")
 
             # Shared tiling -> inference -> dedup -> georeference pipeline
             async for event in detect_plants_local(
                 app.state.model,
                 image,
-                request.bounds,
+                transform,
+                crs,
                 tile_w=request.tile_width,
                 tile_h=request.tile_height,
                 overlap_x=request.overlap_x,
@@ -331,8 +334,8 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
         })
 
         # Load image
-        image, _, _ = load_geotiff_for_detection(temp_file)
-        logger.info(f"[AsyncDetect] Image: {image.shape[1]}x{image.shape[0]}")
+        image, transform, crs = load_geotiff_for_detection(temp_file)
+        logger.info(f"[AsyncDetect] Image: {image.shape[1]}x{image.shape[0]}, CRS: {crs}")
 
         # Shared tiling -> inference -> dedup -> georeference pipeline.
         # Throttle Supabase progress writes so we don't hammer the DB.
@@ -343,7 +346,8 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
         async for event in detect_plants_local(
             app.state.model,
             image,
-            request.bounds,
+            transform,
+            crs,
             tile_w=request.tile_width,
             tile_h=request.tile_height,
             overlap_x=request.overlap_x,
@@ -695,17 +699,119 @@ async def generate_tiles(request: GenerateTilesRequest):
             shutil.rmtree(tile_dir, ignore_errors=True)
 
 
+@app.post("/recompute-coords", response_model=RecomputeCoordsResponse)
+async def recompute_coords(request: RecomputeCoordsRequest):
+    """Recompute latitude/longitude for an ortho's stored AI plant_labels from
+    their pixel_x/pixel_y using the GeoTIFF affine transform + CRS reprojection.
+
+    Fixes rows written with the old linear-bounds approximation — no re-detection
+    needed (pixel coords are stored). Idempotent (recomputes unconditionally);
+    skips rows whose pixel_x/pixel_y are NULL (those predate pixel storage).
+    """
+    import asyncio
+    import httpx as httpx_client
+    from .plant_detection import pixels_to_wgs84
+
+    temp_file = None
+    try:
+        temp_file = await download_geotiff(request.geotiff_url)
+        _, transform, crs = load_geotiff_for_detection(temp_file)
+        logger.info(f"[Recompute] {request.orthomosaic_id}: CRS={crs}")
+
+        base = request.supabase_url.rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {request.supabase_service_key}",
+            "apikey": request.supabase_service_key,
+        }
+
+        # Fetch all AI labels (paginated) with their pixel coords.
+        rows = []
+        page_size = 1000
+        offset = 0
+        async with httpx_client.AsyncClient(timeout=60.0) as client:
+            while True:
+                r = await client.get(
+                    f"{base}/rest/v1/plant_labels",
+                    headers=headers,
+                    params={
+                        "orthomosaic_id": f"eq.{request.orthomosaic_id}",
+                        "source": "eq.ai",
+                        "select": "id,pixel_x,pixel_y",
+                        "limit": page_size,
+                        "offset": offset,
+                    },
+                )
+                batch = r.json()
+                if not isinstance(batch, list) or not batch:
+                    break
+                rows.extend(batch)
+                if len(batch) < page_size:
+                    break
+                offset += page_size
+
+        with_px = [r for r in rows if r.get("pixel_x") is not None and r.get("pixel_y") is not None]
+        skipped = len(rows) - len(with_px)
+        logger.info(f"[Recompute] {len(rows)} labels, {len(with_px)} with pixels, {skipped} skipped")
+        if not with_px:
+            return RecomputeCoordsResponse(success=True, updated=0, skipped_no_pixels=skipped, crs=str(crs))
+
+        # One batched reprojection for the whole ortho.
+        lngs, lats = pixels_to_wgs84(
+            transform, crs,
+            [r["pixel_x"] for r in with_px],
+            [r["pixel_y"] for r in with_px],
+        )
+
+        updated = 0
+        sem = asyncio.Semaphore(32)
+        async with httpx_client.AsyncClient(timeout=60.0) as client:
+            async def patch_one(row_id, lat, lng):
+                nonlocal updated
+                async with sem:
+                    for attempt in range(3):
+                        try:
+                            rr = await client.patch(
+                                f"{base}/rest/v1/plant_labels",
+                                headers={**headers, "Content-Type": "application/json", "Prefer": "return=minimal"},
+                                params={"id": f"eq.{row_id}"},
+                                json={"latitude": lat, "longitude": lng},
+                            )
+                            if rr.status_code < 300:
+                                updated += 1
+                                return
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.3 * (attempt + 1))
+            await asyncio.gather(*[
+                patch_one(r["id"], lat, lng)
+                for r, lat, lng in zip(with_px, lats, lngs)
+            ])
+
+        logger.info(f"[Recompute] Updated {updated}/{len(with_px)} labels (CRS={crs})")
+        return RecomputeCoordsResponse(
+            success=True, updated=updated, skipped_no_pixels=skipped, crs=str(crs)
+        )
+
+    except Exception as e:
+        logger.error(f"Recompute coords failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Recompute failed: {str(e)}")
+    finally:
+        if temp_file:
+            cleanup_temp_file(temp_file)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "service": "ArUco Detection Service",
-        "version": "1.6.0",
+        "version": "1.7.0",
         "endpoints": {
             "health": "/health",
             "detect": "/detect (POST)",
             "detect_plants": "/detect-plants (POST)",
             "generate_tiles": "/generate-tiles (POST)",
+            "recompute_coords": "/recompute-coords (POST)",
             "convert_cog": "/convert-cog (POST)",
             "sync_ortho": "/sync-ortho (POST)",
         }

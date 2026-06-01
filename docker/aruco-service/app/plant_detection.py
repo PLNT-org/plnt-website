@@ -21,14 +21,31 @@ EMPTY_TILE_THRESHOLD = 0.9
 INFER_IMGSZ = 1280
 
 
-def pixel_to_gps(
-    pixel_x: float, pixel_y: float,
-    bounds: dict, image_width: int, image_height: int,
-) -> dict:
-    """Convert pixel coordinates to GPS coordinates."""
-    lat = bounds["north"] - (pixel_y / image_height) * (bounds["north"] - bounds["south"])
-    lng = bounds["west"] + (pixel_x / image_width) * (bounds["east"] - bounds["west"])
-    return {"lat": lat, "lng": lng}
+def pixels_to_wgs84(transform, crs, pixel_xs, pixel_ys):
+    """Batch-convert pixel (col, row) coords to WGS84 (lngs, lats) using the
+    GeoTIFF's affine transform + a CRS reprojection.
+
+    Correct for ANY source CRS (UTM, etc.). The previous implementation linearly
+    interpolated between the WGS84 corner bounds, which is only exact for an
+    axis-aligned WGS84 raster and drifts by metres toward the edges otherwise.
+    Reprojection is identity when the source is already EPSG:4326.
+    """
+    import rasterio.warp
+    from rasterio.transform import xy as _xy
+
+    if not pixel_xs:
+        return [], []
+    # Affine: pixel (col, row) -> source-CRS (x, y) at each pixel centre.
+    # rasterio.transform.xy takes (transform, rows, cols) — rows first.
+    xs, ys = _xy(transform, list(pixel_ys), list(pixel_xs))
+    if not isinstance(xs, list):  # xy() returns scalars for scalar input
+        xs, ys = [xs], [ys]
+    crs_str = str(crs) if crs is not None else ""
+    if not crs_str or crs_str.lower() == "none":
+        return list(xs), list(ys)  # no CRS — assume transform already yields lng/lat
+    # source CRS -> WGS84; for EPSG:4326 the result is (longitudes, latitudes).
+    lngs, lats = rasterio.warp.transform(crs_str, "EPSG:4326", xs, ys)
+    return list(lngs), list(lats)
 
 
 def is_tile_empty(image: np.ndarray, x: int, y: int, w: int, h: int) -> bool:
@@ -115,7 +132,8 @@ def centroid_dedup(detections: list[dict], r_dedup: int = 22) -> list[dict]:
 async def detect_plants_local(
     model,
     image: np.ndarray,
-    bounds: dict,
+    transform,
+    crs,
     *,
     tile_w: int = 640,
     tile_h: int = 640,
@@ -213,13 +231,19 @@ async def detect_plants_local(
     final_detections = centroid_dedup(all_detections, r_dedup)
     logger.info(f"Detections after dedup (r={r_dedup}): {len(final_detections)}")
 
-    # Pixel -> GPS
-    for det in final_detections:
-        gps = pixel_to_gps(det["x"], det["y"], bounds, img_width, img_height)
-        det["latitude"] = gps["lat"]
-        det["longitude"] = gps["lng"]
-        det["pixel_x"] = round(det["x"])
-        det["pixel_y"] = round(det["y"])
+    # Pixel -> WGS84 via the GeoTIFF affine transform + CRS reprojection, in one
+    # batched call (correct for projected sources like UTM; the old linear-bounds
+    # interpolation drifted by metres toward the edges).
+    lngs, lats = pixels_to_wgs84(
+        transform, crs,
+        [d["x"] for d in final_detections],
+        [d["y"] for d in final_detections],
+    )
+    for d, lng, lat in zip(final_detections, lngs, lats):
+        d["latitude"] = lat
+        d["longitude"] = lng
+        d["pixel_x"] = round(d["x"])
+        d["pixel_y"] = round(d["y"])
 
     class_counts: dict[str, int] = {}
     total_confidence = 0.0
