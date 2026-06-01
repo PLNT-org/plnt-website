@@ -833,9 +833,11 @@ async def crop_to_boundary(request: CropToBoundaryRequest):
             )
 
         cropped = temp_src.replace(".tif", "_cropped.tif")
+        # The GeoJSON cutline is WGS84 (CRS84); gdalwarp auto-reprojects it to the
+        # raster's CRS. (No -cutline_srs flag — not supported by this GDAL.)
         warp_cmd = [
             "gdalwarp", "-cutline", cutline, "-crop_to_cutline", "-dstalpha",
-            "-cutline_srs", "EPSG:4326", "-of", "GTiff",
+            "-of", "GTiff",
             "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", "-overwrite",
             temp_src, cropped,
         ]
@@ -921,7 +923,7 @@ async def root():
     """Root endpoint with service info."""
     return {
         "service": "ArUco Detection Service",
-        "version": "1.8.0",
+        "version": "1.8.1",
         "endpoints": {
             "health": "/health",
             "detect": "/detect (POST)",
