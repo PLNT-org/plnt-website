@@ -162,6 +162,16 @@ export default function OrthomosaicMap({
     const { north, south, east, west } = orthomosaic.bounds
     const center: [number, number] = [(north + south) / 2, (east + west) / 2]
 
+    // Deepest tile level that actually exists: gdal2tiles stops at the ortho's
+    // native resolution. Past this, Leaflet should upscale the deepest tiles
+    // (blurry) rather than request non-existent tiles, which render as gray.
+    // Derived from resolution_cm; floored so we never overshoot the real max.
+    const nativeResM = (orthomosaic.resolution_cm && orthomosaic.resolution_cm > 0
+      ? orthomosaic.resolution_cm : 2) / 100
+    const orthoMaxNativeZoom = Math.min(22, Math.max(16, Math.floor(
+      Math.log2((156543.03 * Math.cos((center[0] * Math.PI) / 180)) / nativeResM)
+    )))
+
     const map = L.map(mapContainerRef.current, {
       center,
       zoom: 18,
@@ -175,6 +185,7 @@ export default function OrthomosaicMap({
       {
         attribution: 'Imagery &copy; Google',
         maxZoom: 24,
+        maxNativeZoom: 20, // Google satellite thins out beyond ~20; upscale past it
       }
     )
     satelliteLayer.addTo(map)
@@ -186,6 +197,7 @@ export default function OrthomosaicMap({
       const decodedTilesUrl = decodeURIComponent(orthomosaic.tiles_url)
       const orthophotoLayer = L.tileLayer(decodedTilesUrl, {
         maxZoom: 24,
+        maxNativeZoom: orthoMaxNativeZoom, // upscale past native res instead of going gray
         minZoom: 10,
         opacity: 0.9,
         bounds: [[south, west], [north, east]],
