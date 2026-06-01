@@ -1,0 +1,13 @@
+# Cloud Build upload-context ignore rules.
+#
+# IMPORTANT: When this file exists, `gcloud builds submit` uses it INSTEAD of
+# the repo .gitignore. The root .gitignore excludes weights/*.pt; if gcloud
+# fell back to that, the model would be dropped from the build context and the
+# Dockerfile's `COPY weights/plnt_v3.pt` would fail. By listing only junk here
+# (and NOT *.pt), the weights file is included in the upload.
+
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+README.md

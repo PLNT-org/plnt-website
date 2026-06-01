@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
+import { getArucoAuthHeaders } from '@/lib/aruco/auth'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -8,9 +9,6 @@ const supabase = createClient(
 )
 
 const ARUCO_SERVICE_URL = process.env.ARUCO_SERVICE_URL || 'http://localhost:8001'
-const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY
-const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID
-const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
 
 // POST: Create a new detection job and kick it off in Docker
 export async function POST(request: NextRequest) {
@@ -21,16 +19,12 @@ export async function POST(request: NextRequest) {
   const {
     orthomosaicId,
     method = 'orthomosaic',
-    confidence_threshold = 0.17,
+    confidence_threshold = 0.25,
     include_classes = ['plant', 'plants'],
   } = body
 
   if (!orthomosaicId) {
     return NextResponse.json({ error: 'orthomosaicId is required' }, { status: 400 })
-  }
-
-  if (!ROBOFLOW_API_KEY || !ROBOFLOW_MODEL_ID) {
-    return NextResponse.json({ error: 'Roboflow API not configured' }, { status: 500 })
   }
 
   const ownershipError = await verifyOrthomosaicOwnership(supabase, orthomosaicId, user.id, isAdmin)
@@ -88,13 +82,10 @@ export async function POST(request: NextRequest) {
 
   fetch(`${ARUCO_SERVICE_URL}/detect-plants-async`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await getArucoAuthHeaders(ARUCO_SERVICE_URL)) },
     body: JSON.stringify({
       job_id: job.id,
       geotiff_url: orthoUrl,
-      roboflow_api_key: ROBOFLOW_API_KEY,
-      roboflow_model_id: ROBOFLOW_MODEL_ID,
-      roboflow_api_url: ROBOFLOW_API_URL,
       confidence_threshold,
       include_classes,
       bounds: orthomosaic.bounds,

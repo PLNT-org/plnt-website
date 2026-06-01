@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Model weights (large, distributed out of band)
+docker/aruco-service/weights/*.pt
+
+# GCP service account key (secret — never commit; add to Vercel env instead)
+gcp-sa-key.json

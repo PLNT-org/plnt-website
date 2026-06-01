@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
+import { getArucoAuthHeaders } from '@/lib/aruco/auth'
 
 // Allow up to 5 minutes for large orthomosaics
 export const maxDuration = 300
@@ -13,12 +14,9 @@ const supabase = createClient(
 
 const ARUCO_SERVICE_URL = process.env.ARUCO_SERVICE_URL || 'http://localhost:8001'
 
-// Roboflow API configuration
-const ROBOFLOW_API_KEY = process.env.ROBOFLOW_API_KEY
-const ROBOFLOW_MODEL_ID = process.env.ROBOFLOW_MODEL_ID
-const ROBOFLOW_API_URL = process.env.ROBOFLOW_API_URL || 'https://serverless.roboflow.com'
-
-const DEFAULT_CONFIDENCE = 0.17
+// Detection runs the local plnt_v3 model inside the detection service.
+// 0.25 is the validated operating point (see docker/aruco-service).
+const DEFAULT_CONFIDENCE = 0.25
 
 // POST: Run plant detection on an orthomosaic via Docker service (streams NDJSON progress)
 export async function POST(request: NextRequest) {
@@ -44,13 +42,6 @@ export async function POST(request: NextRequest) {
 
   if (!orthomosaicId) {
     return NextResponse.json({ error: 'orthomosaicId is required' }, { status: 400 })
-  }
-
-  if (!ROBOFLOW_API_KEY || !ROBOFLOW_MODEL_ID) {
-    return NextResponse.json(
-      { error: 'Roboflow API not configured. Please set ROBOFLOW_API_KEY and ROBOFLOW_MODEL_ID environment variables.' },
-      { status: 500 }
-    )
   }
 
   // Fetch orthomosaic metadata
@@ -94,12 +85,9 @@ export async function POST(request: NextRequest) {
         // Call Docker service
         const detectRes = await fetch(`${ARUCO_SERVICE_URL}/detect-plants`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(await getArucoAuthHeaders(ARUCO_SERVICE_URL)) },
           body: JSON.stringify({
             geotiff_url: orthoUrl,
-            roboflow_api_key: ROBOFLOW_API_KEY,
-            roboflow_model_id: ROBOFLOW_MODEL_ID,
-            roboflow_api_url: ROBOFLOW_API_URL,
             confidence_threshold,
             include_classes,
             bounds: orthomosaic.bounds,

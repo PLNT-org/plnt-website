@@ -16,10 +16,6 @@ from .models import (
     DetectionResponse,
     DetectedMarker,
     HealthResponse,
-    HomographyRequest,
-    HomographyResponse,
-    BatchHomographyRequest,
-    BatchHomographyResponse,
     CogConvertRequest,
     CogConvertResponse,
     SyncOrthoRequest,
@@ -33,8 +29,12 @@ from .georef import (
     load_geotiff_for_detection,
     cleanup_temp_file,
 )
-from .plant_detection import detect_plants
-from .homography import compute_homography, crop_ortho_by_bounds
+from .plant_detection import detect_plants_local
+
+from ultralytics import YOLO
+
+# Path to the bundled plnt_v3 weights (override with WEIGHTS_PATH env var)
+WEIGHTS_PATH = os.environ.get("WEIGHTS_PATH", "/app/weights/plnt_v3.pt")
 
 
 # Configure logging
@@ -51,6 +51,10 @@ async def lifespan(app: FastAPI):
     logger.info("ArUco Detection Service starting up")
     logger.info(f"OpenCV version: {cv2.__version__}")
     logger.info(f"Rasterio version: {rasterio.__version__}")
+    # Load the plant-detection model once at boot (not per request).
+    logger.info(f"Loading plant detection model: {WEIGHTS_PATH}")
+    app.state.model = YOLO(WEIGHTS_PATH)
+    logger.info("Plant detection model loaded")
     yield
     logger.info("ArUco Detection Service shutting down")
 
@@ -138,272 +142,6 @@ async def detect_markers(request: DetectionRequest):
         if temp_file:
             cleanup_temp_file(temp_file)
             logger.info(f"Cleaned up temp file: {temp_file}")
-
-
-@app.post("/homography", response_model=HomographyResponse)
-async def compute_image_homography(request: HomographyRequest):
-    """
-    Compute a homography matrix mapping raw drone image pixels to orthomosaic pixels.
-
-    Downloads both images, crops the ortho to the GPS region of the raw image,
-    runs SIFT feature matching, and returns the 3x3 homography matrix plus the
-    crop offset so the caller can map detections to full-ortho pixel coordinates.
-    """
-    temp_ortho = None
-    temp_raw = None
-
-    try:
-        import numpy as np
-
-        # Download both files
-        logger.info(f"Downloading ortho: {request.geotiff_url[:80]}...")
-        temp_ortho = await download_geotiff(request.geotiff_url)
-
-        logger.info(f"Downloading raw image: {request.raw_image_url[:80]}...")
-        temp_raw = await download_geotiff(request.raw_image_url)
-
-        # Load ortho
-        ortho_image, _, _ = load_geotiff_for_detection(temp_ortho)
-        logger.info(f"Ortho loaded: {ortho_image.shape}")
-
-        # Load raw image with OpenCV (not rasterio — it's a regular JPEG)
-        raw_image = cv2.imread(temp_raw, cv2.IMREAD_COLOR)
-        if raw_image is None:
-            return HomographyResponse(
-                success=False, error="Failed to decode raw image"
-            )
-        logger.info(f"Raw image loaded: {raw_image.shape}")
-
-        # Convert ortho from RGB to BGR for OpenCV
-        ortho_bgr = cv2.cvtColor(ortho_image, cv2.COLOR_RGB2BGR)
-
-        # Crop ortho to the approximate GPS region
-        ortho_bounds = {
-            "north": 0, "south": 0, "east": 0, "west": 0
-        }
-
-        # Extract bounds from GeoTIFF, converting to WGS84 if needed
-        with rasterio.open(temp_ortho) as src:
-            bounds = src.bounds
-            crs = src.crs
-
-            if crs and not crs.is_geographic:
-                # Projected CRS (e.g. UTM) — convert corners to WGS84
-                from rasterio.warp import transform_bounds
-                west, south, east, north = transform_bounds(
-                    crs, "EPSG:4326",
-                    bounds.left, bounds.bottom, bounds.right, bounds.top
-                )
-                logger.info(f"Converted bounds from {crs} to WGS84: N={north:.6f} S={south:.6f} E={east:.6f} W={west:.6f}")
-                ortho_bounds = {
-                    "north": north,
-                    "south": south,
-                    "east": east,
-                    "west": west,
-                }
-            else:
-                ortho_bounds = {
-                    "north": bounds.top,
-                    "south": bounds.bottom,
-                    "east": bounds.right,
-                    "west": bounds.left,
-                }
-
-        image_gps = {
-            "latitude": request.image_latitude,
-            "longitude": request.image_longitude,
-        }
-        footprint = (request.footprint_width_m, request.footprint_height_m)
-
-        crop, offset_x, offset_y = crop_ortho_by_bounds(
-            ortho_bgr, ortho_bounds, image_gps, footprint,
-            padding_factor=request.padding_factor,
-        )
-
-        if crop is None:
-            return HomographyResponse(
-                success=False,
-                error="Raw image GPS falls outside orthomosaic bounds",
-            )
-
-        logger.info(
-            f"Ortho crop: {crop.shape} at offset ({offset_x}, {offset_y})"
-        )
-
-        # Compute homography
-        result = compute_homography(raw_image, crop)
-
-        if result is None:
-            return HomographyResponse(
-                success=False,
-                error="Feature matching failed — not enough matches between raw image and ortho",
-            )
-
-        return HomographyResponse(
-            success=True,
-            homography=result["homography"],
-            crop_offset_x=offset_x,
-            crop_offset_y=offset_y,
-            crop_width=crop.shape[1],
-            crop_height=crop.shape[0],
-            good_matches=result["good_matches"],
-            inlier_count=result["inlier_count"],
-            inlier_ratio=result["inlier_ratio"],
-        )
-
-    except Exception as e:
-        logger.error(f"Homography computation failed: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Homography computation failed: {str(e)}",
-        )
-
-    finally:
-        if temp_ortho:
-            cleanup_temp_file(temp_ortho)
-        if temp_raw:
-            cleanup_temp_file(temp_raw)
-
-
-@app.post("/homography/batch", response_model=BatchHomographyResponse)
-async def compute_batch_homography(request: BatchHomographyRequest):
-    """
-    Compute homography matrices for multiple raw images against one orthomosaic.
-
-    Downloads the ortho once, then processes each raw image. Much more efficient
-    than calling /homography individually for each image.
-    """
-    temp_ortho = None
-    temp_files: list[str] = []
-
-    try:
-        import numpy as np
-
-        # Download and load ortho once
-        logger.info(f"Downloading ortho for batch ({len(request.images)} images)...")
-        temp_ortho = await download_geotiff(request.geotiff_url)
-
-        ortho_image, _, _ = load_geotiff_for_detection(temp_ortho)
-        ortho_bgr = cv2.cvtColor(ortho_image, cv2.COLOR_RGB2BGR)
-
-        # Extract bounds, converting to WGS84 if needed
-        with rasterio.open(temp_ortho) as src:
-            bounds = src.bounds
-            crs = src.crs
-
-            if crs and not crs.is_geographic:
-                from rasterio.warp import transform_bounds
-                west, south, east, north = transform_bounds(
-                    crs, "EPSG:4326",
-                    bounds.left, bounds.bottom, bounds.right, bounds.top
-                )
-                logger.info(f"Converted bounds from {crs} to WGS84")
-                ortho_bounds = {
-                    "north": north,
-                    "south": south,
-                    "east": east,
-                    "west": west,
-                }
-            else:
-                ortho_bounds = {
-                    "north": bounds.top,
-                    "south": bounds.bottom,
-                    "east": bounds.right,
-                    "west": bounds.left,
-                }
-
-        ortho_h, ortho_w = ortho_bgr.shape[:2]
-        logger.info(f"Ortho loaded: {ortho_w}x{ortho_h}")
-
-        results: list[HomographyResponse] = []
-
-        for i, img_spec in enumerate(request.images):
-            temp_raw = None
-            try:
-                raw_url = img_spec["raw_image_url"]
-                lat = img_spec["latitude"]
-                lon = img_spec["longitude"]
-                fw = img_spec["footprint_width_m"]
-                fh = img_spec["footprint_height_m"]
-
-                logger.info(f"[{i+1}/{len(request.images)}] Processing {raw_url.split('/')[-1]}...")
-
-                # Download raw image
-                temp_raw = await download_geotiff(raw_url)
-                temp_files.append(temp_raw)
-
-                raw_image = cv2.imread(temp_raw, cv2.IMREAD_COLOR)
-                if raw_image is None:
-                    results.append(HomographyResponse(
-                        success=False, error="Failed to decode raw image"
-                    ))
-                    continue
-
-                # Crop ortho
-                crop, offset_x, offset_y = crop_ortho_by_bounds(
-                    ortho_bgr, ortho_bounds,
-                    {"latitude": lat, "longitude": lon},
-                    (fw, fh),
-                    padding_factor=request.padding_factor,
-                )
-
-                if crop is None:
-                    results.append(HomographyResponse(
-                        success=False,
-                        error="Image GPS falls outside orthomosaic bounds",
-                    ))
-                    continue
-
-                # Compute homography
-                result = compute_homography(raw_image, crop)
-
-                if result is None:
-                    results.append(HomographyResponse(
-                        success=False,
-                        error="Feature matching failed",
-                    ))
-                    continue
-
-                results.append(HomographyResponse(
-                    success=True,
-                    homography=result["homography"],
-                    crop_offset_x=offset_x,
-                    crop_offset_y=offset_y,
-                    crop_width=crop.shape[1],
-                    crop_height=crop.shape[0],
-                    good_matches=result["good_matches"],
-                    inlier_count=result["inlier_count"],
-                    inlier_ratio=result["inlier_ratio"],
-                ))
-
-            except Exception as e:
-                logger.error(f"Error processing image {i}: {e}")
-                results.append(HomographyResponse(
-                    success=False, error=str(e)
-                ))
-            finally:
-                if temp_raw:
-                    cleanup_temp_file(temp_raw)
-
-        return BatchHomographyResponse(
-            success=True,
-            results=results,
-            ortho_width=ortho_w,
-            ortho_height=ortho_h,
-        )
-
-    except Exception as e:
-        logger.error(f"Batch homography failed: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Batch homography failed: {str(e)}",
-        )
-
-    finally:
-        if temp_ortho:
-            cleanup_temp_file(temp_ortho)
-        for f in temp_files:
-            cleanup_temp_file(f)
 
 
 @app.post("/convert-cog", response_model=CogConvertResponse)
@@ -500,21 +238,16 @@ async def convert_to_cog(request: CogConvertRequest):
 @app.post("/detect-plants")
 async def detect_plants_endpoint(request: PlantDetectionRequest):
     """
-    Run tiled plant detection on an orthomosaic via Roboflow YOLO.
+    Run tiled plant detection on an orthomosaic with the local plnt_v3 model.
 
-    Downloads the GeoTIFF, tiles it, sends tiles to Roboflow for inference,
-    runs NMS, and streams NDJSON progress events followed by the final result.
+    Downloads the GeoTIFF, runs the shared detection pipeline, and streams
+    NDJSON progress events followed by the final result.
     """
     temp_file = None
 
     async def generate():
         nonlocal temp_file
         try:
-            import asyncio
-            from .plant_detection import (
-                is_tile_empty, run_tile_inference, apply_nms, pixel_to_gps,
-            )
-
             # Download the GeoTIFF
             yield json.dumps({"type": "status", "message": "Downloading orthomosaic..."}) + "\n"
             temp_file = await download_geotiff(request.geotiff_url)
@@ -524,139 +257,23 @@ async def detect_plants_endpoint(request: PlantDetectionRequest):
             # Load image
             yield json.dumps({"type": "status", "message": "Decoding image..."}) + "\n"
             image, _, _ = load_geotiff_for_detection(temp_file)
-            img_height, img_width = image.shape[:2]
             logger.info(f"Image shape: {image.shape}")
 
-            # Build tile jobs
-            tile_w = request.tile_width
-            tile_h = request.tile_height
-            stride_x = tile_w - request.overlap_x
-            stride_y = tile_h - request.overlap_y
-            allowed_classes = [c.lower() for c in request.include_classes]
-
-            tile_jobs = []
-            skipped = 0
-            for ty in range(0, img_height, stride_y):
-                for tx in range(0, img_width, stride_x):
-                    crop_w = min(tile_w, img_width - tx)
-                    crop_h = min(tile_h, img_height - ty)
-                    if is_tile_empty(image, tx, ty, crop_w, crop_h):
-                        skipped += 1
-                    else:
-                        tile_jobs.append((tx, ty, crop_w, crop_h))
-
-            total_tiles = len(tile_jobs)
-            logger.info(f"Tiling: {img_width}x{img_height}, {total_tiles} tiles, {skipped} empty skipped")
-
-            yield json.dumps({
-                "type": "progress",
-                "processedTiles": 0,
-                "totalTiles": total_tiles,
-                "detectionsCount": 0,
-                "phase": "tiling",
-            }) + "\n"
-
-            # Process tiles in batches, streaming progress after each batch
-            all_detections = []
-            processed = 0
-            concurrent = request.concurrent_tiles
-
-            import httpx as httpx_client
-            async with httpx_client.AsyncClient(timeout=60.0) as client:
-                for i in range(0, len(tile_jobs), concurrent):
-                    batch = tile_jobs[i:i + concurrent]
-
-                    async def process_tile(job):
-                        x, y, crop_w, crop_h = job
-                        tile = image[y:y+crop_h, x:x+crop_w]
-                        tile_bgr = cv2.cvtColor(tile, cv2.COLOR_RGB2BGR)
-                        _, png_buf = cv2.imencode(".png", tile_bgr)
-                        tile_png = png_buf.tobytes()
-
-                        predictions = await run_tile_inference(
-                            client, tile_png,
-                            request.roboflow_api_url, request.roboflow_model_id,
-                            request.roboflow_api_key, request.confidence_threshold,
-                        )
-
-                        dets = []
-                        for pred in predictions:
-                            pred_class = (pred.get("class") or "plant").lower()
-                            if pred_class not in allowed_classes:
-                                continue
-                            dets.append({
-                                "x": x + pred["x"],
-                                "y": y + pred["y"],
-                                "width": pred["width"],
-                                "height": pred["height"],
-                                "confidence": pred["confidence"],
-                                "class": pred.get("class", "plant"),
-                            })
-                        return dets
-
-                    results = await asyncio.gather(
-                        *[process_tile(job) for job in batch],
-                        return_exceptions=True,
-                    )
-
-                    for result in results:
-                        if isinstance(result, Exception):
-                            logger.error(f"Tile error: {result}")
-                        else:
-                            all_detections.extend(result)
-
-                    processed += len(batch)
-
-                    # Stream progress after every batch to keep connection alive
-                    yield json.dumps({
-                        "type": "progress",
-                        "processedTiles": processed,
-                        "totalTiles": total_tiles,
-                        "detectionsCount": len(all_detections),
-                        "phase": "tiling",
-                    }) + "\n"
-
-            # NMS
-            yield json.dumps({
-                "type": "progress",
-                "processedTiles": total_tiles,
-                "totalTiles": total_tiles,
-                "detectionsCount": len(all_detections),
-                "phase": "nms",
-            }) + "\n"
-
-            logger.info(f"Detections before NMS: {len(all_detections)}")
-            final_detections = apply_nms(all_detections, request.nms_iou_threshold)
-            logger.info(f"Detections after NMS: {len(final_detections)}")
-
-            # Add GPS coordinates
-            for det in final_detections:
-                gps = pixel_to_gps(det["x"], det["y"], request.bounds, img_width, img_height)
-                det["latitude"] = gps["lat"]
-                det["longitude"] = gps["lng"]
-                det["pixel_x"] = round(det["x"])
-                det["pixel_y"] = round(det["y"])
-
-            # Build class counts
-            class_counts = {}
-            total_confidence = 0.0
-            for det in final_detections:
-                cls = det.get("class", "plant")
-                class_counts[cls] = class_counts.get(cls, 0) + 1
-                total_confidence += det["confidence"]
-
-            avg_confidence = total_confidence / len(final_detections) if final_detections else 0
-
-            yield json.dumps({
-                "type": "result",
-                "success": True,
-                "totalDetections": len(final_detections),
-                "classCounts": class_counts,
-                "averageConfidence": avg_confidence,
-                "imageWidth": img_width,
-                "imageHeight": img_height,
-                "detections": final_detections,
-            }) + "\n"
+            # Shared tiling -> inference -> dedup -> georeference pipeline
+            async for event in detect_plants_local(
+                app.state.model,
+                image,
+                request.bounds,
+                tile_w=request.tile_width,
+                tile_h=request.tile_height,
+                overlap_x=request.overlap_x,
+                overlap_y=request.overlap_y,
+                confidence=request.confidence_threshold,
+                r_dedup=request.r_dedup,
+                include_classes=request.include_classes,
+                progress_every=request.concurrent_tiles,
+            ):
+                yield json.dumps(event) + "\n"
 
         except Exception as e:
             logger.error(f"Plant detection failed: {str(e)}", exc_info=True)
@@ -688,8 +305,6 @@ async def detect_plants_async_endpoint(request: AsyncPlantDetectionRequest, back
 
 async def run_async_detection(request: AsyncPlantDetectionRequest):
     """Background task that runs the full detection pipeline and writes to Supabase."""
-    import asyncio
-    from .plant_detection import is_tile_empty, run_tile_inference, apply_nms, pixel_to_gps
     from .supabase_client import SupabaseClient
 
     sb = SupabaseClient(request.supabase_url, request.supabase_service_key)
@@ -715,110 +330,52 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
 
         # Load image
         image, _, _ = load_geotiff_for_detection(temp_file)
-        img_height, img_width = image.shape[:2]
-        logger.info(f"[AsyncDetect] Image: {img_width}x{img_height}")
+        logger.info(f"[AsyncDetect] Image: {image.shape[1]}x{image.shape[0]}")
 
-        # Build tile jobs
-        tile_w = request.tile_width
-        tile_h = request.tile_height
-        stride_x = tile_w - request.overlap_x
-        stride_y = tile_h - request.overlap_y
-        allowed_classes = [c.lower() for c in request.include_classes]
-
-        tile_jobs = []
-        skipped = 0
-        for ty in range(0, img_height, stride_y):
-            for tx in range(0, img_width, stride_x):
-                crop_w = min(tile_w, img_width - tx)
-                crop_h = min(tile_h, img_height - ty)
-                if is_tile_empty(image, tx, ty, crop_w, crop_h):
-                    skipped += 1
-                else:
-                    tile_jobs.append((tx, ty, crop_w, crop_h))
-
-        total_tiles = len(tile_jobs)
-        logger.info(f"[AsyncDetect] {total_tiles} tiles to process, {skipped} empty skipped")
-
-        await sb.update_job(request.job_id, {
-            "progress": {"processedTiles": 0, "totalTiles": total_tiles, "detectionsCount": 0, "phase": "tiling"},
-            "updated_at": "now()",
-        })
-
-        # Process tiles
-        all_detections = []
-        processed = 0
-        concurrent = request.concurrent_tiles
-
-        import httpx as httpx_client
-        async with httpx_client.AsyncClient(timeout=60.0) as client:
-            for i in range(0, len(tile_jobs), concurrent):
-                batch = tile_jobs[i:i + concurrent]
-
-                async def process_tile(job):
-                    x, y, crop_w, crop_h = job
-                    tile = image[y:y+crop_h, x:x+crop_w]
-                    tile_bgr = cv2.cvtColor(tile, cv2.COLOR_RGB2BGR)
-                    _, png_buf = cv2.imencode(".png", tile_bgr)
-                    tile_png = png_buf.tobytes()
-
-                    predictions = await run_tile_inference(
-                        client, tile_png,
-                        request.roboflow_api_url, request.roboflow_model_id,
-                        request.roboflow_api_key, request.confidence_threshold,
-                    )
-
-                    dets = []
-                    for pred in predictions:
-                        pred_class = (pred.get("class") or "plant").lower()
-                        if pred_class not in allowed_classes:
-                            continue
-                        dets.append({
-                            "x": x + pred["x"],
-                            "y": y + pred["y"],
-                            "width": pred["width"],
-                            "height": pred["height"],
-                            "confidence": pred["confidence"],
-                            "class": pred.get("class", "plant"),
-                        })
-                    return dets
-
-                results = await asyncio.gather(
-                    *[process_tile(job) for job in batch],
-                    return_exceptions=True,
-                )
-
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error(f"[AsyncDetect] Tile error: {result}")
-                    else:
-                        all_detections.extend(result)
-
-                processed += len(batch)
-
-                # Update progress every 5 batches to avoid hammering Supabase
-                if processed % (concurrent * 5) < concurrent or processed >= total_tiles:
+        # Shared tiling -> inference -> dedup -> georeference pipeline.
+        # Throttle Supabase progress writes so we don't hammer the DB.
+        result_event = None
+        total_tiles = 0
+        last_written = -1
+        progress_stride = max(1, request.concurrent_tiles * 5)
+        async for event in detect_plants_local(
+            app.state.model,
+            image,
+            request.bounds,
+            tile_w=request.tile_width,
+            tile_h=request.tile_height,
+            overlap_x=request.overlap_x,
+            overlap_y=request.overlap_y,
+            confidence=request.confidence_threshold,
+            r_dedup=request.r_dedup,
+            include_classes=request.include_classes,
+            progress_every=request.concurrent_tiles,
+        ):
+            if event["type"] == "result":
+                result_event = event
+            elif event["type"] == "progress":
+                total_tiles = event["totalTiles"]
+                processed = event["processedTiles"]
+                # Always write the dedup ("nms") phase; throttle tiling updates.
+                if (event["phase"] != "tiling"
+                        or processed - last_written >= progress_stride
+                        or processed >= total_tiles):
+                    last_written = processed
                     await sb.update_job(request.job_id, {
                         "progress": {
                             "processedTiles": processed,
                             "totalTiles": total_tiles,
-                            "detectionsCount": len(all_detections),
-                            "phase": "tiling",
+                            "detectionsCount": event["detectionsCount"],
+                            "phase": event["phase"],
                         },
                         "updated_at": "now()",
                     })
 
-        # NMS
-        logger.info(f"[AsyncDetect] Detections before NMS: {len(all_detections)}")
-        final_detections = apply_nms(all_detections, request.nms_iou_threshold)
-        logger.info(f"[AsyncDetect] Detections after NMS: {len(final_detections)}")
+        if result_event is None:
+            raise RuntimeError("Detection produced no result event")
 
-        # Add GPS coordinates
-        for det in final_detections:
-            gps = pixel_to_gps(det["x"], det["y"], request.bounds, img_width, img_height)
-            det["latitude"] = gps["lat"]
-            det["longitude"] = gps["lng"]
-            det["pixel_x"] = round(det["x"])
-            det["pixel_y"] = round(det["y"])
+        final_detections = result_event["detections"]
+        logger.info(f"[AsyncDetect] Detections after dedup: {len(final_detections)}")
 
         # Save to DB
         await sb.update_job(request.job_id, {
@@ -1031,13 +588,11 @@ async def root():
     """Root endpoint with service info."""
     return {
         "service": "ArUco Detection Service",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "endpoints": {
             "health": "/health",
             "detect": "/detect (POST)",
             "detect_plants": "/detect-plants (POST)",
-            "homography": "/homography (POST)",
-            "homography_batch": "/homography/batch (POST)",
             "convert_cog": "/convert-cog (POST)",
             "sync_ortho": "/sync-ortho (POST)",
         }

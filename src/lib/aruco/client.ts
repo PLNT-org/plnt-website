@@ -8,6 +8,7 @@ import {
   ArUcoDictionary,
   DEFAULT_ARUCO_DICTIONARY,
 } from './types'
+import { getArucoAuthHeaders } from './auth'
 
 export class ArUcoClient {
   private baseUrl: string
@@ -25,6 +26,7 @@ export class ArUcoClient {
     const url = `${this.baseUrl}${endpoint}`
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
+      ...(await getArucoAuthHeaders(this.baseUrl)),
       ...options.headers,
     }
 
