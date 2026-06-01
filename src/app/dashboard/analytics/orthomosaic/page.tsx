@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
 import { authFetch } from '@/lib/auth/auth-fetch'
@@ -474,39 +474,61 @@ export default function OrthomosaicViewerPage() {
     return () => clearInterval(interval)
   }, [selectedOrthomosaic, isDemo])
 
-  // Auto-generate tiles when an ortho completes and doesn't have them yet
+  // Build/refresh the XYZ map-tile pyramid so the orthophoto imagery displays.
+  // The GDAL service runs for a few minutes and sets tiles_url when done; poll it.
   const [generatingTiles, setGeneratingTiles] = useState(false)
+  const tilesAttemptedRef = useRef<Set<string>>(new Set())
 
-  useEffect(() => {
-    if (!selectedOrthomosaic) return
-    if (isDemo) return
-    if (selectedOrthomosaic.status !== 'completed') return
-    if (selectedOrthomosaic.tiles_url) return // Already has tiles
-    if (!selectedOrthomosaic.orthomosaic_url) return
-    if (!selectedOrthomosaic.bounds) return
-    if (generatingTiles) return
-
-    // Auto-trigger tile generation
+  const triggerTileGen = async () => {
+    if (!selectedOrthomosaic || isDemo) return
+    const orthoId = selectedOrthomosaic.id
     setGeneratingTiles(true)
-    console.log('[Tiles] Auto-generating tiles for', selectedOrthomosaic.id)
-
-    authFetch('/api/orthomosaic/generate-tiles', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id }),
-    })
-      .then(async (res) => {
-        const data = await res.json()
-        if (data.success) {
-          console.log(`[Tiles] Generated ${data.totalTiles} tiles`)
-          await reloadOrthomosaic(selectedOrthomosaic.id)
-        } else {
-          console.error('[Tiles] Generation failed:', data.error)
-        }
+    try {
+      const res = await authFetch('/api/orthomosaic/generate-tiles-gdal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orthomosaicId: orthoId }),
       })
-      .catch((err) => console.error('[Tiles] Error:', err))
-      .finally(() => setGeneratingTiles(false))
-  }, [selectedOrthomosaic, isDemo, generatingTiles])
+      const data = await res.json()
+      if (!res.ok || !data.started) {
+        console.error('[Tiles] Failed to start:', data.error)
+        setGeneratingTiles(false)
+        return
+      }
+      const startedAt = Date.now()
+      const poll = async () => {
+        if (Date.now() - startedAt > 10 * 60 * 1000) {
+          console.warn('[Tiles] Generation timed out')
+          setGeneratingTiles(false)
+          return
+        }
+        const updated = await reloadOrthomosaic(orthoId)
+        if (updated?.tiles_url) {
+          setGeneratingTiles(false) // map re-renders with the new tiles
+          return
+        }
+        setTimeout(poll, 6000)
+      }
+      setTimeout(poll, 6000)
+    } catch (err) {
+      console.error('[Tiles] Error:', err)
+      setGeneratingTiles(false)
+    }
+  }
+
+  // Auto-generate tiles once when an ortho completes without them. The ref guard
+  // prevents a retry loop on failure; the manual button can always re-trigger.
+  useEffect(() => {
+    if (!selectedOrthomosaic || isDemo) return
+    if (selectedOrthomosaic.status !== 'completed') return
+    if (selectedOrthomosaic.tiles_url) return // already has tiles
+    if (!selectedOrthomosaic.orthomosaic_url || !selectedOrthomosaic.bounds) return
+    if (generatingTiles || tilesAttemptedRef.current.has(selectedOrthomosaic.id)) return
+    tilesAttemptedRef.current.add(selectedOrthomosaic.id)
+    console.log('[Tiles] Auto-generating tiles for', selectedOrthomosaic.id)
+    triggerTileGen()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOrthomosaic, isDemo])
 
   // Handle adding a new label
   const handleAddLabel = async (lat: number, lng: number, pixelX?: number, pixelY?: number) => {
@@ -1892,6 +1914,26 @@ export default function OrthomosaicViewerPage() {
                       <>
                         <Sparkles className="h-4 w-4 mr-2" />
                         {plantDetectionResult ? 'Re-run Detection' : 'Count Plants'}
+                      </>
+                    )}
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={triggerTileGen}
+                    disabled={generatingTiles || plantDetecting}
+                    title="Build the map-tile pyramid so the orthophoto imagery displays on the map"
+                  >
+                    {generatingTiles ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                        Generating Tiles...
+                      </>
+                    ) : (
+                      <>
+                        <Layers className="h-4 w-4 mr-1" />
+                        {selectedOrthomosaic?.tiles_url ? 'Regenerate Tiles' : 'Generate Tiles'}
                       </>
                     )}
                   </Button>
