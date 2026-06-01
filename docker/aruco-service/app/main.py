@@ -26,6 +26,8 @@ from .models import (
     GenerateTilesResponse,
     RecomputeCoordsRequest,
     RecomputeCoordsResponse,
+    CropToBoundaryRequest,
+    CropToBoundaryResponse,
 )
 from .detector import detect_aruco_markers
 from .georef import (
@@ -800,18 +802,133 @@ async def recompute_coords(request: RecomputeCoordsRequest):
             cleanup_temp_file(temp_file)
 
 
+@app.post("/crop-to-boundary", response_model=CropToBoundaryResponse)
+async def crop_to_boundary(request: CropToBoundaryRequest):
+    """Clip the ortho to a WGS84 boundary polygon with gdalwarp -cutline, writing
+    a cropped TIF + COG (transparent outside the polygon, tight bounds) and
+    pointing the ortho record at them with updated bounds.
+
+    Non-destructive: writes to *_cropped paths (original files preserved) and
+    clears tiles_url so tiles regenerate. Re-run Count Plants afterward — the
+    cropped-out area is transparent/black, so the empty-tile skip ignores it.
+    """
+    import json as _json
+    import subprocess
+    import httpx as httpx_client
+    import rasterio
+    from rasterio.warp import transform_bounds
+
+    temp_src = cropped = cropped_cog = cutline = None
+    try:
+        temp_src = await download_geotiff(request.geotiff_url)
+
+        # Boundary -> GeoJSON cutline (WGS84). gdalwarp reprojects it to the
+        # raster's CRS via -cutline_srs.
+        cutline = temp_src.replace(".tif", "_cut.geojson")
+        with open(cutline, "w") as f:
+            _json.dump(
+                {"type": "FeatureCollection",
+                 "features": [{"type": "Feature", "properties": {}, "geometry": request.boundary}]},
+                f,
+            )
+
+        cropped = temp_src.replace(".tif", "_cropped.tif")
+        warp_cmd = [
+            "gdalwarp", "-cutline", cutline, "-crop_to_cutline", "-dstalpha",
+            "-cutline_srs", "EPSG:4326", "-of", "GTiff",
+            "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", "-overwrite",
+            temp_src, cropped,
+        ]
+        logger.info(f"[Crop] {' '.join(warp_cmd)}")
+        r = subprocess.run(warp_cmd, capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0:
+            logger.error(f"[Crop] gdalwarp failed: {r.stderr[-800:]}")
+            return CropToBoundaryResponse(success=False, error=f"gdalwarp failed: {r.stderr[-300:]}")
+
+        # COG (DEFLATE keeps the alpha band so the crop stays transparent).
+        cropped_cog = temp_src.replace(".tif", "_cropped_cog.tif")
+        cog_cmd = [
+            "gdal_translate", "-of", "COG", "-co", "COMPRESS=DEFLATE",
+            "-co", "OVERVIEWS=AUTO", "-co", "BLOCKSIZE=512", cropped, cropped_cog,
+        ]
+        r2 = subprocess.run(cog_cmd, capture_output=True, text=True, timeout=1800)
+        if r2.returncode != 0:
+            logger.error(f"[Crop] COG conversion failed: {r2.stderr[-800:]}")
+            return CropToBoundaryResponse(success=False, error=f"COG failed: {r2.stderr[-300:]}")
+
+        with rasterio.open(cropped) as src:
+            w, h = src.width, src.height
+            b = src.bounds
+            crs = src.crs
+            if crs and not crs.is_geographic:
+                west, south, east, north = transform_bounds(crs, "EPSG:4326", b.left, b.bottom, b.right, b.top)
+            else:
+                west, south, east, north = b.left, b.bottom, b.right, b.top
+        bounds = {"west": west, "south": south, "east": east, "north": north}
+
+        base = request.supabase_url.rstrip("/")
+        sk = request.supabase_service_key
+        tif_path = f"{request.orthomosaic_id}/orthophoto_cropped.tif"
+        cog_path = f"{request.orthomosaic_id}/orthophoto_cropped_cog.tif"
+
+        async with httpx_client.AsyncClient(timeout=600.0) as client:
+            async def upload(path, local):
+                with open(local, "rb") as fh:
+                    data = fh.read()
+                rr = await client.post(
+                    f"{base}/storage/v1/object/orthomosaics/{path}",
+                    content=data,
+                    headers={"Authorization": f"Bearer {sk}", "apikey": sk,
+                             "Content-Type": "image/tiff", "x-upsert": "true"},
+                )
+                rr.raise_for_status()
+            await upload(tif_path, cropped)
+            await upload(cog_path, cropped_cog)
+
+        def pub(p):
+            return f"{base}/storage/v1/object/public/orthomosaics/{p}"
+
+        async with httpx_client.AsyncClient(timeout=60.0) as client:
+            await client.patch(
+                f"{base}/rest/v1/orthomosaics?id=eq.{request.orthomosaic_id}",
+                headers={"Authorization": f"Bearer {sk}", "apikey": sk,
+                         "Content-Type": "application/json", "Prefer": "return=minimal"},
+                json={
+                    "original_tif_url": pub(tif_path),
+                    "orthomosaic_url": pub(cog_path),
+                    "bounds": bounds,
+                    "image_width": w,
+                    "image_height": h,
+                    "tiles_url": None,  # force tile regeneration
+                    "updated_at": "now()",
+                },
+            )
+
+        logger.info(f"[Crop] {request.orthomosaic_id}: cropped to {w}x{h}, bounds={bounds}")
+        return CropToBoundaryResponse(success=True, bounds=bounds, image_width=w, image_height=h)
+
+    except Exception as e:
+        logger.error(f"Crop to boundary failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Crop failed: {str(e)}")
+    finally:
+        for f in (temp_src, cropped, cropped_cog, cutline):
+            if f:
+                cleanup_temp_file(f)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "service": "ArUco Detection Service",
-        "version": "1.7.0",
+        "version": "1.8.0",
         "endpoints": {
             "health": "/health",
             "detect": "/detect (POST)",
             "detect_plants": "/detect-plants (POST)",
             "generate_tiles": "/generate-tiles (POST)",
             "recompute_coords": "/recompute-coords (POST)",
+            "crop_to_boundary": "/crop-to-boundary (POST)",
             "convert_cog": "/convert-cog (POST)",
             "sync_ortho": "/sync-ortho (POST)",
         }

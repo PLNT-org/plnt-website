@@ -195,3 +195,23 @@ class RecomputeCoordsResponse(BaseModel):
     skipped_no_pixels: int = 0
     crs: Optional[str] = None
     error: Optional[str] = None
+
+
+class CropToBoundaryRequest(BaseModel):
+    """Clip an ortho to a WGS84 boundary polygon (gdalwarp -cutline)."""
+
+    geotiff_url: str = Field(..., description="URL of the source GeoTIFF to clip")
+    orthomosaic_id: str = Field(...)
+    boundary: dict = Field(..., description="GeoJSON Polygon (WGS84) to crop to")
+    supabase_url: str = Field(...)
+    supabase_service_key: str = Field(...)
+
+
+class CropToBoundaryResponse(BaseModel):
+    """Response from boundary crop."""
+
+    success: bool
+    bounds: Optional[dict] = None
+    image_width: int = 0
+    image_height: int = 0
+    error: Optional[str] = None

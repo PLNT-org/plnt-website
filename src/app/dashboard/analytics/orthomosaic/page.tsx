@@ -13,6 +13,8 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   MapIcon,
   Layers,
+  Crop,
+  X,
   Tag,
   Download,
   RefreshCw,
@@ -167,6 +169,9 @@ export default function OrthomosaicViewerPage() {
 
   // Plant detection state
   const [plantDetecting, setPlantDetecting] = useState(false)
+  const [boundaryDrawMode, setBoundaryDrawMode] = useState(false)
+  const [boundaryPoints, setBoundaryPoints] = useState<{ lat: number; lng: number }[]>([])
+  const [cropping, setCropping] = useState(false)
   const [plantDetectionResult, setPlantDetectionResult] = useState<{
     totalDetections: number
     savedCount?: number
@@ -694,6 +699,61 @@ export default function OrthomosaicViewerPage() {
       })
     } finally {
       setArucoDetecting(false)
+    }
+  }
+
+  // Crop the ortho to the drawn property boundary (gdalwarp -cutline on the
+  // service). Non-destructive; clears tiles_url so the user re-tiles + re-counts.
+  const handleCropToBoundary = async () => {
+    if (!selectedOrthomosaic || isDemo) return
+    if (boundaryPoints.length < 3) {
+      alert('Draw at least 3 points to define the boundary.')
+      return
+    }
+    if (!confirm('Crop this orthomosaic to the drawn boundary? Afterward, click "Generate Tiles" then "Count Plants" to refresh the map and counts.')) {
+      return
+    }
+    const orthoId = selectedOrthomosaic.id
+    // GeoJSON Polygon (closed ring), [lng, lat] order.
+    const ring = boundaryPoints.map(p => [p.lng, p.lat])
+    ring.push(ring[0])
+    const boundary = { type: 'Polygon', coordinates: [ring] }
+    setCropping(true)
+    try {
+      const res = await authFetch('/api/orthomosaic/crop-to-boundary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orthomosaicId: orthoId, boundary }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.started) {
+        alert(data.error || 'Failed to start crop')
+        setCropping(false)
+        return
+      }
+      // Poll until original_tif_url flips to the cropped file (completion signal).
+      const startedAt = Date.now()
+      const poll = async () => {
+        if (Date.now() - startedAt > 15 * 60 * 1000) {
+          alert('Crop timed out. Please try again.')
+          setCropping(false)
+          return
+        }
+        const updated = await reloadOrthomosaic(orthoId)
+        if (updated?.original_tif_url?.includes('_cropped')) {
+          setCropping(false)
+          setBoundaryDrawMode(false)
+          setBoundaryPoints([])
+          alert('Cropped! Now click "Generate Tiles", then "Count Plants" to refresh the map and counts for the cropped area.')
+          return
+        }
+        setTimeout(poll, 6000)
+      }
+      setTimeout(poll, 6000)
+    } catch (err) {
+      console.error('Error cropping ortho:', err)
+      alert('Crop failed — check console for details.')
+      setCropping(false)
     }
   }
 
@@ -1938,6 +1998,48 @@ export default function OrthomosaicViewerPage() {
                     )}
                   </Button>
 
+                  {/* Crop to property boundary */}
+                  {!boundaryDrawMode ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="border-orange-300 text-orange-700 hover:bg-orange-50"
+                      onClick={() => { setLabelMode(false); setBoundaryPoints([]); setBoundaryDrawMode(true) }}
+                      disabled={cropping || plantDetecting || generatingTiles}
+                      title="Trace the property line on the map, then crop the ortho to it (removes neighbouring land)"
+                    >
+                      <Crop className="h-4 w-4 mr-1" />
+                      Crop to Boundary
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        variant="default"
+                        size="sm"
+                        className="bg-orange-600 hover:bg-orange-700"
+                        onClick={handleCropToBoundary}
+                        disabled={cropping || boundaryPoints.length < 3}
+                      >
+                        {cropping ? (
+                          <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Cropping...</>
+                        ) : (
+                          <><Crop className="h-4 w-4 mr-1" />Crop to Boundary ({boundaryPoints.length})</>
+                        )}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => { setBoundaryDrawMode(false); setBoundaryPoints([]) }}
+                        disabled={cropping}
+                      >
+                        <X className="h-4 w-4 mr-1" />Cancel
+                      </Button>
+                      <span className="text-xs text-orange-700 self-center">
+                        Click the map to trace the property line (≥3 points), then Crop.
+                      </span>
+                    </>
+                  )}
+
                   <Button
                     variant="ghost"
                     size="sm"
@@ -2268,6 +2370,8 @@ export default function OrthomosaicViewerPage() {
                 arucoMarkers={arucoMarkers}
                 onVerifyArucoMarker={handleVerifyArucoMarker}
                 plots={plots}
+                boundaryDrawMode={boundaryDrawMode}
+                onBoundaryChange={setBoundaryPoints}
               />
             </CardContent>
           </Card>
