@@ -175,3 +175,23 @@ class GenerateTilesResponse(BaseModel):
     tiles_url: Optional[str] = None
     zoom_range: Optional[str] = None
     error: Optional[str] = None
+
+
+class RecomputeCoordsRequest(BaseModel):
+    """Recompute lat/lng for an ortho's stored AI labels from their pixel coords
+    using the GeoTIFF affine transform + CRS (fixes the old linear-bounds rows)."""
+
+    geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF/COG")
+    orthomosaic_id: str = Field(...)
+    supabase_url: str = Field(...)
+    supabase_service_key: str = Field(...)
+
+
+class RecomputeCoordsResponse(BaseModel):
+    """Response from coordinate recomputation."""
+
+    success: bool
+    updated: int = 0
+    skipped_no_pixels: int = 0
+    crs: Optional[str] = None
+    error: Optional[str] = None

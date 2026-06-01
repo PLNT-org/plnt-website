@@ -59,7 +59,12 @@ def pixel_to_coords(
     Returns:
         Tuple of (longitude, latitude) in WGS84
     """
-    # xy() returns (x, y) which is (longitude, latitude) for WGS84
+    # TODO(georef): this does NOT reproject — it returns the affine output in the
+    # source CRS and assumes that's already lng/lat. Correct only for EPSG:4326
+    # sources; for projected sources (e.g. UTM) it's wrong, drifting toward the
+    # edges. The plant-detection path (plant_detection.pixels_to_wgs84) does the
+    # correct affine + rasterio.warp.transform(crs -> EPSG:4326). The ArUco path
+    # should adopt the same pattern (separate PR — needs its own testing).
     lng, lat = xy(transform, int(pixel_y), int(pixel_x))
     return lng, lat
 
