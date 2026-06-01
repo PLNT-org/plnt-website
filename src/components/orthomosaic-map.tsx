@@ -105,6 +105,8 @@ interface OrthomosaicMapProps {
   arucoMarkers?: ArUcoMarker[]
   onVerifyArucoMarker?: (markerId: string, verified: boolean) => void
   plots?: Plot[]
+  boundaryDrawMode?: boolean
+  onBoundaryChange?: (points: { lat: number; lng: number }[]) => void
 }
 
 // Color palette for different label types
@@ -142,6 +144,8 @@ export default function OrthomosaicMap({
   arucoMarkers = [],
   onVerifyArucoMarker,
   plots = [],
+  boundaryDrawMode = false,
+  onBoundaryChange,
 }: OrthomosaicMapProps) {
   const mapRef = useRef<L.Map | null>(null)
   const mapContainerRef = useRef<HTMLDivElement>(null)
@@ -149,6 +153,8 @@ export default function OrthomosaicMap({
   const markersLayerRef = useRef<L.LayerGroup | null>(null)
   const arucoLayerRef = useRef<L.LayerGroup | null>(null)
   const plotsLayerRef = useRef<L.LayerGroup | null>(null)
+  const boundaryLayerRef = useRef<L.LayerGroup | null>(null)
+  const boundaryPtsRef = useRef<{ lat: number; lng: number }[]>([])
   const [showOrthophoto, setShowOrthophoto] = useState(true)
   const [showLabels, setShowLabels] = useState(true)
   const [showSatellite, setShowSatellite] = useState(true)
@@ -577,6 +583,53 @@ export default function OrthomosaicMap({
       }
     })
   }, [plots, showPlots, labelMode])
+
+  // Property-boundary drawing: click the map to add vertices; the page reads the
+  // points via onBoundaryChange and submits them to crop the ortho.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !boundaryDrawMode) return
+
+    boundaryPtsRef.current = []
+    onBoundaryChange?.([])
+    const layer = L.layerGroup().addTo(map)
+    boundaryLayerRef.current = layer
+
+    const redraw = () => {
+      layer.clearLayers()
+      const pts = boundaryPtsRef.current
+      const latlngs = pts.map((p) => [p.lat, p.lng]) as [number, number][]
+      if (pts.length >= 3) {
+        L.polygon(latlngs, { color: '#f97316', weight: 2, fillColor: '#f97316', fillOpacity: 0.12 }).addTo(layer)
+      } else if (pts.length >= 2) {
+        L.polyline(latlngs, { color: '#f97316', weight: 2 }).addTo(layer)
+      }
+      pts.forEach((p) =>
+        L.circleMarker([p.lat, p.lng], {
+          radius: 5, color: '#ffffff', weight: 2, fillColor: '#f97316', fillOpacity: 1,
+        }).addTo(layer)
+      )
+    }
+
+    const onClick = (e: L.LeafletMouseEvent) => {
+      boundaryPtsRef.current = [...boundaryPtsRef.current, { lat: e.latlng.lat, lng: e.latlng.lng }]
+      redraw()
+      onBoundaryChange?.(boundaryPtsRef.current)
+    }
+
+    map.on('click', onClick)
+    const container = map.getContainer()
+    if (container) container.style.cursor = 'crosshair'
+
+    return () => {
+      map.off('click', onClick)
+      layer.remove()
+      boundaryLayerRef.current = null
+      const c = map.getContainer()
+      if (c) c.style.cursor = ''
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boundaryDrawMode])
 
   return (
     <div className="relative">
