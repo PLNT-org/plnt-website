@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
 import { authFetch } from '@/lib/auth/auth-fetch'
@@ -191,6 +191,19 @@ export default function OrthomosaicViewerPage() {
   // Manual GPS offset nudge (meters)
   const [labelNudge, setLabelNudge] = useState({ lat: 0, lon: 0 })
   const NUDGE_STEP = 0.5 // meters per click
+
+  // Apply the manual GPS nudge to AI labels. Memoized so the array reference is
+  // stable across re-renders — otherwise the map rebuilds all (13k+) markers on
+  // every render, which flashes the map. Recomputes only when inputs change.
+  const displayLabels = useMemo(() => {
+    if (labelNudge.lat === 0 && labelNudge.lon === 0) return labels
+    return labels.map(l => {
+      if (l.source !== 'ai') return l
+      const lat = l.latitude + labelNudge.lat / 111320
+      const lon = l.longitude + labelNudge.lon / (111320 * Math.cos(l.latitude * Math.PI / 180))
+      return { ...l, latitude: lat, longitude: lon }
+    })
+  }, [labels, labelNudge])
   const [plotAggregation, setPlotAggregation] = useState<{
     plotCounts: Array<{
       plotId: string
@@ -2199,16 +2212,7 @@ export default function OrthomosaicViewerPage() {
             <CardContent className="p-0 overflow-hidden rounded-lg">
               <OrthomosaicMap
                 orthomosaic={selectedOrthomosaic}
-                labels={labels.map(l => {
-                  if (l.source !== 'ai' || (labelNudge.lat === 0 && labelNudge.lon === 0)) return l
-                  const lat = selectedOrthomosaic?.bounds
-                    ? l.latitude + labelNudge.lat / 111320
-                    : l.latitude
-                  const lon = selectedOrthomosaic?.bounds
-                    ? l.longitude + labelNudge.lon / (111320 * Math.cos(l.latitude * Math.PI / 180))
-                    : l.longitude
-                  return { ...l, latitude: lat, longitude: lon }
-                })}
+                labels={displayLabels}
                 labelMode={labelMode}
                 selectedLabelType={selectedLabelType}
                 onAddLabel={handleAddLabel}

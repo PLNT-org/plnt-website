@@ -4,11 +4,13 @@ FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 # System dependencies:
 #   gdal-bin          -> gdal_translate CLI used by /sync-ortho COG conversion
+#   python3-gdal      -> gdal2tiles.py used by /generate-tiles (XYZ tile pyramid)
 #   libgdal/geos/proj -> rasterio runtime
 #   libgl1/glib       -> OpenCV runtime libs
 #   curl              -> container HEALTHCHECK
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdal-bin \
+    python3-gdal \
     libgdal-dev \
     libgeos-dev \
     libproj-dev \

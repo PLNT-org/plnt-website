@@ -22,6 +22,8 @@ from .models import (
     SyncOrthoResponse,
     PlantDetectionRequest,
     AsyncPlantDetectionRequest,
+    GenerateTilesRequest,
+    GenerateTilesResponse,
 )
 from .detector import detect_aruco_markers
 from .georef import (
@@ -583,16 +585,127 @@ async def sync_orthophoto(request: SyncOrthoRequest):
             cleanup_temp_file(temp_cog)
 
 
+@app.post("/generate-tiles", response_model=GenerateTilesResponse)
+async def generate_tiles(request: GenerateTilesRequest):
+    """
+    Generate an XYZ tile pyramid from a GeoTIFF/COG with gdal2tiles, upload it to
+    the `orthomosaic-tiles` Supabase bucket, and set the orthomosaic's tiles_url.
+
+    Uses GDAL (handles arbitrarily large rasters via overviews) — the right tool
+    for orthos too big for the sharp/Vercel path. --xyz produces top-origin tiles
+    matching Leaflet and the {z}/{x}/{y}.png serving convention.
+    """
+    import asyncio
+    import glob
+    import shutil
+    import subprocess
+    import tempfile
+    import httpx as httpx_client
+
+    temp_src = None
+    tile_dir = None
+    try:
+        logger.info(f"[Tiles] Downloading source: {request.geotiff_url[:80]}...")
+        temp_src = await download_geotiff(request.geotiff_url)
+        tile_dir = tempfile.mkdtemp(prefix="tiles_")
+
+        cmd = ["gdal2tiles.py", "--xyz", "-w", "none", "--processes", "4", "--resampling", "average"]
+        if request.min_zoom is not None and request.max_zoom is not None:
+            cmd += ["-z", f"{request.min_zoom}-{request.max_zoom}"]
+        cmd += [temp_src, tile_dir]
+        logger.info(f"[Tiles] {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3000)
+        if result.returncode != 0:
+            logger.error(f"[Tiles] gdal2tiles failed: {result.stderr[-800:]}")
+            return GenerateTilesResponse(success=False, error=f"gdal2tiles failed: {result.stderr[-300:]}")
+
+        # Collect produced tiles: {tile_dir}/{z}/{x}/{y}.png
+        tile_files = []
+        for path in glob.glob(os.path.join(tile_dir, "*", "*", "*.png")):
+            parts = os.path.relpath(path, tile_dir).split(os.sep)
+            if len(parts) == 3:
+                tile_files.append((path, "/".join(parts)))  # (local, "z/x/y.png")
+        logger.info(f"[Tiles] Produced {len(tile_files)} tiles")
+        if not tile_files:
+            return GenerateTilesResponse(success=False, error="gdal2tiles produced no tiles")
+
+        zlevels = sorted({int(rel.split("/")[0]) for _, rel in tile_files})
+        zoom_range = f"{zlevels[0]}-{zlevels[-1]}"
+
+        base = request.supabase_url.rstrip("/")
+        up_headers = {
+            "Authorization": f"Bearer {request.supabase_service_key}",
+            "apikey": request.supabase_service_key,
+            "Content-Type": "image/png",
+            "x-upsert": "true",
+        }
+        uploaded = 0
+        sem = asyncio.Semaphore(32)
+        async with httpx_client.AsyncClient(timeout=60.0) as client:
+            async def upload_one(local_path: str, rel: str):
+                nonlocal uploaded
+                obj = f"{request.orthomosaic_id}/{rel}"
+                url = f"{base}/storage/v1/object/orthomosaic-tiles/{obj}"
+                with open(local_path, "rb") as fh:
+                    data = fh.read()
+                async with sem:
+                    for attempt in range(3):
+                        try:
+                            r = await client.post(url, content=data, headers=up_headers)
+                            if r.status_code < 300:
+                                uploaded += 1
+                                return
+                            if attempt == 2:
+                                logger.error(f"[Tiles] upload {obj}: {r.status_code} {r.text[:120]}")
+                        except Exception as e:
+                            if attempt == 2:
+                                logger.error(f"[Tiles] upload error {obj}: {e}")
+                        await asyncio.sleep(0.4 * (attempt + 1))
+            await asyncio.gather(*[upload_one(p, rel) for p, rel in tile_files])
+
+        logger.info(f"[Tiles] Uploaded {uploaded}/{len(tile_files)} tiles (zoom {zoom_range})")
+
+        tiles_url = (
+            f"{base}/storage/v1/object/public/orthomosaic-tiles/"
+            f"{request.orthomosaic_id}/{{z}}/{{x}}/{{y}}.png"
+        )
+        async with httpx_client.AsyncClient(timeout=30.0) as client:
+            await client.patch(
+                f"{base}/rest/v1/orthomosaics?id=eq.{request.orthomosaic_id}",
+                headers={
+                    "Authorization": f"Bearer {request.supabase_service_key}",
+                    "apikey": request.supabase_service_key,
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                json={"tiles_url": tiles_url, "updated_at": "now()"},
+            )
+
+        return GenerateTilesResponse(
+            success=True, tile_count=uploaded, tiles_url=tiles_url, zoom_range=zoom_range
+        )
+
+    except Exception as e:
+        logger.error(f"Tile generation failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Tile generation failed: {str(e)}")
+    finally:
+        if temp_src:
+            cleanup_temp_file(temp_src)
+        if tile_dir and os.path.isdir(tile_dir):
+            shutil.rmtree(tile_dir, ignore_errors=True)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "service": "ArUco Detection Service",
-        "version": "1.5.0",
+        "version": "1.6.0",
         "endpoints": {
             "health": "/health",
             "detect": "/detect (POST)",
             "detect_plants": "/detect-plants (POST)",
+            "generate_tiles": "/generate-tiles (POST)",
             "convert_cog": "/convert-cog (POST)",
             "sync_ortho": "/sync-ortho (POST)",
         }
