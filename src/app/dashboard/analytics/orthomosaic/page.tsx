@@ -1016,25 +1016,21 @@ export default function OrthomosaicViewerPage() {
       Math.abs(selectedOrthomosaic.bounds.west) > 180 ||
       Math.abs(selectedOrthomosaic.bounds.south) > 90
     )
-    // Re-extract if URL is .tif or .jpg (needs WebP with transparency) — but skip
-    // when pre-rendered tiles already exist: tiles are the display source, so the
-    // WebP convert is pointless, and retrying a failing convert loops (re-render →
-    // re-fire → still .tif → ...), which flashes the map.
-    const needsWebpConversion = !selectedOrthomosaic.tiles_url && (
-      selectedOrthomosaic.orthomosaic_url.endsWith('.tif')
-      || selectedOrthomosaic.orthomosaic_url.endsWith('.jpg')
-    )
-    if (!needsBounds && !hasUtmBounds && !needsWebpConversion) return
+    // Only auto-extract when bounds are genuinely missing or look like raw UTM
+    // (out-of-range lat/lng). We no longer auto-convert .tif/.jpg to WebP for
+    // display — display is via pre-rendered tiles now, and that convert path
+    // looped (re-render → re-fire) and 500'd on cropped COGs.
+    if (!needsBounds && !hasUtmBounds) return
 
     const extractBounds = async () => {
       setExtractingBounds(true)
       try {
-        const reason = hasUtmBounds ? 'UTM bounds' : needsWebpConversion ? 'WebP conversion' : 'missing bounds'
+        const reason = hasUtmBounds ? 'UTM bounds' : 'missing bounds'
         console.log(`Auto-extracting (${reason}) for orthomosaic:`, selectedOrthomosaic.id)
         const res = await authFetch('/api/orthomosaic/extract-bounds', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds || needsWebpConversion }),
+          body: JSON.stringify({ orthomosaicId: selectedOrthomosaic.id, force: hasUtmBounds }),
         })
         const data = await res.json()
         if (data.success && data.bounds) {
