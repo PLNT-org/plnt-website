@@ -26,8 +26,6 @@ import {
   Sparkles,
   TreeDeciduous,
   BarChart3,
-  Camera,
-  Focus,
   CheckCheck,
   Link2,
 } from 'lucide-react'
@@ -175,7 +173,8 @@ export default function OrthomosaicViewerPage() {
     classCounts: Record<string, number>
     averageConfidence: number
   } | null>(null)
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.15)
+  // 0.25 is the validated plnt_v3 operating point; users can still adjust the slider.
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.25)
   const [detectionProgress, setDetectionProgress] = useState<{
     processedTiles: number
     totalTiles: number
@@ -183,27 +182,6 @@ export default function OrthomosaicViewerPage() {
     phase: string
   } | null>(null)
 
-  // Raw image detection state
-  const [rawDetecting, setRawDetecting] = useState(false)
-  const [rawDetectionProgress, setRawDetectionProgress] = useState<{
-    imageIndex: number
-    totalImages: number
-    imageName: string
-    phase: string
-    detectionsInImage?: number
-    totalDetections?: number
-  } | null>(null)
-  // Homography-based detection state
-  const [homoDetecting, setHomoDetecting] = useState(false)
-  const [homoDetectionProgress, setHomoDetectionProgress] = useState<{
-    imageIndex: number
-    totalImages: number
-    imageName: string
-    phase: string
-    detectionsInImage?: number
-    totalDetections?: number
-    homographyInliers?: number
-  } | null>(null)
   const [showDetectionSettings, setShowDetectionSettings] = useState(false)
 
   // Camera positions re-sync state
@@ -778,263 +756,6 @@ export default function OrthomosaicViewerPage() {
     }
   }
 
-  // Handle raw image detection (runs YOLOv11 on original drone photos)
-  // Processes in batches to avoid Vercel's 300s timeout
-  const handleRawImageDetection = async () => {
-    if (!selectedOrthomosaic || isDemo) return
-
-    setRawDetecting(true)
-    setPlantDetectionResult(null)
-    setRawDetectionProgress(null)
-    setPlotAggregation(null)
-
-    const BATCH_SIZE = 5
-    let currentStartIndex = 0
-    let allDone = false
-
-    try {
-      while (!allDone) {
-        console.log(`[RawDetection] Starting batch at index ${currentStartIndex}`)
-
-        const response = await authFetch('/api/flight-detection', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orthomosaicId: selectedOrthomosaic.id,
-            userId: user?.id,
-            confidence_threshold: confidenceThreshold,
-            startIndex: currentStartIndex,
-            batchSize: BATCH_SIZE,
-          }),
-        })
-
-        if (!response.ok) {
-          const errorData = await response.json()
-          console.error('Raw detection failed:', errorData.error)
-          alert(errorData.error || 'Raw image detection failed')
-          return
-        }
-
-        const reader = response.body?.getReader()
-        if (!reader) throw new Error('No response body')
-
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let finalResult: Record<string, unknown> | null = null
-
-        const processLine = (line: string) => {
-          if (!line.trim()) return
-          try {
-            const event = JSON.parse(line)
-
-            if (event.type === 'imageProgress') {
-              setRawDetectionProgress({
-                imageIndex: event.imageIndex,
-                totalImages: event.totalImages,
-                imageName: event.imageName,
-                phase: event.phase,
-                detectionsInImage: event.detectionsInImage,
-                totalDetections: event.totalDetections,
-              })
-            } else if (event.type === 'result') {
-              finalResult = event
-            } else if (event.type === 'error') {
-              console.error('Raw detection error:', event.error)
-              alert(event.error || 'Raw image detection failed')
-            }
-          } catch {
-            // Skip malformed lines
-          }
-        }
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
-
-          for (const line of lines) {
-            processLine(line)
-          }
-        }
-
-        buffer += decoder.decode()
-        if (buffer.trim()) processLine(buffer)
-
-        if (finalResult && finalResult.success) {
-          if (finalResult.isLastBatch) {
-            allDone = true
-          } else if (finalResult.nextStartIndex) {
-            currentStartIndex = finalResult.nextStartIndex as number
-            console.log(`[RawDetection] Batch complete, continuing at index ${currentStartIndex}`)
-          } else {
-            allDone = true
-          }
-
-          // Update result display after each batch
-          setPlantDetectionResult({
-            totalDetections: finalResult.totalDetections as number,
-            savedCount: finalResult.savedCount as number,
-            classCounts: {},
-            averageConfidence: 0,
-          })
-        } else {
-          // No result or error — stop retrying
-          allDone = true
-        }
-      }
-
-      // All batches complete — reload labels
-      const labelsResponse = await authFetch(
-        `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
-        { headers: { Authorization: `Bearer ${session?.access_token}` } }
-      )
-      const labelsData = await labelsResponse.json()
-      if (labelsData.labels) {
-        setLabels(labelsData.labels)
-      }
-
-      await handleAggregateByPlot()
-    } catch (err) {
-      console.error('Error running raw image detection:', err)
-      alert('Failed to run raw image detection. Check console for details.')
-    } finally {
-      setRawDetecting(false)
-      setRawDetectionProgress(null)
-    }
-  }
-
-  // Handle homography-based detection (feature-match raw images to ortho)
-  // Processes in batches like raw detection
-  const handleHomographyDetection = async () => {
-    if (!selectedOrthomosaic || isDemo) return
-
-    setHomoDetecting(true)
-    setPlantDetectionResult(null)
-    setHomoDetectionProgress(null)
-    setPlotAggregation(null)
-
-    const BATCH_SIZE = 3 // Smaller batches — homography is heavier per image
-    let currentStartIndex = 0
-    let allDone = false
-
-    try {
-      while (!allDone) {
-        console.log(`[HomographyDetection] Starting batch at index ${currentStartIndex}`)
-
-        const response = await authFetch('/api/homography-detection', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orthomosaicId: selectedOrthomosaic.id,
-            userId: user?.id,
-            confidence_threshold: confidenceThreshold,
-            startIndex: currentStartIndex,
-            batchSize: BATCH_SIZE,
-          }),
-        })
-
-        if (!response.ok) {
-          const errorData = await response.json()
-          console.error('Homography detection failed:', errorData.error)
-          alert(errorData.error || 'Homography detection failed')
-          return
-        }
-
-        const reader = response.body?.getReader()
-        if (!reader) throw new Error('No response body')
-
-        const decoder = new TextDecoder()
-        let buffer = ''
-        let finalResult: Record<string, unknown> | null = null
-
-        const processLine = (line: string) => {
-          if (!line.trim()) return
-          try {
-            const event = JSON.parse(line)
-
-            if (event.type === 'imageProgress') {
-              setHomoDetectionProgress({
-                imageIndex: event.imageIndex,
-                totalImages: event.totalImages,
-                imageName: event.imageName,
-                phase: event.phase,
-                detectionsInImage: event.detectionsInImage,
-                totalDetections: event.totalDetections,
-                homographyInliers: event.homographyInliers,
-              })
-            } else if (event.type === 'result') {
-              finalResult = event
-            } else if (event.type === 'error') {
-              console.error('Homography detection error:', event.error)
-              alert(event.error || 'Homography detection failed')
-            } else if (event.type === 'warning') {
-              console.warn('Homography warning:', event.message)
-            }
-          } catch {
-            // Skip malformed lines
-          }
-        }
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || ''
-
-          for (const line of lines) {
-            processLine(line)
-          }
-        }
-
-        buffer += decoder.decode()
-        if (buffer.trim()) processLine(buffer)
-
-        if (finalResult && finalResult.success) {
-          if (finalResult.isLastBatch) {
-            allDone = true
-          } else if (finalResult.nextStartIndex) {
-            currentStartIndex = finalResult.nextStartIndex as number
-            console.log(`[HomographyDetection] Batch complete, continuing at index ${currentStartIndex}`)
-          } else {
-            allDone = true
-          }
-
-          setPlantDetectionResult({
-            totalDetections: finalResult.totalDetections as number,
-            savedCount: finalResult.savedCount as number,
-            classCounts: {},
-            averageConfidence: 0,
-          })
-        } else {
-          allDone = true
-        }
-      }
-
-      // All batches complete — reload labels
-      const labelsResponse = await authFetch(
-        `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
-        { headers: { Authorization: `Bearer ${session?.access_token}` } }
-      )
-      const labelsData = await labelsResponse.json()
-      if (labelsData.labels) {
-        setLabels(labelsData.labels)
-      }
-
-      await handleAggregateByPlot()
-    } catch (err) {
-      console.error('Error running homography detection:', err)
-      alert('Failed to run homography detection. Check console for details.')
-    } finally {
-      setHomoDetecting(false)
-      setHomoDetectionProgress(null)
-    }
-  }
-
   // Aggregate plant counts by plot
   const handleAggregateByPlot = async () => {
     if (!selectedOrthomosaic) return
@@ -1169,7 +890,7 @@ export default function OrthomosaicViewerPage() {
       const data = await response.json()
       if (data.success) {
         setCameraPositionCount(data.count)
-        alert(`Fetched ${data.count} corrected camera positions. Run "Detect from Raw Images" to use them.`)
+        alert(`Fetched ${data.count} corrected camera positions.`)
       } else {
         alert(data.error || 'Failed to fetch camera positions')
       }
@@ -2142,7 +1863,7 @@ export default function OrthomosaicViewerPage() {
                     variant="default"
                     className="bg-green-600 hover:bg-green-700"
                     onClick={handlePlantDetection}
-                    disabled={plantDetecting || rawDetecting || homoDetecting}
+                    disabled={plantDetecting}
                   >
                     {plantDetecting ? (
                       <>
@@ -2153,45 +1874,6 @@ export default function OrthomosaicViewerPage() {
                       <>
                         <Sparkles className="h-4 w-4 mr-2" />
                         {plantDetectionResult ? 'Re-run Detection' : 'Count Plants'}
-                      </>
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    className="border-blue-300 text-blue-700 hover:bg-blue-50"
-                    onClick={handleRawImageDetection}
-                    disabled={rawDetecting || plantDetecting || homoDetecting}
-                  >
-                    {rawDetecting ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Processing Raw Images...
-                      </>
-                    ) : (
-                      <>
-                        <Camera className="h-4 w-4 mr-2" />
-                        Detect from Raw Images
-                      </>
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    className="border-purple-300 text-purple-700 hover:bg-purple-50"
-                    onClick={handleHomographyDetection}
-                    disabled={homoDetecting || plantDetecting || rawDetecting}
-                    title="Detect plants on raw images, then feature-match to the ortho for accurate placement"
-                  >
-                    {homoDetecting ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Feature Matching...
-                      </>
-                    ) : (
-                      <>
-                        <Focus className="h-4 w-4 mr-2" />
-                        Homography Detect
                       </>
                     )}
                   </Button>
@@ -2349,99 +2031,6 @@ export default function OrthomosaicViewerPage() {
                     {detectionProgress.totalTiles > 0
                       ? Math.round((detectionProgress.processedTiles / detectionProgress.totalTiles) * 100)
                       : 0}%
-                  </div>
-                </div>
-              )}
-
-              {/* Raw Image Detection Progress */}
-              {rawDetecting && rawDetectionProgress && (
-                <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
-                      <span className="text-sm font-medium text-blue-800">
-                        {rawDetectionProgress.phase === 'downloading' && `Downloading ${rawDetectionProgress.imageName}...`}
-                        {rawDetectionProgress.phase === 'decoding' && `Decoding ${rawDetectionProgress.imageName}...`}
-                        {rawDetectionProgress.phase === 'inferring' && `Running inference on ${rawDetectionProgress.imageName}...`}
-                        {rawDetectionProgress.phase === 'done' && `Completed ${rawDetectionProgress.imageName}`}
-                      </span>
-                    </div>
-                    <div className="text-sm text-blue-700 font-mono">
-                      Image {rawDetectionProgress.imageIndex + 1}/{rawDetectionProgress.totalImages}
-                      {rawDetectionProgress.totalDetections !== undefined && (
-                        <span className="ml-2">({rawDetectionProgress.totalDetections} plants total)</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="h-3 bg-blue-200 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-blue-600 rounded-full transition-all duration-300"
-                      style={{
-                        width: `${rawDetectionProgress.totalImages > 0
-                          ? Math.round(((rawDetectionProgress.imageIndex + (rawDetectionProgress.phase === 'done' ? 1 : 0.5)) / rawDetectionProgress.totalImages) * 100)
-                          : 0}%`
-                      }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-xs text-blue-600 mt-1">
-                    <span>
-                      {rawDetectionProgress.detectionsInImage !== undefined
-                        ? `${rawDetectionProgress.detectionsInImage} plants in this image`
-                        : 'Processing...'}
-                    </span>
-                    <span>
-                      {rawDetectionProgress.totalImages > 0
-                        ? Math.round(((rawDetectionProgress.imageIndex + (rawDetectionProgress.phase === 'done' ? 1 : 0.5)) / rawDetectionProgress.totalImages) * 100)
-                        : 0}%
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Homography Detection Progress */}
-              {homoDetecting && homoDetectionProgress && (
-                <div className="mt-4 p-4 bg-purple-50 rounded-lg border border-purple-200">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin text-purple-600" />
-                      <span className="text-sm font-medium text-purple-800">
-                        {homoDetectionProgress.phase === 'downloading' && `Downloading ${homoDetectionProgress.imageName}...`}
-                        {homoDetectionProgress.phase === 'decoding' && `Decoding ${homoDetectionProgress.imageName}...`}
-                        {homoDetectionProgress.phase === 'inferring' && `Running inference on ${homoDetectionProgress.imageName}...`}
-                        {homoDetectionProgress.phase === 'matching' && `Feature matching ${homoDetectionProgress.imageName} to ortho...`}
-                        {homoDetectionProgress.phase === 'done' && `Completed ${homoDetectionProgress.imageName}`}
-                      </span>
-                    </div>
-                    <div className="text-sm text-purple-700 font-mono">
-                      Image {homoDetectionProgress.imageIndex + 1}/{homoDetectionProgress.totalImages}
-                      {homoDetectionProgress.totalDetections !== undefined && (
-                        <span className="ml-2">({homoDetectionProgress.totalDetections} plants total)</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="h-3 bg-purple-200 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-purple-600 rounded-full transition-all duration-300"
-                      style={{
-                        width: `${homoDetectionProgress.totalImages > 0
-                          ? Math.round(((homoDetectionProgress.imageIndex + (homoDetectionProgress.phase === 'done' ? 1 : 0.5)) / homoDetectionProgress.totalImages) * 100)
-                          : 0}%`
-                      }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-xs text-purple-600 mt-1">
-                    <span>
-                      {homoDetectionProgress.phase === 'matching'
-                        ? `${homoDetectionProgress.detectionsInImage} detections, matching to ortho...`
-                        : homoDetectionProgress.detectionsInImage !== undefined
-                          ? `${homoDetectionProgress.detectionsInImage} plants placed on ortho${homoDetectionProgress.homographyInliers ? ` (${homoDetectionProgress.homographyInliers} feature matches)` : ''}`
-                          : 'Processing...'}
-                    </span>
-                    <span>
-                      {homoDetectionProgress.totalImages > 0
-                        ? Math.round(((homoDetectionProgress.imageIndex + (homoDetectionProgress.phase === 'done' ? 1 : 0.5)) / homoDetectionProgress.totalImages) * 100)
-                        : 0}%
-                    </span>
                   </div>
                 </div>
               )}

@@ -11,14 +11,27 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
+      - WEIGHTS_PATH=/app/weights/plnt_v3.pt
     volumes:
       # Mount for development - remove in production
       - ./app:/app/app:ro
       # Shared temp directory for GeoTIFF downloads
       - aruco_temp:/tmp/aruco
+      # Dev: override bundled weights without rebuilding (optional)
+      # - ./weights/plnt_v3.pt:/app/weights/plnt_v3.pt:ro
     restart: unless-stopped
     networks:
       - plnt-network
+    # NOTE: plnt_v3 runs on CPU here (no GPU). Inference is slow locally but
+    # functional. Production runs on Cloud Run with an NVIDIA L4 GPU.
+    # To use a local GPU, install the NVIDIA Container Toolkit and uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
 
 networks:
   plnt-network:

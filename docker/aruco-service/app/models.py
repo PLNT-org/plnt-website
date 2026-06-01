@@ -1,4 +1,4 @@
-"""Pydantic models for ArUco detection and homography matching API."""
+"""Pydantic models for the ArUco detection and plant detection API."""
 
 from typing import Optional
 from pydantic import BaseModel, Field
@@ -65,61 +65,6 @@ class HealthResponse(BaseModel):
 
 
 # ============================================
-# Homography Models
-# ============================================
-
-
-class HomographyRequest(BaseModel):
-    """Request body for homography computation."""
-
-    geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
-    raw_image_url: str = Field(..., description="URL of the raw drone image")
-    image_latitude: float = Field(..., description="GPS latitude of the raw image center")
-    image_longitude: float = Field(..., description="GPS longitude of the raw image center")
-    footprint_width_m: float = Field(..., description="Estimated ground footprint width in meters")
-    footprint_height_m: float = Field(..., description="Estimated ground footprint height in meters")
-    padding_factor: float = Field(default=1.5, description="Multiply footprint by this for search region")
-
-
-class HomographyResponse(BaseModel):
-    """Response from homography computation."""
-
-    success: bool
-    homography: Optional[list[list[float]]] = Field(
-        None, description="3x3 homography matrix (raw image pixels -> ortho crop pixels)"
-    )
-    crop_offset_x: int = Field(0, description="X pixel offset of crop in full ortho")
-    crop_offset_y: int = Field(0, description="Y pixel offset of crop in full ortho")
-    crop_width: int = Field(0, description="Width of the ortho crop in pixels")
-    crop_height: int = Field(0, description="Height of the ortho crop in pixels")
-    good_matches: int = Field(0, description="Number of feature matches after ratio test")
-    inlier_count: int = Field(0, description="Number of RANSAC inliers")
-    inlier_ratio: float = Field(0, description="Ratio of inliers to good matches")
-    error: Optional[str] = None
-
-
-class BatchHomographyRequest(BaseModel):
-    """Request body for batch homography computation (ortho loaded once)."""
-
-    geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
-    images: list[dict] = Field(
-        ...,
-        description="List of {raw_image_url, latitude, longitude, footprint_width_m, footprint_height_m}"
-    )
-    padding_factor: float = Field(default=1.5, description="Multiply footprint by this for search region")
-
-
-class BatchHomographyResponse(BaseModel):
-    """Response from batch homography computation."""
-
-    success: bool
-    results: list[HomographyResponse]
-    ortho_width: int = Field(0, description="Full ortho width in pixels")
-    ortho_height: int = Field(0, description="Full ortho height in pixels")
-    error: Optional[str] = None
-
-
-# ============================================
 # COG Conversion Models
 # ============================================
 
@@ -166,20 +111,22 @@ class SyncOrthoResponse(BaseModel):
 
 
 class PlantDetectionRequest(BaseModel):
-    """Request body for plant detection on an orthomosaic."""
+    """Request body for plant detection on an orthomosaic.
+
+    Defaults encode the validated plnt_v3 operating point (imgsz=1280 is fixed
+    server-side): tile 640x640, overlap 64, conf 0.25, centroid dedup r=22.
+    """
 
     geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
-    roboflow_api_key: str = Field(..., description="Roboflow API key")
-    roboflow_model_id: str = Field(..., description="Roboflow model ID (e.g. project/version)")
-    roboflow_api_url: str = Field(default="https://serverless.roboflow.com", description="Roboflow API URL")
-    confidence_threshold: float = Field(default=0.17, description="Minimum confidence threshold")
+    confidence_threshold: float = Field(default=0.25, description="Minimum confidence threshold")
     include_classes: list[str] = Field(default=["plant", "plants"], description="Classes to include")
-    tile_width: int = Field(default=500, description="Tile width in pixels")
-    tile_height: int = Field(default=281, description="Tile height in pixels")
-    overlap_x: int = Field(default=325, description="Horizontal overlap in pixels")
-    overlap_y: int = Field(default=183, description="Vertical overlap in pixels")
-    nms_iou_threshold: float = Field(default=0.2, description="IoU threshold for NMS")
-    concurrent_tiles: int = Field(default=20, description="Number of tiles to process concurrently")
+    tile_width: int = Field(default=640, description="Tile width in pixels")
+    tile_height: int = Field(default=640, description="Tile height in pixels")
+    overlap_x: int = Field(default=64, description="Horizontal overlap in pixels")
+    overlap_y: int = Field(default=64, description="Vertical overlap in pixels")
+    r_dedup: int = Field(default=22, description="Centroid-distance dedup radius in pixels")
+    concurrent_tiles: int = Field(default=20, description="Tiles between streamed progress updates")
+    nms_iou_threshold: Optional[float] = Field(default=None, description="DEPRECATED: ignored (centroid dedup replaced IoU-NMS)")
     bounds: dict = Field(..., description="Orthomosaic bounds {west, south, east, north}")
 
 
@@ -188,17 +135,15 @@ class AsyncPlantDetectionRequest(BaseModel):
 
     job_id: str = Field(..., description="Detection job ID for status updates")
     geotiff_url: str = Field(..., description="URL of the orthomosaic GeoTIFF")
-    roboflow_api_key: str = Field(...)
-    roboflow_model_id: str = Field(...)
-    roboflow_api_url: str = Field(default="https://serverless.roboflow.com")
-    confidence_threshold: float = Field(default=0.17)
+    confidence_threshold: float = Field(default=0.25)
     include_classes: list[str] = Field(default=["plant", "plants"])
-    tile_width: int = Field(default=500)
-    tile_height: int = Field(default=281)
-    overlap_x: int = Field(default=325)
-    overlap_y: int = Field(default=183)
-    nms_iou_threshold: float = Field(default=0.2)
+    tile_width: int = Field(default=640)
+    tile_height: int = Field(default=640)
+    overlap_x: int = Field(default=64)
+    overlap_y: int = Field(default=64)
+    r_dedup: int = Field(default=22)
     concurrent_tiles: int = Field(default=20)
+    nms_iou_threshold: Optional[float] = Field(default=None, description="DEPRECATED: ignored")
     bounds: dict = Field(...)
     orthomosaic_id: str = Field(...)
     user_id: str = Field(...)

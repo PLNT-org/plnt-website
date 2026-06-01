@@ -1,12 +1,14 @@
-"""Plant detection via tiled YOLO inference on orthomosaics."""
+"""Plant detection via tiled local YOLO (plnt_v3) inference on orthomosaics.
+
+This module owns the single source of truth for the tiling -> inference ->
+dedup -> georeference pipeline. Both the streaming (`/detect-plants`) and the
+async (`/detect-plants-async`) endpoints consume `detect_plants_local`, so the
+detection logic lives in exactly one place.
+"""
 
 import asyncio
-import io
 import logging
-from typing import Any
 
-import cv2
-import httpx
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -14,49 +16,9 @@ logger = logging.getLogger(__name__)
 # Skip tiles where >90% of pixels are black/transparent
 EMPTY_TILE_THRESHOLD = 0.9
 
-
-def calculate_iou(box1: dict, box2: dict) -> float:
-    """Calculate IoU between two center-format boxes."""
-    x1_1 = box1["x"] - box1["width"] / 2
-    y1_1 = box1["y"] - box1["height"] / 2
-    x2_1 = box1["x"] + box1["width"] / 2
-    y2_1 = box1["y"] + box1["height"] / 2
-
-    x1_2 = box2["x"] - box2["width"] / 2
-    y1_2 = box2["y"] - box2["height"] / 2
-    x2_2 = box2["x"] + box2["width"] / 2
-    y2_2 = box2["y"] + box2["height"] / 2
-
-    xa = max(x1_1, x1_2)
-    ya = max(y1_1, y1_2)
-    xb = min(x2_1, x2_2)
-    yb = min(y2_1, y2_2)
-
-    intersection = max(0, xb - xa) * max(0, yb - ya)
-    area1 = box1["width"] * box1["height"]
-    area2 = box2["width"] * box2["height"]
-    union = area1 + area2 - intersection
-
-    return intersection / union if union > 0 else 0
-
-
-def apply_nms(detections: list[dict], iou_threshold: float) -> list[dict]:
-    """Non-Maximum Suppression to remove duplicate detections."""
-    if not detections:
-        return []
-
-    sorted_dets = sorted(detections, key=lambda d: d["confidence"], reverse=True)
-    kept = []
-
-    while sorted_dets:
-        best = sorted_dets.pop(0)
-        kept.append(best)
-        sorted_dets = [
-            d for d in sorted_dets
-            if calculate_iou(best, d) <= iou_threshold
-        ]
-
-    return kept
+# Inference image size for the model. NOT YOLO's 640 default — small-plant
+# recall depends on running at 1280 (the validated operating point for plnt_v3).
+INFER_IMGSZ = 1280
 
 
 def pixel_to_gps(
@@ -89,58 +51,93 @@ def is_tile_empty(image: np.ndarray, x: int, y: int, w: int, h: int) -> bool:
     return np.mean(is_black) > EMPTY_TILE_THRESHOLD
 
 
-async def run_tile_inference(
-    client: httpx.AsyncClient,
-    tile_png: bytes,
-    api_url: str,
-    model_id: str,
-    api_key: str,
-    confidence: float,
-) -> list[dict]:
-    """Run YOLO inference on a single tile via Roboflow."""
-    url = f"{api_url}/{model_id}?api_key={api_key}&confidence={confidence}"
+def run_tile_inference(model, tile_rgb: np.ndarray, imgsz: int = INFER_IMGSZ, conf: float = 0.25) -> list[dict]:
+    """Run plnt_v3 on a single tile. Returns center-format detections.
 
-    response = await client.post(
-        url,
-        files={"file": ("tile.png", tile_png, "image/png")},
-    )
-
-    if response.status_code != 200:
-        logger.error(f"Roboflow error: {response.status_code} {response.text[:200]}")
+    YOLO emits xyxy corner boxes; we convert to center-format
+    {x, y, width, height} right here at the boundary so everything downstream
+    (GPS conversion, Supabase schema, Leaflet rendering) is untouched.
+    """
+    r = model.predict(tile_rgb, imgsz=imgsz, conf=conf, verbose=False)[0]
+    if r.boxes is None or len(r.boxes) == 0:
         return []
 
-    data = response.json()
-    return data.get("predictions", [])
+    xy = r.boxes.xyxy.cpu().numpy()
+    cf = r.boxes.conf.cpu().numpy()
+    out = []
+    for (x1, y1, x2, y2), c in zip(xy, cf):
+        out.append({
+            "x": float((x1 + x2) / 2),
+            "y": float((y1 + y2) / 2),
+            "width": float(x2 - x1),
+            "height": float(y2 - y1),
+            "confidence": float(c),
+            "class": "plant",
+        })
+    return out
 
 
-async def detect_plants(
+def centroid_dedup(detections: list[dict], r_dedup: int = 22) -> list[dict]:
+    """Greedy centroid-distance dedup.
+
+    Robust to the offset same-plant duplicates produced by overlapping tiles —
+    duplicates that IoU-NMS leaves behind, which is why we dedup on centroid
+    distance instead of box IoU.
+    """
+    if not detections:
+        return []
+
+    from scipy.spatial import cKDTree
+
+    ordered = sorted(detections, key=lambda d: d["confidence"], reverse=True)
+    cxy = np.array([(d["x"], d["y"]) for d in ordered])
+    tree = cKDTree(cxy)
+    suppressed = np.zeros(len(ordered), bool)
+    kept = []
+    for i in range(len(ordered)):
+        if suppressed[i]:
+            continue
+        kept.append(ordered[i])
+        # ordered is highest-confidence-first, so any neighbour with a larger
+        # index is a lower-confidence duplicate and gets suppressed.
+        for j in tree.query_ball_point(cxy[i], r_dedup):
+            if j > i:
+                suppressed[j] = True
+    return kept
+
+
+async def detect_plants_local(
+    model,
     image: np.ndarray,
     bounds: dict,
-    roboflow_api_key: str,
-    roboflow_model_id: str,
-    roboflow_api_url: str,
-    confidence_threshold: float,
-    include_classes: list[str],
-    tile_w: int,
-    tile_h: int,
-    overlap_x: int,
-    overlap_y: int,
-    nms_iou_threshold: float,
-    concurrent_tiles: int,
-    progress_callback: Any = None,
-) -> list[dict]:
-    """
-    Run tiled plant detection on an orthomosaic image.
+    *,
+    tile_w: int = 640,
+    tile_h: int = 640,
+    overlap_x: int = 64,
+    overlap_y: int = 64,
+    confidence: float = 0.25,
+    r_dedup: int = 22,
+    imgsz: int = INFER_IMGSZ,
+    include_classes=("plant", "plants"),
+    progress_every: int = 20,
+):
+    """Run tiled plnt_v3 detection on an orthomosaic image.
 
-    Returns list of detections with pixel coords, GPS coords, confidence, and class.
+    Async generator yielding NDJSON-ready events:
+      {"type": "progress", processedTiles, totalTiles, detectionsCount, phase}
+      {"type": "result", success, totalDetections, classCounts,
+       averageConfidence, imageWidth, imageHeight, detections}
+
+    Detections in the final "result" event carry pixel coords, GPS coords,
+    confidence, and class.
     """
     img_height, img_width = image.shape[:2]
-    allowed_classes = [c.lower() for c in include_classes]
+    allowed_classes = {c.lower() for c in include_classes}
 
-    stride_x = tile_w - overlap_x
-    stride_y = tile_h - overlap_y
+    stride_x = max(1, tile_w - overlap_x)
+    stride_y = max(1, tile_h - overlap_y)
 
-    # Build tile jobs, skipping empty tiles
+    # Build tile jobs, skipping mostly-empty (black/transparent) tiles
     tile_jobs = []
     skipped = 0
     for y in range(0, img_height, stride_y):
@@ -158,66 +155,59 @@ async def detect_plants(
         f"{skipped} empty skipped, tile={tile_w}x{tile_h}, stride={stride_x}x{stride_y}"
     )
 
+    yield {
+        "type": "progress",
+        "processedTiles": 0,
+        "totalTiles": total_tiles,
+        "detectionsCount": 0,
+        "phase": "tiling",
+    }
+
+    # NOTE: local YOLO inference is GIL-bound and runs sequentially. The old
+    # per-tile asyncio.gather existed only to parallelize Roboflow HTTP calls
+    # and buys nothing here. A follow-up can switch to batched model.predict
+    # (chunks of 16-32 tiles) for ~3x speedup.
     all_detections = []
-    processed = 0
+    progress_every = max(1, progress_every)
+    for idx, (x, y, crop_w, crop_h) in enumerate(tile_jobs, start=1):
+        tile = image[y:y + crop_h, x:x + crop_w]
+        # `image` is already RGB (load_geotiff_for_detection); model expects RGB.
+        for pred in run_tile_inference(model, tile, imgsz=imgsz, conf=confidence):
+            if pred["class"].lower() not in allowed_classes:
+                continue
+            all_detections.append({
+                "x": x + pred["x"],
+                "y": y + pred["y"],
+                "width": pred["width"],
+                "height": pred["height"],
+                "confidence": pred["confidence"],
+                "class": pred["class"],
+            })
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for i in range(0, len(tile_jobs), concurrent_tiles):
-            batch = tile_jobs[i:i + concurrent_tiles]
+        if idx % progress_every == 0 or idx == total_tiles:
+            yield {
+                "type": "progress",
+                "processedTiles": idx,
+                "totalTiles": total_tiles,
+                "detectionsCount": len(all_detections),
+                "phase": "tiling",
+            }
+            # Let the event loop flush streamed bytes / service other tasks.
+            await asyncio.sleep(0)
 
-            async def process_tile(job):
-                x, y, crop_w, crop_h = job
+    # Centroid dedup across all tiles
+    yield {
+        "type": "progress",
+        "processedTiles": total_tiles,
+        "totalTiles": total_tiles,
+        "detectionsCount": len(all_detections),
+        "phase": "nms",
+    }
+    logger.info(f"Detections before dedup: {len(all_detections)}")
+    final_detections = centroid_dedup(all_detections, r_dedup)
+    logger.info(f"Detections after dedup (r={r_dedup}): {len(final_detections)}")
 
-                # Extract tile as PNG using OpenCV
-                tile = image[y:y+crop_h, x:x+crop_w]
-                # Convert RGB to BGR for OpenCV encoding
-                tile_bgr = cv2.cvtColor(tile, cv2.COLOR_RGB2BGR)
-                _, png_buf = cv2.imencode(".png", tile_bgr)
-                tile_png = png_buf.tobytes()
-
-                predictions = await run_tile_inference(
-                    client, tile_png,
-                    roboflow_api_url, roboflow_model_id,
-                    roboflow_api_key, confidence_threshold,
-                )
-
-                detections = []
-                for pred in predictions:
-                    pred_class = (pred.get("class") or "plant").lower()
-                    if pred_class not in allowed_classes:
-                        continue
-                    detections.append({
-                        "x": x + pred["x"],
-                        "y": y + pred["y"],
-                        "width": pred["width"],
-                        "height": pred["height"],
-                        "confidence": pred["confidence"],
-                        "class": pred.get("class", "plant"),
-                    })
-                return detections
-
-            results = await asyncio.gather(
-                *[process_tile(job) for job in batch],
-                return_exceptions=True,
-            )
-
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"Tile error: {result}")
-                else:
-                    all_detections.extend(result)
-
-            processed += len(batch)
-
-            if progress_callback:
-                await progress_callback(processed, total_tiles, len(all_detections))
-
-    # Apply NMS
-    logger.info(f"Detections before NMS: {len(all_detections)}")
-    final_detections = apply_nms(all_detections, nms_iou_threshold)
-    logger.info(f"Detections after NMS: {len(final_detections)}")
-
-    # Add GPS coordinates
+    # Pixel -> GPS
     for det in final_detections:
         gps = pixel_to_gps(det["x"], det["y"], bounds, img_width, img_height)
         det["latitude"] = gps["lat"]
@@ -225,4 +215,21 @@ async def detect_plants(
         det["pixel_x"] = round(det["x"])
         det["pixel_y"] = round(det["y"])
 
-    return final_detections
+    class_counts: dict[str, int] = {}
+    total_confidence = 0.0
+    for det in final_detections:
+        cls = det.get("class", "plant")
+        class_counts[cls] = class_counts.get(cls, 0) + 1
+        total_confidence += det["confidence"]
+    avg_confidence = total_confidence / len(final_detections) if final_detections else 0
+
+    yield {
+        "type": "result",
+        "success": True,
+        "totalDetections": len(final_detections),
+        "classCounts": class_counts,
+        "averageConfidence": avg_confidence,
+        "imageWidth": img_width,
+        "imageHeight": img_height,
+        "detections": final_detections,
+    }

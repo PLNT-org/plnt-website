@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
+import { getArucoAuthHeaders } from '@/lib/aruco/auth'
 
 export const maxDuration = 300
 
@@ -97,7 +98,7 @@ export async function POST(request: NextRequest) {
         console.log(`[Sync] Calling Docker service for task ${taskId}...`)
         const syncRes = await fetch(`${ARUCO_SERVICE_URL}/sync-ortho`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...(await getArucoAuthHeaders(ARUCO_SERVICE_URL)) },
           body: JSON.stringify({
             geotiff_url: geotiffUrl,
             tif_upload_url: tifUpload.data.signedUrl,

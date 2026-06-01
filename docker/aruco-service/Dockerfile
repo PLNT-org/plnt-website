@@ -1,12 +1,15 @@
-# ArUco Detection Service
-# Python 3.11 with OpenCV and rasterio for GeoTIFF processing
+# ArUco + plant-detection service
+# CUDA-enabled PyTorch base so plnt_v3 (YOLOv11-seg) runs on GPU.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
-FROM python:3.11-slim
-
-# Install system dependencies for OpenCV and GDAL/rasterio
+# System dependencies:
+#   gdal-bin          -> gdal_translate CLI used by /sync-ortho COG conversion
+#   libgdal/geos/proj -> rasterio runtime
+#   libgl1/glib       -> OpenCV runtime libs
+#   curl              -> container HEALTHCHECK
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgdal-dev \
     gdal-bin \
+    libgdal-dev \
     libgeos-dev \
     libproj-dev \
     libgl1 \
@@ -17,20 +20,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements first for better caching
+# Install Python dependencies first for better caching.
+# torch is already present in the base image, so pip treats it as satisfied.
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app/ ./app/
 
-# Expose port
+# Bundle the model into the image — fetching at runtime would slow cold starts.
+COPY weights/plnt_v3.pt /app/weights/plnt_v3.pt
+
+# Expose port (kept at 8001 to match ARUCO_SERVICE_URL across the app;
+# deploy to Cloud Run with `--port 8001`).
 EXPOSE 8001
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# Health check (start-period bumped for model + CUDA init on cold start)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
 # Run the application
