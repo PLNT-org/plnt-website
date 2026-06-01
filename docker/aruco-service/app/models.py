@@ -149,3 +149,29 @@ class AsyncPlantDetectionRequest(BaseModel):
     user_id: str = Field(...)
     supabase_url: str = Field(...)
     supabase_service_key: str = Field(...)
+
+
+# ============================================
+# Tile Generation Models
+# ============================================
+
+
+class GenerateTilesRequest(BaseModel):
+    """Request body for XYZ tile-pyramid generation via gdal2tiles."""
+
+    geotiff_url: str = Field(..., description="URL of the source GeoTIFF/COG to tile")
+    orthomosaic_id: str = Field(..., description="Orthomosaic ID (tile storage prefix)")
+    supabase_url: str = Field(..., description="Supabase project URL")
+    supabase_service_key: str = Field(..., description="Supabase service-role key")
+    min_zoom: Optional[int] = Field(default=None, description="Min zoom (auto if omitted)")
+    max_zoom: Optional[int] = Field(default=None, description="Max zoom (auto if omitted)")
+
+
+class GenerateTilesResponse(BaseModel):
+    """Response from tile generation."""
+
+    success: bool
+    tile_count: int = 0
+    tiles_url: Optional[str] = None
+    zoom_range: Optional[str] = None
+    error: Optional[str] = None
