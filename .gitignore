@@ -45,3 +45,15 @@ docker/aruco-service/weights/*.pt
 
 # GCP service account key (secret — never commit; add to Vercel env instead)
 gcp-sa-key.json
+
+# GeoTIFFs (large; downloaded/processed locally, e.g. fetch-cropped-rgb.mjs output)
+*.tif
+*.tiff
+
+# Local survey publish configs (machine-specific paths); keep the template
+scripts/*.json
+!scripts/survey.example.json
+
+# Python bytecode (aruco-service)
+__pycache__/
+*.pyc
