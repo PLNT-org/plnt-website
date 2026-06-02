@@ -56,6 +56,11 @@ function writeRamp(path, stops, min, max) {
   writeFileSync(path, lines.join('\n') + '\n')
 }
 
+function bandCount(path) {
+  const info = JSON.parse(gdalOut('gdalinfo', ['-json', path]))
+  return info.bands?.length ?? 0
+}
+
 function boundsFromCog(cogPath) {
   const info = JSON.parse(gdalOut('gdalinfo', ['-json', cogPath]))
   const ring = info.wgs84Extent.coordinates[0]
@@ -113,9 +118,32 @@ async function deleteTiles(supabase, shareId) {
   return paths.length
 }
 
+// Storage uploads occasionally get a transient HTML error page (gateway/rate
+// limit) instead of JSON — retry with backoff so one blip doesn't abort a job
+// that's minutes deep. Supabase upload() can either return {error} or throw
+// (e.g. the JSON-parse error on an HTML body), so handle both.
+async function withRetry(fn, label, tries = 5) {
+  let lastErr
+  for (let i = 0; i < tries; i++) {
+    try {
+      const { error } = (await fn()) || {}
+      if (!error) return
+      lastErr = error
+    } catch (e) {
+      lastErr = e
+    }
+    if (i < tries - 1) {
+      const wait = 800 * 2 ** i
+      process.stdout.write(`\n    retry ${label} ${i + 1}/${tries - 1} in ${wait}ms (${String(lastErr?.message || lastErr).slice(0, 70)})\n`)
+      await new Promise((r) => setTimeout(r, wait))
+    }
+  }
+  throw new Error(`${label}: ${lastErr?.message || lastErr}`)
+}
+
 async function uploadCog(supabase, dest, file) {
-  const { error } = await supabase.storage.from(SHARE_BUCKET).upload(dest, readFileSync(file), { contentType: 'image/tiff', upsert: true })
-  if (error) throw new Error(`COG upload ${dest}: ${error.message}`)
+  const body = readFileSync(file)
+  await withRetry(() => supabase.storage.from(SHARE_BUCKET).upload(dest, body, { contentType: 'image/tiff', upsert: true }), `COG upload ${dest}`)
 }
 
 async function uploadTileDir(supabase, tileDir, destPrefix) {
@@ -124,8 +152,7 @@ async function uploadTileDir(supabase, tileDir, destPrefix) {
     const batch = files.slice(i, i + UPLOAD_CONCURRENCY)
     await Promise.all(batch.map(async (file) => {
       const dest = `${destPrefix}/${relative(tileDir, file)}`
-      const { error } = await supabase.storage.from(SHARE_BUCKET).upload(dest, readFileSync(file), { contentType: 'image/webp', upsert: true })
-      if (error) throw new Error(`tile upload ${dest}: ${error.message}`)
+      await withRetry(() => supabase.storage.from(SHARE_BUCKET).upload(dest, readFileSync(file), { contentType: 'image/webp', upsert: true }), `tile ${dest}`)
     }))
     process.stdout.write(`\r    tiles ${Math.min(i + UPLOAD_CONCURRENCY, files.length)}/${files.length}`)
   }
@@ -288,15 +315,20 @@ async function main() {
   }
 
   // Clip a layer's input GeoTIFF to the boundary, returning the path to use
-  // downstream. RGB/CHM get a fresh alpha (-dstalpha) so outside-boundary is
-  // transparent; NDVI already carries an alpha band, so -crop_to_cutline zeroing
-  // it outside the polygon is enough (the NDVI calc masks on that band).
-  const clipToBoundary = (type, input) => {
+  // downstream. Outside-boundary must become transparent/masked:
+  //   - RGB/CHM: add a fresh alpha band (-dstalpha).
+  //   - precomputed (single-band) NDVI: fill outside with NoData -9999 (the
+  //     color ramp's "nv" entry maps that to transparent).
+  //   - raw multi-band NDVI: already carries an alpha band, so -crop_to_cutline
+  //     zeroing it outside the polygon is enough (the NDVI calc masks on it).
+  const clipToBoundary = (type, input, precomputedNdvi) => {
     if (!cutlinePath || type === cutlineSkip) return input
     const clipped = join(work, `${type}_clipped.tif`)
-    const dstAlpha = type === 'ndvi' ? [] : ['-dstalpha']
+    let extra
+    if (type === 'ndvi') extra = precomputedNdvi ? ['-dstnodata', '-9999'] : []
+    else extra = ['-dstalpha']
     console.log(`=== ${type}: clipping to boundary ===`)
-    gdal('gdalwarp', ['-cutline', cutlinePath, '-crop_to_cutline', ...dstAlpha,
+    gdal('gdalwarp', ['-cutline', cutlinePath, '-crop_to_cutline', ...extra,
       '-of', 'GTiff', '-co', 'COMPRESS=DEFLATE', '-co', 'TILED=YES', '-co', 'BIGTIFF=IF_SAFER',
       '-overwrite', input, clipped])
     return clipped
@@ -309,7 +341,10 @@ async function main() {
     if (!lc?.input) continue
     console.log(`=== ${type}: processing ===`)
     const cog = join(work, `${type}_cog.tif`)
-    const input = clipToBoundary(type, lc.input)
+    // A single-band NDVI input is already-computed NDVI — color-ramp it directly
+    // rather than deriving it from NIR/Red bands.
+    const precomputedNdvi = type === 'ndvi' && (lc.precomputed === true || bandCount(lc.input) === 1)
+    const input = clipToBoundary(type, lc.input, precomputedNdvi)
     let tileSource
 
     if (type === 'rgb') {
@@ -320,7 +355,7 @@ async function main() {
       const vmin = lc.value_min ?? dmin
       const vmax = lc.value_max ?? dmax
 
-      if (type === 'ndvi') {
+      if (type === 'ndvi' && !precomputedNdvi) {
         const nir = lc.nir_band ?? 1
         const red = lc.red_band ?? 2
         const alpha = lc.alpha_band
@@ -337,6 +372,7 @@ async function main() {
         gdal('gdal_calc.py', args)
         gdal('gdal_translate', [raw, cog, ...COG_OPTS])
       } else {
+        // precomputed NDVI, or CHM: COG the (clipped) band directly.
         gdal('gdal_translate', [input, cog, ...COG_OPTS])
       }
 
