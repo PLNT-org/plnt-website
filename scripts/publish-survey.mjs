@@ -17,6 +17,10 @@
 //   "share_id": "<uuid>" re-tiles/updates an EXISTING share in place (keeps its
 //   link/token, replaces its tiles, updates layers/bounds; title/emails are only
 //   changed if also present in the config).
+//   "boundary": { "from_layer": "rgb" } clips NDVI/CHM to the (already-cropped)
+//   RGB's footprint so all layers align and exclude neighbouring land; or
+//   { "geojson": "/path/boundary.geojson" } clips every layer to that polygon.
+//   "plant_count": <number> is shown on the client view while RGB is active.
 
 import { createClient } from '@supabase/supabase-js'
 import { execFileSync } from 'child_process'
@@ -199,6 +203,19 @@ async function interactiveSetup() {
 
   if (Object.keys(layers).length === 0) throw new Error('You need at least one layer (RGB, NDVI, or CHM)')
 
+  let boundary
+  if (layers.rgb && (layers.ndvi || layers.chm)) {
+    const clipAns = await ask('Clip NDVI/CHM to the RGB boundary? (use this when your RGB is already cropped) (y/n)', 'y')
+    if (!clipAns.toLowerCase().startsWith('n')) boundary = { from_layer: 'rgb' }
+  }
+  if (!boundary) {
+    const gj = await askPath('Boundary GeoJSON to clip all layers to (blank for none)')
+    if (gj) boundary = { geojson: gj }
+  }
+
+  const countStr = (await ask('Plant count to display on RGB (blank to skip)')).trim()
+  const plant_count = countStr ? Number(countStr.replace(/[^0-9]/g, '')) : null
+
   const zoom = await ask('Zoom range', DEFAULT_ZOOM)
   const uploadCogsAns = await ask('Archive COGs to private storage? (y/n)', 'y')
   rl.close()
@@ -211,6 +228,8 @@ async function interactiveSetup() {
   cfg.expires_at = expires_at || null
   cfg.zoom = zoom
   cfg.upload_cogs = !uploadCogsAns.toLowerCase().startsWith('n')
+  if (boundary) cfg.boundary = boundary
+  if (typeof plant_count === 'number' && !Number.isNaN(plant_count)) cfg.plant_count = plant_count
   cfg.layers = layers
 
   const base = title ? slugify(title) : `update-${share_id.slice(0, 8)}`
@@ -244,6 +263,45 @@ async function main() {
   mkdirSync(join(work, 'tiles')) // gdal2tiles (GDAL 3.13) only creates the leaf dir, not parents
   console.log(`${isUpdate ? 'Updating' : 'Publishing'} share ${shareId}\nWork dir: ${work}\n`)
 
+  // ---- Resolve the (optional) property-boundary cutline ----
+  // Clips every layer to the same polygon so the client never sees neighbouring
+  // land — and so RGB and NDVI line up exactly. Two ways to supply it:
+  //   "boundary": { "geojson": "/path/to/boundary.geojson" }  -> clip ALL layers
+  //   "boundary": { "from_layer": "rgb" }                      -> derive the polygon
+  //       from that layer's already-cropped input (gdal_footprint on its alpha),
+  //       then clip the OTHER layers to it (the source layer is left as-is).
+  let cutlinePath = null
+  let cutlineSkip = null // a layer that's already cropped -> don't re-clip it
+  const bcfg = cfg.boundary
+  if (bcfg?.geojson) {
+    cutlinePath = cleanPath(bcfg.geojson)
+    if (!existsSync(cutlinePath)) throw new Error(`boundary.geojson not found: ${cutlinePath}`)
+    console.log(`Boundary cutline: ${cutlinePath} (clipping all layers)\n`)
+  } else if (bcfg?.from_layer) {
+    const src = cfg.layers?.[bcfg.from_layer]?.input
+    if (!src) throw new Error(`boundary.from_layer "${bcfg.from_layer}" has no matching layer input`)
+    cutlinePath = join(work, 'boundary.geojson')
+    cutlineSkip = bcfg.from_layer
+    console.log(`=== deriving boundary footprint from ${bcfg.from_layer} (gdal_footprint) ===`)
+    gdal('gdal_footprint', ['-t_srs', 'EPSG:4326', '-of', 'GeoJSON', '-overwrite', cleanPath(src), cutlinePath])
+    console.log('')
+  }
+
+  // Clip a layer's input GeoTIFF to the boundary, returning the path to use
+  // downstream. RGB/CHM get a fresh alpha (-dstalpha) so outside-boundary is
+  // transparent; NDVI already carries an alpha band, so -crop_to_cutline zeroing
+  // it outside the polygon is enough (the NDVI calc masks on that band).
+  const clipToBoundary = (type, input) => {
+    if (!cutlinePath || type === cutlineSkip) return input
+    const clipped = join(work, `${type}_clipped.tif`)
+    const dstAlpha = type === 'ndvi' ? [] : ['-dstalpha']
+    console.log(`=== ${type}: clipping to boundary ===`)
+    gdal('gdalwarp', ['-cutline', cutlinePath, '-crop_to_cutline', ...dstAlpha,
+      '-of', 'GTiff', '-co', 'COMPRESS=DEFLATE', '-co', 'TILED=YES', '-co', 'BIGTIFF=IF_SAFER',
+      '-overwrite', input, clipped])
+    return clipped
+  }
+
   // ---- Phase 1: process all layers locally (fails fast before any upload) ----
   const processed = [] // { type, cogPath, tileDir, bounds, value_min, value_max }
   for (const type of ['rgb', 'ndvi', 'chm']) {
@@ -251,10 +309,11 @@ async function main() {
     if (!lc?.input) continue
     console.log(`=== ${type}: processing ===`)
     const cog = join(work, `${type}_cog.tif`)
+    const input = clipToBoundary(type, lc.input)
     let tileSource
 
     if (type === 'rgb') {
-      gdal('gdal_translate', [lc.input, cog, ...COG_OPTS])
+      gdal('gdal_translate', [input, cog, ...COG_OPTS])
       tileSource = cog
     } else {
       const [dmin, dmax] = DEFAULT_RANGE[type]
@@ -266,10 +325,10 @@ async function main() {
         const red = lc.red_band ?? 2
         const alpha = lc.alpha_band
         const raw = join(work, 'ndvi_raw.tif')
-        const args = ['-A', lc.input, `--A_band=${nir}`, '-B', lc.input, `--B_band=${red}`]
+        const args = ['-A', input, `--A_band=${nir}`, '-B', input, `--B_band=${red}`]
         let calc
         if (alpha) {
-          args.push('-C', lc.input, `--C_band=${alpha}`)
+          args.push('-C', input, `--C_band=${alpha}`)
           calc = 'numpy.where(C>0, numpy.clip((A.astype(numpy.float32)-B.astype(numpy.float32))/(A.astype(numpy.float32)+B.astype(numpy.float32)+1e-6),-1,1), -9999)'
         } else {
           calc = 'numpy.clip((A.astype(numpy.float32)-B.astype(numpy.float32))/(A.astype(numpy.float32)+B.astype(numpy.float32)+1e-6),-1,1)'
@@ -278,7 +337,7 @@ async function main() {
         gdal('gdal_calc.py', args)
         gdal('gdal_translate', [raw, cog, ...COG_OPTS])
       } else {
-        gdal('gdal_translate', [lc.input, cog, ...COG_OPTS])
+        gdal('gdal_translate', [input, cog, ...COG_OPTS])
       }
 
       const ramp = join(work, `${type}_ramp.txt`)
@@ -325,6 +384,11 @@ async function main() {
     if (p.type !== 'rgb') {
       layer.value_min = p.value_min
       layer.value_max = p.value_max
+    }
+    // The in-boundary plant count rides on the RGB layer (the client shows it
+    // only when RGB is the active layer, since counts are tied to the photo).
+    if (p.type === 'rgb' && typeof cfg.plant_count === 'number') {
+      layer.plant_count = cfg.plant_count
     }
     layers.push(layer)
   }
