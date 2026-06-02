@@ -17,6 +17,7 @@ interface StoredLayer {
   value_min?: number
   value_max?: number
   tiled?: boolean
+  plant_count?: number
 }
 
 // Gated XYZ tile URL template — served through the proxy that validates the
@@ -70,10 +71,24 @@ export async function POST(
           bounds: layer.bounds,
           value_min: layer.value_min,
           value_max: layer.value_max,
+          plant_count: layer.plant_count,
         }
-        // Pre-rendered tiles (fast path) when available, else stream the COG.
+        // For tiled layers: tilesUrl is the fast path. Also include a signed COG
+        // URL so the viewer can switch to live client-side recoloring when the
+        // user drags the legend range away from the baked default.
         if (layer.tiled) {
-          return { ...base, tilesUrl: tileUrlTemplate(layer.type, accessToken) }
+          const out: Record<string, any> = {
+            ...base,
+            tilesUrl: tileUrlTemplate(layer.type, accessToken),
+          }
+          if (layer.storage_path) {
+            try {
+              out.url = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL)
+            } catch {
+              // COG not archived for this share — that's fine, slider just won't recolor live.
+            }
+          }
+          return out
         }
         return { ...base, url: await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL) }
       })
