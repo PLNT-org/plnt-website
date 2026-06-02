@@ -18,6 +18,7 @@ interface StoredLayer {
   value_max?: number
   tiled?: boolean
   plant_count?: number
+  points_path?: string
 }
 
 // Gated XYZ tile URL template — served through the proxy that validates the
@@ -86,6 +87,13 @@ export async function POST(
               out.url = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL)
             } catch {
               // COG not archived for this share — that's fine, slider just won't recolor live.
+            }
+          }
+          if (layer.points_path) {
+            try {
+              out.pointsUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.points_path, SIGNED_URL_TTL)
+            } catch {
+              // No points file — map just won't draw per-plant dots.
             }
           }
           return out

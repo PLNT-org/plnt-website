@@ -16,6 +16,7 @@ export interface ShareLayer {
   value_min?: number
   value_max?: number
   plant_count?: number // in-boundary plant count (RGB layer only); shown when RGB is active
+  pointsUrl?: string // signed URL to points.json ([[lat,lng],...]); per-plant dots, RGB only
 }
 
 export interface SharedPropertyData {
@@ -96,6 +97,12 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
   const parsedRastersRef = useRef<Partial<Record<LayerType, any>>>({})
   const cogRangeRef = useRef<Partial<Record<LayerType, { min: number; max: number }>>>({})
 
+  // Per-plant dots: one canvas renderer + a layer group built once from the
+  // fetched [lat,lng] list (kept performant at ~10k+ points via canvas).
+  const pointsLayerRef = useRef<L.LayerGroup | null>(null)
+  const pointsCanvasRef = useRef<L.Canvas | null>(null)
+  const pointsDataRef = useRef<[number, number][] | null>(null)
+
   const present = data.layers.map((l) => l.type)
   const [visible, setVisible] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(data.layers.map((l) => [l.type, l.type === 'rgb']))
@@ -107,6 +114,8 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
   const [ready, setReady] = useState<Record<string, boolean>>({})
   const [error, setError] = useState<Record<string, string>>({})
   const [cogLoading, setCogLoading] = useState<Record<string, boolean>>({})
+  const [showPoints, setShowPoints] = useState(true)
+  const [pointsLoading, setPointsLoading] = useState(false)
   const [panelOpen, setPanelOpen] = useState(() =>
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 640px)').matches
   )
@@ -165,6 +174,8 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
       cogLayersRef.current = {}
       parsedRastersRef.current = {}
       cogRangeRef.current = {}
+      pointsLayerRef.current = null
+      pointsCanvasRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -269,12 +280,68 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
     }
   }, [visible, customRange, ready, data.layers])
 
-  const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
-
   // The plant count is tied to the RGB orthophoto, so it's only meaningful (and
   // only shown) while the RGB layer is the active one.
   const rgbLayer = data.layers.find((l) => l.type === 'rgb')
   const showCount = !!visible['rgb'] && typeof rgbLayer?.plant_count === 'number'
+
+  // Per-plant dots, tied to RGB visibility + the markers toggle. Fetch the
+  // [lat,lng] list once, build the canvas marker group once, then just add/
+  // remove it from the map as the toggles change.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const wantPoints = !!visible['rgb'] && showPoints && !!rgbLayer?.pointsUrl
+    let cancelled = false
+
+    const ensure = async () => {
+      if (!wantPoints) {
+        const g = pointsLayerRef.current
+        if (g && map.hasLayer(g)) map.removeLayer(g)
+        return
+      }
+      if (pointsLayerRef.current) {
+        if (!map.hasLayer(pointsLayerRef.current)) pointsLayerRef.current.addTo(map)
+        return
+      }
+      setPointsLoading(true)
+      try {
+        if (!pointsDataRef.current) {
+          const res = await fetch(rgbLayer!.pointsUrl!)
+          pointsDataRef.current = await res.json()
+        }
+        if (cancelled) return
+        if (!pointsCanvasRef.current) pointsCanvasRef.current = L.canvas({ padding: 0.5 })
+        const renderer = pointsCanvasRef.current
+        const group = L.layerGroup()
+        for (const [lat, lng] of pointsDataRef.current!) {
+          L.circleMarker([lat, lng], {
+            renderer,
+            radius: 3,
+            fillColor: '#22c55e',
+            fillOpacity: 1,
+            color: '#ffffff',
+            weight: 1,
+            opacity: 1,
+          }).addTo(group)
+        }
+        if (cancelled) return
+        pointsLayerRef.current = group
+        group.addTo(map)
+      } catch (err) {
+        console.error('Failed to load plant points:', err)
+      } finally {
+        if (!cancelled) setPointsLoading(false)
+      }
+    }
+
+    void ensure()
+    return () => {
+      cancelled = true
+    }
+  }, [visible, showPoints, rgbLayer])
+
+  const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
 
   return (
     <div className="relative h-full w-full">
@@ -327,6 +394,21 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
                     </label>
                     {error[layer.type] && (
                       <p className="text-xs text-red-600 pl-6 pt-1">Could not load this layer.</p>
+                    )}
+                    {layer.type === 'rgb' && layer.pointsUrl && isOn && (
+                      <label className="flex items-center gap-2 cursor-pointer pl-6 pt-1.5">
+                        <input
+                          type="checkbox"
+                          checked={showPoints}
+                          onChange={(e) => setShowPoints(e.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="h-2.5 w-2.5 rounded-full bg-[#22c55e] shrink-0 ring-1 ring-white" />
+                        <span className="text-xs text-gray-600 flex-1">
+                          Plant markers{typeof layer.plant_count === 'number' ? ` (${layer.plant_count.toLocaleString()})` : ''}
+                        </span>
+                        {pointsLoading && <span className="text-[10px] text-gray-400">loading…</span>}
+                      </label>
                     )}
                   </div>
                 )

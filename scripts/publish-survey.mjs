@@ -21,6 +21,8 @@
 //   RGB's footprint so all layers align and exclude neighbouring land; or
 //   { "geojson": "/path/boundary.geojson" } clips every layer to that polygon.
 //   "plant_count": <number> is shown on the client view while RGB is active.
+//   "plant_points": { "orthomosaic_id": "<uuid>" } exports that ortho's plant
+//   detections as per-plant dots (and sets the count from the actual rows).
 
 import { createClient } from '@supabase/supabase-js'
 import { execFileSync } from 'child_process'
@@ -139,6 +141,29 @@ async function withRetry(fn, label, tries = 5) {
     }
   }
   throw new Error(`${label}: ${lastErr?.message || lastErr}`)
+}
+
+// Pull every AI/manual plant point for an ortho (paged past the 1000-row cap)
+// as compact [lat, lng] pairs (6 decimals ≈ 0.1 m) for the client map to dot.
+async function fetchPlantPoints(supabase, orthoId) {
+  const pts = []
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('plant_labels')
+      .select('latitude, longitude')
+      .eq('orthomosaic_id', orthoId)
+      .range(from, from + PAGE - 1)
+    if (error) throw new Error(`fetch plant points: ${error.message}`)
+    if (!data?.length) break
+    for (const r of data) {
+      if (typeof r.latitude === 'number' && typeof r.longitude === 'number') {
+        pts.push([Math.round(r.latitude * 1e6) / 1e6, Math.round(r.longitude * 1e6) / 1e6])
+      }
+    }
+    if (data.length < PAGE) break
+  }
+  return pts
 }
 
 async function uploadCog(supabase, dest, file) {
@@ -421,10 +446,24 @@ async function main() {
       layer.value_min = p.value_min
       layer.value_max = p.value_max
     }
-    // The in-boundary plant count rides on the RGB layer (the client shows it
-    // only when RGB is the active layer, since counts are tied to the photo).
-    if (p.type === 'rgb' && typeof cfg.plant_count === 'number') {
-      layer.plant_count = cfg.plant_count
+    // The in-boundary plant count + per-plant dots ride on the RGB layer (the
+    // client shows them only when RGB is the active layer — they're tied to the
+    // photo). plant_points.orthomosaic_id exports the actual detections as dots
+    // (and makes the count authoritative); otherwise a manual plant_count shows.
+    if (p.type === 'rgb') {
+      const orthoId = cfg.plant_points?.orthomosaic_id
+      if (orthoId) {
+        console.log('    fetching plant points...')
+        const pts = await fetchPlantPoints(supabase, orthoId)
+        const ptsPath = `${shareId}/points.json`
+        const body = Buffer.from(JSON.stringify(pts))
+        await withRetry(() => supabase.storage.from(SHARE_BUCKET).upload(ptsPath, body, { contentType: 'application/json', upsert: true }), 'points.json upload')
+        layer.points_path = ptsPath
+        layer.plant_count = pts.length
+        console.log(`    ${pts.length.toLocaleString()} plant points uploaded (${(body.length / 1e3).toFixed(0)} KB)`)
+      } else if (typeof cfg.plant_count === 'number') {
+        layer.plant_count = cfg.plant_count
+      }
     }
     layers.push(layer)
   }
