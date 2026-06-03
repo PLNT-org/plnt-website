@@ -17,11 +17,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { ArucoScanner } from '@/components/aruco-scanner'
 import { BarcodeScanner } from '@/components/barcode-scanner'
 import { GpsCapture } from '@/components/gps-capture'
 import {
-  QrCode,
   Barcode,
   MapPin,
   Check,
@@ -32,7 +30,6 @@ import {
   AlertCircle,
   CheckCircle2,
 } from 'lucide-react'
-import { supabase } from '@/lib/supabase/client'
 
 interface Species {
   id: string
@@ -49,17 +46,16 @@ interface GpsPosition {
   accuracy: number
 }
 
-type Step = 'aruco' | 'species' | 'location' | 'confirm'
+type Step = 'scan' | 'location' | 'confirm'
 
 export default function RegisterMarkerPage() {
   const { user, session } = useAuth()
-  const [currentStep, setCurrentStep] = useState<Step>('aruco')
+  const [currentStep, setCurrentStep] = useState<Step>('scan')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [submitSuccess, setSubmitSuccess] = useState(false)
 
   // Form state
-  const [arucoMarkerId, setArucoMarkerId] = useState<number | null>(null)
   const [selectedSpecies, setSelectedSpecies] = useState<Species | null>(null)
   const [scannedBarcode, setScannedBarcode] = useState<string | null>(null)
   const [gpsPosition, setGpsPosition] = useState<GpsPosition | null>(null)
@@ -69,12 +65,9 @@ export default function RegisterMarkerPage() {
   // Species state
   const [speciesList, setSpeciesList] = useState<Species[]>([])
   const [isLoadingSpecies, setIsLoadingSpecies] = useState(false)
-  const [showBarcodeScanner, setShowBarcodeScanner] = useState(false)
+  const [showBarcodeScanner, setShowBarcodeScanner] = useState(true)
   const [showManualEntry, setShowManualEntry] = useState(false)
   const [newSpeciesName, setNewSpeciesName] = useState('')
-
-  // Scanner visibility
-  const [showArucoScanner, setShowArucoScanner] = useState(true)
 
   // Load user's species list
   useEffect(() => {
@@ -101,11 +94,6 @@ export default function RegisterMarkerPage() {
     } finally {
       setIsLoadingSpecies(false)
     }
-  }
-
-  const handleArucoDetect = (markerId: number) => {
-    setArucoMarkerId(markerId)
-    setShowArucoScanner(false)
   }
 
   const handleBarcodeScanned = async (value: string) => {
@@ -176,7 +164,7 @@ export default function RegisterMarkerPage() {
   }
 
   const handleSubmit = async () => {
-    if (!arucoMarkerId || !gpsPosition || !session?.access_token) return
+    if (!scannedBarcode || !gpsPosition || !session?.access_token) return
 
     setIsSubmitting(true)
     setSubmitError(null)
@@ -189,7 +177,7 @@ export default function RegisterMarkerPage() {
           Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({
-          aruco_marker_id: arucoMarkerId,
+          marker_code: scannedBarcode,
           species_id: selectedSpecies?.id,
           barcode_value: scannedBarcode,
           latitude: gpsPosition.lat,
@@ -220,15 +208,13 @@ export default function RegisterMarkerPage() {
 
   const handleRegisterAnother = () => {
     // Reset all state
-    setCurrentStep('aruco')
-    setArucoMarkerId(null)
+    setCurrentStep('scan')
     setSelectedSpecies(null)
     setScannedBarcode(null)
     setGpsPosition(null)
     setPlotName('')
     setNotes('')
-    setShowArucoScanner(true)
-    setShowBarcodeScanner(false)
+    setShowBarcodeScanner(true)
     setShowManualEntry(false)
     setSubmitSuccess(false)
     setSubmitError(null)
@@ -239,8 +225,7 @@ export default function RegisterMarkerPage() {
   }
 
   const steps: { key: Step; label: string; icon: any }[] = [
-    { key: 'aruco', label: 'Scan Marker', icon: QrCode },
-    { key: 'species', label: 'Link Species', icon: Barcode },
+    { key: 'scan', label: 'Scan Plant', icon: Barcode },
     { key: 'location', label: 'Location', icon: MapPin },
     { key: 'confirm', label: 'Confirm', icon: Check },
   ]
@@ -248,10 +233,8 @@ export default function RegisterMarkerPage() {
   const currentStepIndex = steps.findIndex((s) => s.key === currentStep)
   const canProceed = () => {
     switch (currentStep) {
-      case 'aruco':
-        return arucoMarkerId !== null
-      case 'species':
-        return true // Species is optional
+      case 'scan':
+        return scannedBarcode !== null
       case 'location':
         return gpsPosition !== null
       case 'confirm':
@@ -271,15 +254,15 @@ export default function RegisterMarkerPage() {
               <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
                 <CheckCircle2 className="h-8 w-8 text-green-600" />
               </div>
-              <h2 className="text-xl font-semibold text-green-800 mb-2">Marker Registered!</h2>
+              <h2 className="text-xl font-semibold text-green-800 mb-2">Plant Registered!</h2>
               <p className="text-green-700 mb-6">
-                Marker #{arucoMarkerId} has been registered
-                {selectedSpecies && ` with species "${selectedSpecies.name}"`}.
+                Barcode {scannedBarcode} has been registered
+                {selectedSpecies && ` as "${selectedSpecies.name}"`}.
               </p>
               <div className="flex flex-col gap-3">
                 <Button onClick={handleRegisterAnother} className="w-full" size="lg">
                   <Plus className="h-4 w-4 mr-2" />
-                  Register Another Marker
+                  Register Another Plant
                 </Button>
                 <Button
                   variant="outline"
@@ -353,83 +336,17 @@ export default function RegisterMarkerPage() {
 
       {/* Main Content */}
       <div className="max-w-lg mx-auto p-4 pb-24">
-        {/* Step 1: Scan ArUco Marker */}
-        {currentStep === 'aruco' && (
-          <div className="space-y-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <QrCode className="h-5 w-5" />
-                  Scan ArUco Marker
-                </CardTitle>
-                <CardDescription>
-                  Point your camera at the ArUco marker to scan it
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {showArucoScanner ? (
-                  <ArucoScanner
-                    onDetect={handleArucoDetect}
-                    onError={(error) => console.error('ArUco error:', error)}
-                  />
-                ) : (
-                  <div className="text-center py-8">
-                    <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <CheckCircle2 className="h-8 w-8 text-green-600" />
-                    </div>
-                    <p className="text-lg font-medium text-gray-900">Marker ID: {arucoMarkerId}</p>
-                    <Button
-                      variant="outline"
-                      className="mt-4"
-                      onClick={() => {
-                        setArucoMarkerId(null)
-                        setShowArucoScanner(true)
-                      }}
-                    >
-                      Scan Different Marker
-                    </Button>
-                  </div>
-                )}
-
-                {/* Manual entry fallback */}
-                <div className="mt-4 pt-4 border-t">
-                  <Label htmlFor="manual-aruco">Or enter marker ID manually:</Label>
-                  <div className="flex gap-2 mt-2">
-                    <Input
-                      id="manual-aruco"
-                      type="number"
-                      min="0"
-                      max="999"
-                      placeholder="0-999"
-                      value={arucoMarkerId ?? ''}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value, 10)
-                        if (!isNaN(val) && val >= 0 && val <= 999) {
-                          setArucoMarkerId(val)
-                          setShowArucoScanner(false)
-                        } else if (e.target.value === '') {
-                          setArucoMarkerId(null)
-                        }
-                      }}
-                    />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
-        {/* Step 2: Link Species */}
-        {currentStep === 'species' && (
+        {/* Step 1: Scan Plant Barcode */}
+        {currentStep === 'scan' && (
           <div className="space-y-4">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Barcode className="h-5 w-5" />
-                  Link to Species
+                  Scan Plant Barcode
                 </CardTitle>
                 <CardDescription>
-                  Scan the plant barcode or select a species from your list
+                  Scan the plant&apos;s barcode to identify it and tag this location
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -447,7 +364,7 @@ export default function RegisterMarkerPage() {
                     onClick={() => setShowBarcodeScanner(true)}
                   >
                     <Barcode className="h-4 w-4 mr-2" />
-                    Scan Barcode
+                    {scannedBarcode ? 'Scan Again' : 'Scan Barcode'}
                   </Button>
                 )}
 
@@ -459,7 +376,7 @@ export default function RegisterMarkerPage() {
 
                 {/* Species Selection */}
                 <div className="space-y-2">
-                  <Label>Or select from your species:</Label>
+                  <Label>Species (auto-filled from barcode, or pick one):</Label>
                   <Select
                     value={selectedSpecies?.id || ''}
                     onValueChange={handleSelectSpecies}
@@ -539,7 +456,7 @@ export default function RegisterMarkerPage() {
           </div>
         )}
 
-        {/* Step 3: Confirm Location */}
+        {/* Step 2: Confirm Location */}
         {currentStep === 'location' && (
           <div className="space-y-4">
             <Card>
@@ -582,7 +499,7 @@ export default function RegisterMarkerPage() {
           </div>
         )}
 
-        {/* Step 4: Confirm & Submit */}
+        {/* Step 3: Confirm & Submit */}
         {currentStep === 'confirm' && (
           <div className="space-y-4">
             <Card>
@@ -591,13 +508,13 @@ export default function RegisterMarkerPage() {
                   <Check className="h-5 w-5" />
                   Confirm Registration
                 </CardTitle>
-                <CardDescription>Review and submit your marker registration</CardDescription>
+                <CardDescription>Review and submit your plant registration</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-3 text-sm">
                   <div className="flex justify-between py-2 border-b">
-                    <span className="text-gray-600">ArUco Marker ID:</span>
-                    <span className="font-medium">{arucoMarkerId}</span>
+                    <span className="text-gray-600">Barcode:</span>
+                    <span className="font-medium truncate max-w-[200px]">{scannedBarcode}</span>
                   </div>
                   <div className="flex justify-between py-2 border-b">
                     <span className="text-gray-600">Species:</span>
@@ -605,12 +522,6 @@ export default function RegisterMarkerPage() {
                       {selectedSpecies?.name || 'Not selected'}
                     </span>
                   </div>
-                  {scannedBarcode && (
-                    <div className="flex justify-between py-2 border-b">
-                      <span className="text-gray-600">Barcode:</span>
-                      <span className="font-medium truncate max-w-[200px]">{scannedBarcode}</span>
-                    </div>
-                  )}
                   <div className="flex justify-between py-2 border-b">
                     <span className="text-gray-600">Location:</span>
                     <span className="font-medium">
@@ -679,7 +590,7 @@ export default function RegisterMarkerPage() {
               ) : (
                 <>
                   <Check className="h-4 w-4 mr-2" />
-                  Register Marker
+                  Register Plant
                 </>
               )}
             </Button>

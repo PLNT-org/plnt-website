@@ -20,6 +20,32 @@ export function BarcodeScanner({ onScan, onError, onClose }: BarcodeScannerProps
   const [scannedValue, setScannedValue] = useState<string | null>(null)
   const scannedRef = useRef(false)
 
+  // Keep the latest callbacks in refs so the camera effect can run once on
+  // mount without restarting (and re-prompting for permission) every time the
+  // parent re-renders and passes new inline onScan/onError functions.
+  const onScanRef = useRef(onScan)
+  const onErrorRef = useRef(onError)
+  useEffect(() => {
+    onScanRef.current = onScan
+    onErrorRef.current = onError
+  })
+
+  // Stop the running scanner, tolerating both async rejections and the
+  // synchronous "Cannot stop, scanner is not running" throw from html5-qrcode.
+  const stopScanner = () => {
+    const scanner = scannerRef.current
+    if (!scanner) return
+    scannerRef.current = null
+    try {
+      const result = scanner.stop()
+      if (result && typeof (result as Promise<void>).catch === 'function') {
+        ;(result as Promise<void>).catch(() => {})
+      }
+    } catch {
+      // Scanner was not running/paused — safe to ignore.
+    }
+  }
+
   useEffect(() => {
     const startScanner = async () => {
       if (!containerRef.current || scannedRef.current) return
@@ -52,10 +78,10 @@ export function BarcodeScanner({ onScan, onError, onClose }: BarcodeScannerProps
               }
 
               const format = result.result.format?.formatName || 'UNKNOWN'
-              onScan(decodedText, format)
+              onScanRef.current(decodedText, format)
 
               // Stop scanner after successful scan
-              scanner.stop().catch(console.error)
+              stopScanner()
             }
           },
           () => {
@@ -68,7 +94,7 @@ export function BarcodeScanner({ onScan, onError, onClose }: BarcodeScannerProps
         console.error('Scanner error:', err)
         const message = err instanceof Error ? err.message : 'Failed to start scanner'
         setError(message)
-        onError?.(message)
+        onErrorRef.current?.(message)
         setIsLoading(false)
       }
     }
@@ -76,23 +102,19 @@ export function BarcodeScanner({ onScan, onError, onClose }: BarcodeScannerProps
     startScanner()
 
     return () => {
-      if (scannerRef.current) {
-        scannerRef.current.stop().catch(console.error)
-        scannerRef.current = null
-      }
+      stopScanner()
     }
-  }, [onScan, onError])
+    // Start once on mount; latest callbacks are read from refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleRetry = () => {
     scannedRef.current = false
     setScannedValue(null)
     setError(null)
 
-    // Trigger re-mount by updating key
-    if (scannerRef.current) {
-      scannerRef.current.stop().catch(console.error)
-      scannerRef.current = null
-    }
+    // Trigger re-mount by reloading
+    stopScanner()
 
     // Small delay to allow cleanup
     setTimeout(() => {
@@ -101,9 +123,7 @@ export function BarcodeScanner({ onScan, onError, onClose }: BarcodeScannerProps
   }
 
   const handleClose = () => {
-    if (scannerRef.current) {
-      scannerRef.current.stop().catch(console.error)
-    }
+    stopScanner()
     onClose?.()
   }
 
