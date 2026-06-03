@@ -2,7 +2,7 @@
 
 import { authFetch } from '@/lib/auth/auth-fetch'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuth } from '@/lib/auth/auth-context'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -21,6 +21,7 @@ import { BarcodeScanner } from '@/components/barcode-scanner'
 import { GpsCapture } from '@/components/gps-capture'
 import {
   Barcode,
+  Camera,
   MapPin,
   Check,
   ChevronRight,
@@ -29,6 +30,7 @@ import {
   Loader2,
   AlertCircle,
   CheckCircle2,
+  ImageIcon,
 } from 'lucide-react'
 
 interface Species {
@@ -61,6 +63,12 @@ export default function RegisterMarkerPage() {
   const [gpsPosition, setGpsPosition] = useState<GpsPosition | null>(null)
   const [plotName, setPlotName] = useState('')
   const [notes, setNotes] = useState('')
+
+  // Label-photo failsafe (when the barcode can't be scanned)
+  const [labelPhotoUrl, setLabelPhotoUrl] = useState<string | null>(null)
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false)
+  const [photoError, setPhotoError] = useState<string | null>(null)
+  const labelPhotoInputRef = useRef<HTMLInputElement>(null)
 
   // Species state
   const [speciesList, setSpeciesList] = useState<Species[]>([])
@@ -126,6 +134,37 @@ export default function RegisterMarkerPage() {
     }
   }
 
+  const handleLabelPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    // Reset the input so picking the same file again still fires onChange.
+    e.target.value = ''
+    if (!file || !session?.access_token) return
+
+    setIsUploadingPhoto(true)
+    setPhotoError(null)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const response = await authFetch('/api/marker-registrations/label-photo', {
+        method: 'POST',
+        body: formData,
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setLabelPhotoUrl(data.path)
+        // A photo is enough to register; close the scanner if it was open.
+        setShowBarcodeScanner(false)
+      } else {
+        setPhotoError('Upload failed. Please try again.')
+      }
+    } catch (error) {
+      console.error('Failed to upload label photo:', error)
+      setPhotoError('Upload failed. Please try again.')
+    } finally {
+      setIsUploadingPhoto(false)
+    }
+  }
+
   const handleGpsCapture = (position: GpsPosition) => {
     setGpsPosition(position)
   }
@@ -166,7 +205,8 @@ export default function RegisterMarkerPage() {
   }
 
   const handleSubmit = async () => {
-    if (!scannedBarcode || !gpsPosition || !session?.access_token) return
+    // A barcode OR a label photo is enough to register.
+    if ((!scannedBarcode && !labelPhotoUrl) || !gpsPosition || !session?.access_token) return
 
     setIsSubmitting(true)
     setSubmitError(null)
@@ -179,9 +219,10 @@ export default function RegisterMarkerPage() {
           Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({
-          marker_code: scannedBarcode,
+          marker_code: scannedBarcode || undefined,
+          label_photo_url: labelPhotoUrl || undefined,
           species_id: selectedSpecies?.id,
-          barcode_value: scannedBarcode,
+          barcode_value: scannedBarcode || undefined,
           latitude: gpsPosition.lat,
           longitude: gpsPosition.lng,
           gps_accuracy_meters: gpsPosition.accuracy,
@@ -216,6 +257,8 @@ export default function RegisterMarkerPage() {
     setGpsPosition(null)
     setPlotName('')
     setNotes('')
+    setLabelPhotoUrl(null)
+    setPhotoError(null)
     setShowBarcodeScanner(false)
     setShowManualEntry(false)
     setSubmitSuccess(false)
@@ -236,7 +279,7 @@ export default function RegisterMarkerPage() {
   const canProceed = () => {
     switch (currentStep) {
       case 'scan':
-        return scannedBarcode !== null
+        return scannedBarcode !== null || labelPhotoUrl !== null
       case 'location':
         return gpsPosition !== null
       case 'confirm':
@@ -258,7 +301,9 @@ export default function RegisterMarkerPage() {
               </div>
               <h2 className="text-xl font-semibold text-green-800 mb-2">Plant Registered!</h2>
               <p className="text-green-700 mb-6">
-                Barcode {scannedBarcode} has been registered
+                {scannedBarcode
+                  ? `Barcode ${scannedBarcode} has been registered`
+                  : 'Label photo has been registered'}
                 {selectedSpecies && ` as "${selectedSpecies.name}"`}.
               </p>
               <div className="flex flex-col gap-3">
@@ -374,6 +419,54 @@ export default function RegisterMarkerPage() {
                   <div className="p-3 bg-blue-50 rounded-lg text-sm">
                     <span className="font-medium">Scanned:</span> {scannedBarcode}
                   </div>
+                )}
+
+                {/* Failsafe: photo of the label when the barcode won't scan */}
+                <input
+                  ref={labelPhotoInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={handleLabelPhoto}
+                />
+                {labelPhotoUrl ? (
+                  <div className="p-3 bg-green-50 rounded-lg border border-green-200 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2 text-sm text-green-800">
+                      <ImageIcon className="h-4 w-4" />
+                      Label photo attached
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => labelPhotoInputRef.current?.click()}
+                    >
+                      Retake
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full text-gray-600"
+                    disabled={isUploadingPhoto}
+                    onClick={() => labelPhotoInputRef.current?.click()}
+                  >
+                    {isUploadingPhoto ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Uploading photo...
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="h-4 w-4 mr-2" />
+                        Can&apos;t scan? Take a photo of the label
+                      </>
+                    )}
+                  </Button>
+                )}
+                {photoError && (
+                  <p className="text-xs text-red-600 text-center">{photoError}</p>
                 )}
 
                 {/* Species Selection */}
@@ -514,10 +607,20 @@ export default function RegisterMarkerPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-3 text-sm">
-                  <div className="flex justify-between py-2 border-b">
-                    <span className="text-gray-600">Barcode:</span>
-                    <span className="font-medium truncate max-w-[200px]">{scannedBarcode}</span>
-                  </div>
+                  {scannedBarcode && (
+                    <div className="flex justify-between py-2 border-b">
+                      <span className="text-gray-600">Barcode:</span>
+                      <span className="font-medium truncate max-w-[200px]">{scannedBarcode}</span>
+                    </div>
+                  )}
+                  {labelPhotoUrl && (
+                    <div className="flex justify-between py-2 border-b">
+                      <span className="text-gray-600">Label Photo:</span>
+                      <span className="font-medium flex items-center gap-1 text-green-700">
+                        <ImageIcon className="h-4 w-4" /> Attached
+                      </span>
+                    </div>
+                  )}
                   <div className="flex justify-between py-2 border-b">
                     <span className="text-gray-600">Species:</span>
                     <span className="font-medium">
