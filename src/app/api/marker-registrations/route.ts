@@ -63,6 +63,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const {
       aruco_marker_id,
+      marker_code,
       aruco_dictionary,
       species_id,
       barcode_value,
@@ -73,27 +74,38 @@ export async function POST(request: NextRequest) {
       notes,
     } = body
 
-    if (aruco_marker_id === undefined || latitude === undefined || longitude === undefined) {
+    // A marker is identified by either a scanned barcode (marker_code) or an ArUco ID.
+    const hasMarkerCode = marker_code !== undefined && marker_code !== null && marker_code !== ''
+    const hasArucoId = aruco_marker_id !== undefined && aruco_marker_id !== null
+
+    if ((!hasMarkerCode && !hasArucoId) || latitude === undefined || longitude === undefined) {
       return NextResponse.json(
-        { error: 'aruco_marker_id, latitude, and longitude are required' },
+        { error: 'marker_code or aruco_marker_id, plus latitude and longitude, are required' },
         { status: 400 }
       )
     }
 
     // Deactivate any existing active registration for this marker
-    await supabase
-      .from('marker_registrations')
-      .update({ is_active: false })
-      .eq('user_id', user.id)
-      .eq('aruco_marker_id', aruco_marker_id)
-      .eq('is_active', true)
+    // (matched on whichever identifier was provided).
+    {
+      let deactivate = supabase
+        .from('marker_registrations')
+        .update({ is_active: false })
+        .eq('user_id', user.id)
+        .eq('is_active', true)
+      deactivate = hasMarkerCode
+        ? deactivate.eq('marker_code', marker_code)
+        : deactivate.eq('aruco_marker_id', aruco_marker_id)
+      await deactivate
+    }
 
     // Create new registration
     const { data, error } = await supabase
       .from('marker_registrations')
       .insert({
         user_id: user.id,
-        aruco_marker_id,
+        aruco_marker_id: hasArucoId ? aruco_marker_id : null,
+        marker_code: hasMarkerCode ? marker_code : null,
         aruco_dictionary: aruco_dictionary || 'DICT_7X7_1000',
         species_id,
         barcode_value,
