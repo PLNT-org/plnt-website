@@ -398,19 +398,22 @@ function DashboardContent() {
                 </p>
               </div>
 
-              {/* Quick Actions - admin only */}
-              {userRole === 'admin' && (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-                  <Link href="/dashboard/register-marker">
-                    <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
-                      <CardContent className="pt-6 text-center">
-                        <QrCode className="w-10 h-10 text-pink-600 mb-2 mx-auto" />
-                        <h3 className="font-semibold">Register Marker</h3>
-                        <p className="text-sm text-gray-500 mt-1">Tag plants in field</p>
-                      </CardContent>
-                    </Card>
-                  </Link>
+              {/* Quick Actions */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                {/* Register Marker (barcode scanner) - available to all users */}
+                <Link href="/dashboard/register-marker">
+                  <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
+                    <CardContent className="pt-6 text-center">
+                      <QrCode className="w-10 h-10 text-pink-600 mb-2 mx-auto" />
+                      <h3 className="font-semibold">Register Marker</h3>
+                      <p className="text-sm text-gray-500 mt-1">Tag plants in field</p>
+                    </CardContent>
+                  </Card>
+                </Link>
 
+                {/* Remaining quick actions - admin only */}
+                {userRole === 'admin' && (
+                  <>
                   <Link href="/dashboard/orthomosaic">
                     <Card className="hover:shadow-lg transition-shadow cursor-pointer h-full">
                       <CardContent className="pt-6 text-center">
@@ -440,8 +443,9 @@ function DashboardContent() {
                       </CardContent>
                     </Card>
                   </Link>
-                </div>
-              )}
+                  </>
+                )}
+              </div>
 
               {/* Inventory Table */}
               <Card>
