@@ -65,7 +65,6 @@ export function BarcodeScanner({ onScan, onError, onClose }: BarcodeScannerProps
           {
             fps: 10,
             qrbox: { width: 250, height: 150 },
-            aspectRatio: 1.0,
           },
           (decodedText, result) => {
             if (!scannedRef.current) {
@@ -141,33 +140,35 @@ export function BarcodeScanner({ onScan, onError, onClose }: BarcodeScannerProps
           </Button>
         )}
 
-        {isLoading && (
-          <div className="flex flex-col items-center justify-center h-64 bg-gray-900">
-            <Camera className="h-8 w-8 text-gray-400 animate-pulse" />
-            <p className="text-gray-400 mt-2">Starting camera...</p>
-          </div>
-        )}
+        {/* The video container is always laid out (never display:none) so that
+            iOS Safari actually renders the camera feed. Loading/error states are
+            overlaid on top instead of replacing it. */}
+        <div className="relative w-full min-h-[300px] bg-gray-900">
+          <div ref={containerRef} className="w-full min-h-[300px]" />
 
-        {error && (
-          <div className="flex flex-col items-center justify-center h-64 bg-gray-900 p-4">
-            <AlertCircle className="h-8 w-8 text-red-400" />
-            <p className="text-red-400 mt-2 text-center">{error}</p>
-            <Button onClick={handleRetry} className="mt-4" variant="outline">
-              Retry
-            </Button>
-          </div>
-        )}
+          {isLoading && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900">
+              <Camera className="h-8 w-8 text-gray-400 animate-pulse" />
+              <p className="text-gray-400 mt-2">Starting camera...</p>
+            </div>
+          )}
 
-        <div
-          ref={containerRef}
-          className={`w-full min-h-[300px] ${isLoading || error ? 'hidden' : ''}`}
-        />
+          {error && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 p-4">
+              <AlertCircle className="h-8 w-8 text-red-400" />
+              <p className="text-red-400 mt-2 text-center">{error}</p>
+              <Button onClick={handleRetry} className="mt-4" variant="outline">
+                Retry
+              </Button>
+            </div>
+          )}
 
-        {scannedValue && (
-          <div className="absolute bottom-16 left-1/2 transform -translate-x-1/2 bg-green-500 text-white px-4 py-2 rounded-full font-bold max-w-[90%] truncate">
-            {scannedValue}
-          </div>
-        )}
+          {scannedValue && (
+            <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-green-500 text-white px-4 py-2 rounded-full font-bold max-w-[90%] truncate">
+              {scannedValue}
+            </div>
+          )}
+        </div>
 
         <div className="p-3 bg-gray-100 text-center text-sm text-gray-600">
           Point camera at a barcode

@@ -65,7 +65,9 @@ export default function RegisterMarkerPage() {
   // Species state
   const [speciesList, setSpeciesList] = useState<Species[]>([])
   const [isLoadingSpecies, setIsLoadingSpecies] = useState(false)
-  const [showBarcodeScanner, setShowBarcodeScanner] = useState(true)
+  // Start the camera only when the user taps "Scan Barcode" — iOS Safari needs a
+  // user gesture to render the camera feed (auto-starting it shows a blank frame).
+  const [showBarcodeScanner, setShowBarcodeScanner] = useState(false)
   const [showManualEntry, setShowManualEntry] = useState(false)
   const [newSpeciesName, setNewSpeciesName] = useState('')
 
@@ -214,7 +216,7 @@ export default function RegisterMarkerPage() {
     setGpsPosition(null)
     setPlotName('')
     setNotes('')
-    setShowBarcodeScanner(true)
+    setShowBarcodeScanner(false)
     setShowManualEntry(false)
     setSubmitSuccess(false)
     setSubmitError(null)
