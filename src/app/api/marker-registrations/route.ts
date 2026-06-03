@@ -64,6 +64,7 @@ export async function POST(request: NextRequest) {
     const {
       aruco_marker_id,
       marker_code,
+      label_photo_url,
       aruco_dictionary,
       species_id,
       barcode_value,
@@ -74,20 +75,31 @@ export async function POST(request: NextRequest) {
       notes,
     } = body
 
-    // A marker is identified by either a scanned barcode (marker_code) or an ArUco ID.
+    // A marker is identified by a scanned barcode (marker_code), an ArUco ID, or
+    // a label photo (failsafe when the barcode can't be scanned).
     const hasMarkerCode = marker_code !== undefined && marker_code !== null && marker_code !== ''
     const hasArucoId = aruco_marker_id !== undefined && aruco_marker_id !== null
+    const hasLabelPhoto =
+      label_photo_url !== undefined && label_photo_url !== null && label_photo_url !== ''
 
-    if ((!hasMarkerCode && !hasArucoId) || latitude === undefined || longitude === undefined) {
+    if (
+      (!hasMarkerCode && !hasArucoId && !hasLabelPhoto) ||
+      latitude === undefined ||
+      longitude === undefined
+    ) {
       return NextResponse.json(
-        { error: 'marker_code or aruco_marker_id, plus latitude and longitude, are required' },
+        {
+          error:
+            'A marker identifier (marker_code, aruco_marker_id, or label_photo_url) plus latitude and longitude are required',
+        },
         { status: 400 }
       )
     }
 
     // Deactivate any existing active registration for this marker
-    // (matched on whichever identifier was provided).
-    {
+    // (matched on whichever identifier was provided). Photo-only registrations
+    // have no stable identifier to dedup on, so each one is kept.
+    if (hasMarkerCode || hasArucoId) {
       let deactivate = supabase
         .from('marker_registrations')
         .update({ is_active: false })
@@ -106,6 +118,7 @@ export async function POST(request: NextRequest) {
         user_id: user.id,
         aruco_marker_id: hasArucoId ? aruco_marker_id : null,
         marker_code: hasMarkerCode ? marker_code : null,
+        label_photo_url: hasLabelPhoto ? label_photo_url : null,
         aruco_dictionary: aruco_dictionary || 'DICT_7X7_1000',
         species_id,
         barcode_value,
