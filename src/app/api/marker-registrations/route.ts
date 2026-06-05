@@ -96,19 +96,18 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Deactivate any existing active registration for this marker
-    // (matched on whichever identifier was provided). Photo-only registrations
-    // have no stable identifier to dedup on, so each one is kept.
-    if (hasMarkerCode || hasArucoId) {
-      let deactivate = supabase
+    // Deactivate any existing active registration for this marker. Only ArUco
+    // markers are physically unique; product barcodes (SKUs) are shared across
+    // many plants, so multiple active registrations of the same marker_code are
+    // allowed — each scan is its own plant at its own location. Photo-only
+    // registrations have no stable identifier to dedup on, so each one is kept.
+    if (hasArucoId) {
+      await supabase
         .from('marker_registrations')
         .update({ is_active: false })
         .eq('user_id', user.id)
         .eq('is_active', true)
-      deactivate = hasMarkerCode
-        ? deactivate.eq('marker_code', marker_code)
-        : deactivate.eq('aruco_marker_id', aruco_marker_id)
-      await deactivate
+        .eq('aruco_marker_id', aruco_marker_id)
     }
 
     // Create new registration
