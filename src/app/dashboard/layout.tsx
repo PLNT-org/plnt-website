@@ -29,9 +29,17 @@ export default function DashboardLayout({
   const checkUserRole = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser()
-      
+
       if (!user) {
-        router.push('/auth/signin')
+        // Demo mode has no Supabase session — let it through as a viewer.
+        // (Middleware already gates non-demo unauthenticated access; this
+        // mirrors its demo check so the client doesn't bounce demo users.)
+        const isDemoMode =
+          localStorage.getItem('isDemoMode') === 'true' ||
+          new URLSearchParams(window.location.search).get('demo') === 'true'
+        if (!isDemoMode) {
+          router.push('/auth/signin')
+        }
         return
       }
 

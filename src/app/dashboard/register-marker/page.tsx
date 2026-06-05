@@ -48,7 +48,7 @@ interface GpsPosition {
   accuracy: number
 }
 
-type Step = 'scan' | 'location' | 'confirm'
+type Step = 'scan' | 'confirm'
 
 export default function RegisterMarkerPage() {
   const { user, session } = useAuth()
@@ -106,9 +106,42 @@ export default function RegisterMarkerPage() {
     }
   }
 
-  const handleBarcodeScanned = async (value: string) => {
+  // Persist every successful decode immediately (raw value, format, best-effort
+  // GPS) so no field scan is ever lost, even if the wizard is abandoned.
+  // Fire-and-forget: failures never block or surface in the scan flow.
+  const logRawScan = (value: string, format?: string) => {
+    if (!session?.access_token) return
+    const send = (coords?: GeolocationCoordinates) => {
+      authFetch('/api/barcode-scans', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          raw_value: value,
+          format,
+          latitude: coords?.latitude,
+          longitude: coords?.longitude,
+          gps_accuracy_meters: coords?.accuracy,
+        }),
+      }).catch(() => {})
+    }
+    if ('geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => send(pos.coords),
+        () => send(),
+        { enableHighAccuracy: true, timeout: 4000, maximumAge: 15000 }
+      )
+    } else {
+      send()
+    }
+  }
+
+  const handleBarcodeScanned = async (value: string, format?: string) => {
     setScannedBarcode(value)
     setShowBarcodeScanner(false)
+    logRawScan(value, format)
 
     // Try to look up species by barcode
     if (session?.access_token) {
@@ -270,8 +303,7 @@ export default function RegisterMarkerPage() {
   }
 
   const steps: { key: Step; label: string; icon: any }[] = [
-    { key: 'scan', label: 'Scan Plant', icon: Barcode },
-    { key: 'location', label: 'Location', icon: MapPin },
+    { key: 'scan', label: 'Scan & Location', icon: Barcode },
     { key: 'confirm', label: 'Confirm', icon: Check },
   ]
 
@@ -279,9 +311,7 @@ export default function RegisterMarkerPage() {
   const canProceed = () => {
     switch (currentStep) {
       case 'scan':
-        return scannedBarcode !== null || labelPhotoUrl !== null
-      case 'location':
-        return gpsPosition !== null
+        return (scannedBarcode !== null || labelPhotoUrl !== null) && gpsPosition !== null
       case 'confirm':
         return true
       default:
@@ -548,12 +578,9 @@ export default function RegisterMarkerPage() {
                 </p>
               </CardContent>
             </Card>
-          </div>
-        )}
 
-        {/* Step 2: Confirm Location */}
-        {currentStep === 'location' && (
-          <div className="space-y-4">
+            {/* Location confirmation lives on the same page as the scanner so
+                the field flow is scan → confirm GPS → Next, no page hopping. */}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -565,7 +592,12 @@ export default function RegisterMarkerPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <GpsCapture onCapture={handleGpsCapture} autoCapture={false} minAccuracy={10} />
+                <GpsCapture
+                  onCapture={handleGpsCapture}
+                  autoCapture={false}
+                  minAccuracy={10}
+                  capturedPosition={gpsPosition}
+                />
 
                 <div className="space-y-3">
                   <div>
@@ -594,7 +626,7 @@ export default function RegisterMarkerPage() {
           </div>
         )}
 
-        {/* Step 3: Confirm & Submit */}
+        {/* Step 2: Confirm & Submit */}
         {currentStep === 'confirm' && (
           <div className="space-y-4">
             <Card>

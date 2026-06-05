@@ -15,9 +15,17 @@ interface GpsCaptureProps {
   onCapture: (position: GpsPosition) => void
   autoCapture?: boolean
   minAccuracy?: number // Meters - warn if accuracy is worse than this
+  // The position the parent has accepted; drives the confirmed button state so
+  // it resets when the parent clears it (e.g. "Register Another").
+  capturedPosition?: GpsPosition | null
 }
 
-export function GpsCapture({ onCapture, autoCapture = true, minAccuracy = 10 }: GpsCaptureProps) {
+export function GpsCapture({
+  onCapture,
+  autoCapture = true,
+  minAccuracy = 10,
+  capturedPosition = null,
+}: GpsCaptureProps) {
   const [position, setPosition] = useState<GpsPosition | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -176,16 +184,42 @@ export function GpsCapture({ onCapture, autoCapture = true, minAccuracy = 10 }: 
           </div>
         </div>
 
+        {/* Explicit colors (not bg-primary) so the state change is unmistakable:
+            blue = tap to confirm, green = confirmed. */}
         {!autoCapture && position && (
           <Button
             onClick={handleManualCapture}
-            className="w-full mt-4"
-            variant={position.accuracy <= minAccuracy ? 'default' : 'outline'}
+            className={`w-full mt-4 h-12 text-base ${
+              capturedPosition
+                ? 'bg-green-600 hover:bg-green-700 text-white'
+                : position.accuracy <= minAccuracy
+                ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                : ''
+            }`}
+            variant={
+              capturedPosition || position.accuracy <= minAccuracy
+                ? 'default'
+                : 'outline'
+            }
           >
-            <MapPin className="h-4 w-4 mr-2" />
-            Use This Location
-            {position.accuracy > minAccuracy && ' (Low Accuracy)'}
+            {capturedPosition ? (
+              <>
+                <CheckCircle2 className="h-5 w-5 mr-2" />
+                Location Confirmed
+              </>
+            ) : (
+              <>
+                <MapPin className="h-5 w-5 mr-2" />
+                Confirm This Location
+                {position.accuracy > minAccuracy && ' (Low Accuracy)'}
+              </>
+            )}
           </Button>
+        )}
+        {!autoCapture && capturedPosition && (
+          <p className="text-xs text-gray-500 text-center mt-2">
+            Tap again to update with your current position
+          </p>
         )}
       </CardContent>
     </Card>
