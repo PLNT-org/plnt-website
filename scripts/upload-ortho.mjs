@@ -12,8 +12,13 @@
 //   # Full flow: upload + insert + tile + set tiles_url
 //   node scripts/upload-ortho.mjs /path/to/ortho.tif ["Display name"]
 //
-//   # Tiles only (for an already-uploaded ortho you want to make viewable):
+//   # Tiles only (existing ortho, local source .tif):
 //   node scripts/upload-ortho.mjs --tiles-only <orthomosaic_id> /path/to/ortho.tif
+//
+//   # Retile an existing ortho from whatever .tif is stored on the row (handy
+//   # after the dashboard crops it — the row's original_tif_url already points
+//   # at the cropped .tif, so this is a one-shot fix):
+//   node scripts/upload-ortho.mjs --retile <orthomosaic_id>
 //
 // What the full flow does:
 //   1. Reads bounds/dimensions from the .tif (gdalinfo).
@@ -82,6 +87,25 @@ function walk(dir, ext) {
   return out
 }
 
+// Storage uploads occasionally get an HTML gateway/rate-limit page back instead
+// of JSON. Retry with exponential backoff so one blip doesn't kill a long job.
+async function withRetry(fn, label, tries = 5) {
+  let lastErr
+  for (let i = 0; i < tries; i++) {
+    try {
+      const { error } = (await fn()) || {}
+      if (!error) return
+      lastErr = error
+    } catch (e) {
+      lastErr = e
+    }
+    if (i < tries - 1) {
+      await new Promise((r) => setTimeout(r, 800 * 2 ** i))
+    }
+  }
+  throw new Error(`${label}: ${lastErr?.message || lastErr}`)
+}
+
 // Generate a public XYZ WebP tile pyramid for an existing orthomosaic_id and
 // wire up its tiles_url so the dashboard viewer renders it.
 async function tileAndPublish(supabase, orthoId, tifPath) {
@@ -103,10 +127,11 @@ async function tileAndPublish(supabase, orthoId, tifPath) {
       await Promise.all(batch.map(async (file) => {
         const rel = relative(tilesDir, file)
         const dest = `${orthoId}/${rel}`
-        const { error } = await supabase.storage
-          .from(TILES_BUCKET)
-          .upload(dest, readFileSync(file), { contentType: 'image/webp', upsert: true })
-        if (error) throw new Error(`Upload tile ${dest}: ${error.message}`)
+        const body = readFileSync(file)
+        await withRetry(
+          () => supabase.storage.from(TILES_BUCKET).upload(dest, body, { contentType: 'image/webp', upsert: true }),
+          `tile ${dest}`,
+        )
       }))
       done += batch.length
       process.stdout.write(`\r  ${done}/${files.length}`)
@@ -143,6 +168,49 @@ async function tilesOnly() {
   console.log(`Tiling existing ortho ${orthoId} from ${tifPath}`)
   await tileAndPublish(supabase, orthoId, tifPath)
   console.log(`\n✅ Dashboard viewer should now show this ortho.`)
+}
+
+// Pull the row's current source .tif from Supabase, generate fresh tiles, and
+// set tiles_url. Most useful after the dashboard's crop-to-boundary endpoint,
+// which writes a new orthophoto_cropped.tif and clears tiles_url.
+async function retile() {
+  const orthoId = process.argv[3]
+  if (!orthoId || !UUID_RE.test(orthoId)) {
+    throw new Error('Usage: node scripts/upload-ortho.mjs --retile <orthomosaic_id>')
+  }
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) throw new Error('Source .env.local first: `set -a; source .env.local; set +a`')
+  const supabase = createClient(url, key)
+
+  const { data: row, error } = await supabase
+    .from('orthomosaics')
+    .select('name, original_tif_url, orthomosaic_url')
+    .eq('id', orthoId)
+    .single()
+  if (error || !row) throw new Error(`Orthomosaic ${orthoId} not found`)
+
+  // Prefer the original (post-crop becomes the cropped tif); only fall back to
+  // orthomosaic_url if no original was ever stored.
+  const sourceUrl = row.original_tif_url || row.orthomosaic_url
+  if (!sourceUrl) throw new Error('No source .tif URL on this orthomosaic')
+
+  console.log(`Retiling "${row.name}" (${orthoId})`)
+  console.log(`  source: ${sourceUrl}`)
+
+  const tempDir = mkdtempSync(join(tmpdir(), 'plnt-retile-'))
+  const tempTif = join(tempDir, 'source.tif')
+  try {
+    console.log('Downloading source .tif…')
+    execFileSync('curl', ['-fsSL', sourceUrl, '-o', tempTif], { stdio: 'inherit' })
+    const sizeMB = (statSync(tempTif).size / 1024 / 1024).toFixed(1)
+    console.log(`  downloaded ${sizeMB} MB`)
+
+    await tileAndPublish(supabase, orthoId, tempTif)
+    console.log(`\n✅ Tiles regenerated for "${row.name}" — dashboard viewer will load them on next refresh.`)
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true })
+  }
 }
 
 async function fullFlow() {
@@ -185,10 +253,10 @@ async function fullFlow() {
   console.log('Uploading TIF…')
   const body = readFileSync(tifPath)
   const storagePath = `${id}/orthophoto.tif`
-  const { error: upErr } = await supabase.storage
-    .from(ORTHOS_BUCKET)
-    .upload(storagePath, body, { contentType: 'image/tiff', upsert: true })
-  if (upErr) throw new Error(`Upload TIF: ${upErr.message}`)
+  await withRetry(
+    () => supabase.storage.from(ORTHOS_BUCKET).upload(storagePath, body, { contentType: 'image/tiff', upsert: true }),
+    'TIF upload',
+  )
 
   const { data: urlData } = supabase.storage.from(ORTHOS_BUCKET).getPublicUrl(storagePath)
   await supabase.from('orthomosaics').update({ original_tif_url: urlData.publicUrl }).eq('id', id)
@@ -205,7 +273,10 @@ async function fullFlow() {
 }
 
 const mode = process.argv[2]
-const run = mode === '--tiles-only' ? tilesOnly : fullFlow
+const run =
+  mode === '--retile' ? retile :
+  mode === '--tiles-only' ? tilesOnly :
+  fullFlow
 run().catch((e) => {
   console.error('\n❌', e.message || e)
   process.exit(1)
