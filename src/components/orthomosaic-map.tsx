@@ -232,12 +232,22 @@ export default function OrthomosaicMap({
           try {
             const parseGeoRaster = (await import('georaster')).default
             const GeoRasterLayer = (await import('georaster-layer-for-leaflet')).default
-            const georaster = await parseGeoRaster(orthomosaic.orthomosaic_url)
-            const cogLayer = new GeoRasterLayer({
+            const georaster: any = await parseGeoRaster(orthomosaic.orthomosaic_url)
+            const cogOptions: any = {
               georaster,
               opacity: 0.9,
               resolution: 512,
-            })
+            }
+            // Respect the alpha band on RGBA orthos (e.g. cropped outputs) so the
+            // border outside data renders transparent, not opaque black.
+            if (georaster?.numberOfRasters >= 4) {
+              cogOptions.pixelValuesToColorFn = (values: number[]) => {
+                const [r, g, b, a] = values
+                if (a === 0) return undefined
+                return `rgb(${r},${g},${b})`
+              }
+            }
+            const cogLayer = new GeoRasterLayer(cogOptions)
             cogLayer.addTo(map)
             orthophotoLayerRef.current = cogLayer
           } catch (err) {
