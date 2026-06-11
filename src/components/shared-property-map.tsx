@@ -161,6 +161,18 @@ function pointInRing(lng: number, lat: number, ring: number[][]): boolean {
   return inside
 }
 
+// Average vertex of a ring [[lng,lat], ...] -> [lng, lat]. Used to find which
+// block a species plot sits inside.
+function ringCentroid(ring: number[][]): [number, number] {
+  let sx = 0
+  let sy = 0
+  for (const [x, y] of ring) {
+    sx += x
+    sy += y
+  }
+  return [sx / ring.length, sy / ring.length]
+}
+
 const DEFAULT_PLOT_COLOR = '#10b981'
 
 // Color a plot by block when the Block layer is on; otherwise by size when
@@ -799,19 +811,45 @@ export default function SharedPropertyMap({
     window.addEventListener('pointerup', up)
   }
 
-  // Export the current location's plots as CSV (matches the drawer's columns).
+  // Inventory rows = species plots only. A species is drawn inside a block, so
+  // it inherits that block's number + size (found by which block boundary its
+  // centroid falls inside).
+  const blockPlots = plots.filter((p) => p.block != null)
+  const inventoryRows = plots
+    .filter((p) => !!p.species)
+    .map((sp) => {
+      const ring = sp.boundary?.coordinates?.[0]
+      let block: SharePlot | null = null
+      if (ring) {
+        const [clng, clat] = ringCentroid(ring)
+        block =
+          blockPlots.find((b) => {
+            const br = b.boundary?.coordinates?.[0]
+            return br ? pointInRing(clng, clat, br) : false
+          }) || null
+      }
+      return {
+        id: sp.id,
+        species: sp.species,
+        size: block?.size ?? null,
+        block: block?.block ?? null,
+        readinessDate: sp.readinessDate ?? null,
+      }
+    })
+
+  // Export the current location's species inventory as CSV (matches the drawer's columns).
   const exportInventoryCSV = () => {
     const cell = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
     }
     const headers = ['Species', 'Size (gal)', 'Count', 'Readiness', 'Block']
-    const rows = plots.map((p) => [
-      p.species || '',
-      p.size != null ? p.size : '',
-      invCounts ? invCounts[p.id] ?? 0 : '',
-      p.readinessDate ? fmtReadiness(p.readinessDate) : '',
-      p.block != null ? p.block : '',
+    const rows = inventoryRows.map((r) => [
+      r.species || '',
+      r.size != null ? r.size : '',
+      invCounts ? invCounts[r.id] ?? 0 : '',
+      r.readinessDate ? fmtReadiness(r.readinessDate) : '',
+      r.block != null ? r.block : '',
     ])
     const csv = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\n')
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
@@ -1185,7 +1223,7 @@ export default function SharedPropertyMap({
         >
           <Table2 className="h-4 w-4" />
           Inventory
-          <span className="text-green-300 tabular-nums">({plots.length})</span>
+          <span className="text-green-300 tabular-nums">({inventoryRows.length})</span>
           <ChevronUp className="h-4 w-4" />
         </button>
       )}
@@ -1204,11 +1242,11 @@ export default function SharedPropertyMap({
             <div className="absolute left-1/2 -translate-x-1/2 top-1.5 h-1 w-10 rounded-full bg-gray-300" />
             <Table2 className="h-4 w-4 text-[#0f2e1d] shrink-0" />
             <span className="text-sm font-semibold text-gray-900">Inventory</span>
-            <span className="text-xs text-gray-400 tabular-nums">{plots.length} plots</span>
+            <span className="text-xs text-gray-400 tabular-nums">{inventoryRows.length} species</span>
             <div className="ml-auto flex items-center gap-1">
               <button
                 onClick={exportInventoryCSV}
-                disabled={plots.length === 0}
+                disabled={inventoryRows.length === 0}
                 className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
                 title="Download CSV"
                 aria-label="Download inventory as CSV"
@@ -1236,9 +1274,9 @@ export default function SharedPropertyMap({
 
           {/* Table */}
           <div className="flex-1 overflow-auto">
-            {plots.length === 0 ? (
+            {inventoryRows.length === 0 ? (
               <div className="h-full flex items-center justify-center text-sm text-gray-400 p-6 text-center">
-                No plots drawn yet. Turn on Block or Species and use “Draw plot” to add one.
+                No species plots yet. Turn on Species and use its “Draw” button to add one.
               </div>
             ) : (
               <table className="w-full text-sm">
@@ -1252,20 +1290,20 @@ export default function SharedPropertyMap({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {plots.map((p) => (
-                    <tr key={p.id} className="hover:bg-gray-50">
-                      <td className="px-3 py-2 text-gray-900">{p.species || <span className="text-gray-300">—</span>}</td>
+                  {inventoryRows.map((r) => (
+                    <tr key={r.id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 text-gray-900">{r.species || <span className="text-gray-300">—</span>}</td>
                       <td className="px-3 py-2 text-gray-700">
-                        {p.size != null ? `${p.size}-Gallon` : <span className="text-gray-300">—</span>}
+                        {r.size != null ? `${r.size}-Gallon` : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums font-medium text-gray-900">
-                        {invCounts ? (invCounts[p.id] ?? 0).toLocaleString() : invCounting ? '…' : '—'}
+                        {invCounts ? (invCounts[r.id] ?? 0).toLocaleString() : invCounting ? '…' : '—'}
                       </td>
                       <td className="px-3 py-2 text-gray-700">
-                        {p.readinessDate ? fmtReadiness(p.readinessDate) : <span className="text-gray-300">—</span>}
+                        {r.readinessDate ? fmtReadiness(r.readinessDate) : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2 text-gray-700">
-                        {p.block != null ? p.block : <span className="text-gray-300">—</span>}
+                        {r.block != null ? r.block : <span className="text-gray-300">—</span>}
                       </td>
                     </tr>
                   ))}
