@@ -253,6 +253,8 @@ export default function SharedPropertyMap({
   const anyAnnot = annot.block || annot.species
   const [plots, setPlots] = useState<SharePlot[]>([])
   const [isDrawing, setIsDrawing] = useState(false)
+  // Which layer's Draw button started this drawing — decides the tag form's fields.
+  const [drawMode, setDrawMode] = useState<'block' | 'species' | null>(null)
   // Draft holds the just-finished polygon awaiting the tag form.
   const [draft, setDraft] = useState<{ boundary: GeoJSONPolygon; areaAcres: number } | null>(null)
   const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '' })
@@ -560,10 +562,12 @@ export default function SharedPropertyMap({
     setIsDrawing(false)
   }, [teardownDraw])
 
-  // Begin click-to-add-points drawing. Double-click or right-click finishes.
-  const startDrawing = useCallback(() => {
+  // Begin click-to-add-points drawing in a given layer's mode. The mode decides
+  // which fields the tag form collects (block+size vs species+readiness).
+  const startDrawing = useCallback((mode: 'block' | 'species') => {
     const map = mapRef.current
     if (!map) return
+    setDrawMode(mode)
     setDraft(null)
     setSaveError('')
     setIsDrawing(true)
@@ -648,9 +652,13 @@ export default function SharedPropertyMap({
 
   const savePlot = useCallback(async () => {
     if (!draft || !data.accessToken) return
-    // Block and its container size are captured together — both required.
-    if (annot.block && (!form.block.trim() || !form.size.trim())) {
+    // The draw mode (which Draw button was used) decides the required fields.
+    if (drawMode === 'block' && (!form.block.trim() || !form.size.trim())) {
       setSaveError('Block and container size are both required.')
+      return
+    }
+    if (drawMode === 'species' && !form.species.trim()) {
+      setSaveError('Species is required.')
       return
     }
     setSaving(true)
@@ -662,11 +670,11 @@ export default function SharedPropertyMap({
         body: JSON.stringify({
           boundary: draft.boundary,
           areaAcres: draft.areaAcres,
-          // Size rides with block (its sub-layer), so it's sent whenever block is.
-          block: annot.block ? form.block : undefined,
-          size: annot.block ? form.size : undefined,
-          species: annot.species ? form.species : undefined,
-          readinessDate: annot.species ? form.readinessDate : undefined,
+          // Only the drawn layer's fields are saved (block+size, or species+readiness).
+          block: drawMode === 'block' ? form.block : undefined,
+          size: drawMode === 'block' ? form.size : undefined,
+          species: drawMode === 'species' ? form.species : undefined,
+          readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
           email: viewerEmail,
         }),
       })
@@ -682,7 +690,7 @@ export default function SharedPropertyMap({
     } finally {
       setSaving(false)
     }
-  }, [draft, data.accessToken, token, annot, form, viewerEmail])
+  }, [draft, data.accessToken, token, drawMode, form, viewerEmail])
 
   const deletePlot = useCallback(
     async (id: string) => {
@@ -855,7 +863,7 @@ export default function SharedPropertyMap({
               <p className="text-xs text-gray-500">
                 Area: <span className="font-medium text-gray-700">{draft.areaAcres.toFixed(2)} acres</span>
               </p>
-              {annot.block && (
+              {drawMode === 'block' && (
                 <>
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">
@@ -885,7 +893,7 @@ export default function SharedPropertyMap({
                   </div>
                 </>
               )}
-              {annot.species && (
+              {drawMode === 'species' && (
                 <>
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Species</label>
@@ -1005,35 +1013,36 @@ export default function SharedPropertyMap({
 
               {/* Plot data — draw + tag boundary plots */}
               <div className="mt-1 pt-1.5 border-t border-gray-100">
-                <div className="flex items-center justify-between px-1.5 pb-1">
-                  <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400">Plot data</span>
-                  {isDrawing ? (
-                    <span className="text-[11px] font-medium text-green-600">Drawing…</span>
-                  ) : (
-                    anyAnnot &&
-                    !draft && (
+                <p className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">Plot data</p>
+                {/* Block row, with its own Draw button. Size is grouped beneath and
+                    is captured together with block when you draw a block plot. */}
+                <div className="flex items-center gap-2 rounded p-1.5 hover:bg-gray-50">
+                  <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+                    <input
+                      type="checkbox"
+                      checked={annot.block}
+                      onChange={(e) => setAnnot((p) => ({ ...p, block: e.target.checked }))}
+                      className="rounded border-gray-300"
+                    />
+                    <span className="text-sm text-gray-800 truncate">{ANNOT_META.block.label}</span>
+                  </label>
+                  {annot.block &&
+                    !draft &&
+                    (isDrawing ? (
+                      drawMode === 'block' && (
+                        <span className="text-[11px] font-medium text-green-600 shrink-0">Drawing…</span>
+                      )
+                    ) : (
                       <button
-                        onClick={startDrawing}
-                        className="flex items-center gap-1 rounded bg-green-600 text-white px-2 py-0.5 text-[11px] font-medium hover:bg-green-700"
-                        title="Draw a boundary plot"
+                        onClick={() => startDrawing('block')}
+                        className="flex items-center gap-1 rounded bg-green-600 text-white px-2 py-0.5 text-[11px] font-medium hover:bg-green-700 shrink-0"
+                        title="Draw a block plot"
                       >
                         <Pencil className="h-3 w-3" />
                         Draw
                       </button>
-                    )
-                  )}
+                    ))}
                 </div>
-                {/* Block, with Size grouped beneath it. Size displays independently
-                    (view sizes without block numbers), but is captured with block at draw time. */}
-                <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
-                  <input
-                    type="checkbox"
-                    checked={annot.block}
-                    onChange={(e) => setAnnot((p) => ({ ...p, block: e.target.checked }))}
-                    className="rounded border-gray-300"
-                  />
-                  <span className="text-sm text-gray-800 flex-1">{ANNOT_META.block.label}</span>
-                </label>
                 <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 pl-7 hover:bg-gray-50">
                   <input
                     type="checkbox"
@@ -1043,16 +1052,34 @@ export default function SharedPropertyMap({
                   />
                   <span className="text-xs text-gray-600 flex-1">{ANNOT_META.size.label}</span>
                 </label>
-                {/* Species */}
-                <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
-                  <input
-                    type="checkbox"
-                    checked={annot.species}
-                    onChange={(e) => setAnnot((p) => ({ ...p, species: e.target.checked }))}
-                    className="rounded border-gray-300"
-                  />
-                  <span className="text-sm text-gray-800 flex-1">{ANNOT_META.species.label}</span>
-                </label>
+                {/* Species row, with its own Draw button */}
+                <div className="flex items-center gap-2 rounded p-1.5 hover:bg-gray-50">
+                  <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+                    <input
+                      type="checkbox"
+                      checked={annot.species}
+                      onChange={(e) => setAnnot((p) => ({ ...p, species: e.target.checked }))}
+                      className="rounded border-gray-300"
+                    />
+                    <span className="text-sm text-gray-800 truncate">{ANNOT_META.species.label}</span>
+                  </label>
+                  {annot.species &&
+                    !draft &&
+                    (isDrawing ? (
+                      drawMode === 'species' && (
+                        <span className="text-[11px] font-medium text-green-600 shrink-0">Drawing…</span>
+                      )
+                    ) : (
+                      <button
+                        onClick={() => startDrawing('species')}
+                        className="flex items-center gap-1 rounded bg-green-600 text-white px-2 py-0.5 text-[11px] font-medium hover:bg-green-700 shrink-0"
+                        title="Draw a species plot"
+                      >
+                        <Pencil className="h-3 w-3" />
+                        Draw
+                      </button>
+                    ))}
+                </div>
                 {!anyAnnot && (
                   <p className="px-1.5 pt-0.5 text-[11px] text-gray-400">Turn on Block or Species to draw.</p>
                 )}
