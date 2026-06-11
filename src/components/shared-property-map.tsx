@@ -161,12 +161,17 @@ function fmtReadiness(date: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-// Compact label shown on the map for a plot, built only from active toggles.
-function plotPrimaryLabel(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
-  if (annot.species && plot.species) return plot.species
-  if (annot.block && plot.block != null) return `Block ${plot.block}`
-  if (annot.size && plot.size != null) return `${plot.size} gal`
-  return ''
+// The label parts currently shown for a plot — one per annotation layer that is
+// toggled on AND has a value. Block + size share a boundary (a block is one
+// container size), so when both are on they read together, e.g.
+// "Block 1 | 10-gallon". A plot's boundary is shown only when this is non-empty,
+// so toggling a layer off hides the boundaries that depended on it.
+function activePlotParts(plot: SharePlot, annot: Record<AnnotKey, boolean>): string[] {
+  const parts: string[] = []
+  if (annot.block && plot.block != null) parts.push(`Block ${plot.block}`)
+  if (annot.size && plot.size != null) parts.push(`${plot.size}-gallon`)
+  if (annot.species && plot.species) parts.push(plot.species)
+  return parts
 }
 
 // Full popup HTML for a plot — every active toggle's field.
@@ -661,6 +666,10 @@ export default function SharedPropertyMap({
     for (const plot of plots) {
       const ring = plot.boundary?.coordinates?.[0]
       if (!ring) continue
+      // Only draw the boundary if at least one active layer applies to it, so
+      // toggling Block/Size/Species off hides the boundaries that relied on it.
+      const parts = activePlotParts(plot, annot)
+      if (parts.length === 0) continue
       const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
       const color = plotColor(plot, annot)
       const polygon = L.polygon(coords, { color, weight: 2, fillColor: color, fillOpacity: 0.2 })
@@ -678,13 +687,10 @@ export default function SharedPropertyMap({
       popupEl.appendChild(del)
       polygon.bindPopup(popupEl)
 
-      const label = anyAnnot ? plotPrimaryLabel(plot, annot) : ''
-      if (label) {
-        polygon.bindTooltip(label, { permanent: true, direction: 'center', className: 'plnt-plot-label' })
-      }
+      polygon.bindTooltip(parts.join(' | '), { permanent: true, direction: 'center', className: 'plnt-plot-label' })
       layer.addLayer(polygon)
     }
-  }, [plots, annot, anyAnnot, deletePlot])
+  }, [plots, annot, deletePlot])
 
   const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
 
