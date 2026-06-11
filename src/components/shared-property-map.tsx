@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, RotateCcw, Leaf, Pencil, Trash2, Check } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, Table2 } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 
 export type LayerType = 'rgb' | 'ndvi' | 'chm'
@@ -147,6 +147,20 @@ function plotAreaAcres(latlngs: L.LatLng[]): number {
   return Math.round(area * 0.000247105 * 100) / 100
 }
 
+// Ray-casting point-in-polygon. `ring` is [[lng,lat], ...]; point is (lng, lat).
+function pointInRing(lng: number, lat: number, ring: number[][]): boolean {
+  let inside = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0]
+    const yi = ring[i][1]
+    const xj = ring[j][0]
+    const yj = ring[j][1]
+    const intersect = yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
 const DEFAULT_PLOT_COLOR = '#10b981'
 
 // Color a plot by block when the Block layer is on; otherwise by size when
@@ -251,6 +265,13 @@ export default function SharedPropertyMap({
   const drawPolygonRef = useRef<L.Polygon | null>(null)
   const rubberBandRef = useRef<L.Polyline | null>(null)
   const closingLineRef = useRef<L.Polyline | null>(null)
+
+  // ---- Inventory drawer (bottom sheet over the map) ----
+  const rootRef = useRef<HTMLDivElement>(null)
+  const [invOpen, setInvOpen] = useState(false)
+  const [invFrac, setInvFrac] = useState(0.5) // share of the map height the sheet takes
+  const [invCounts, setInvCounts] = useState<Record<string, number> | null>(null)
+  const [invCounting, setInvCounting] = useState(false)
 
   const resetView = () => {
     const map = mapRef.current
@@ -703,10 +724,66 @@ export default function SharedPropertyMap({
     }
   }, [plots, annot, deletePlot])
 
+  // When the inventory opens, fetch the plant points once and count how many
+  // fall inside each plot's boundary — same point-in-polygon as the dashboard.
+  useEffect(() => {
+    if (!invOpen) return
+    let cancelled = false
+    const run = async () => {
+      if (rgbLayer?.pointsUrl && !pointsDataRef.current) {
+        setInvCounting(true)
+        try {
+          const res = await fetch(rgbLayer.pointsUrl)
+          pointsDataRef.current = await res.json()
+        } catch {
+          /* no points file — counts stay unavailable */
+        }
+        if (!cancelled) setInvCounting(false)
+      }
+      if (cancelled) return
+      const pts = pointsDataRef.current
+      if (!pts) {
+        setInvCounts(null)
+        return
+      }
+      const counts: Record<string, number> = {}
+      for (const plot of plots) {
+        const ring = plot.boundary?.coordinates?.[0]
+        let c = 0
+        if (ring) for (const [lat, lng] of pts) if (pointInRing(lng, lat, ring)) c++
+        counts[plot.id] = c
+      }
+      if (!cancelled) setInvCounts(counts)
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [invOpen, plots, rgbLayer])
+
+  // Drag the sheet's top edge to resize it (clamped between a peek and full screen).
+  const startInvResize = (e: React.PointerEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return // let header buttons click
+    e.preventDefault()
+    const root = rootRef.current
+    if (!root) return
+    const rect = root.getBoundingClientRect()
+    const move = (ev: PointerEvent) => {
+      const frac = (rect.bottom - ev.clientY) / rect.height
+      setInvFrac(Math.max(0.2, Math.min(1, frac)))
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
   const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
 
   return (
-    <div className="relative h-full w-full">
+    <div ref={rootRef} className="relative h-full w-full">
       <style>{`
         .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; color: #fff; font-weight: 600; font-size: 11px; text-shadow: 0 1px 2px rgba(0,0,0,0.9); white-space: nowrap; }
         .plnt-plot-label::before { display: none; }
@@ -1032,6 +1109,97 @@ export default function SharedPropertyMap({
           )
         })}
       </div>
+
+      {/* Inventory drawer — collapsed trigger (bottom-right) */}
+      {!invOpen && (
+        <button
+          onClick={() => setInvOpen(true)}
+          className="absolute bottom-3 right-3 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"
+          title="Show inventory"
+        >
+          <Table2 className="h-4 w-4" />
+          Inventory
+          <span className="text-green-300 tabular-nums">({plots.length})</span>
+          <ChevronUp className="h-4 w-4" />
+        </button>
+      )}
+
+      {/* Inventory drawer — expandable bottom sheet */}
+      {invOpen && (
+        <div
+          className="absolute inset-x-0 bottom-0 z-[1100] flex flex-col bg-white shadow-[0_-4px_20px_rgba(0,0,0,0.15)] rounded-t-xl overflow-hidden"
+          style={{ height: `${Math.round(invFrac * 100)}%` }}
+        >
+          {/* Drag handle + controls */}
+          <div
+            onPointerDown={startInvResize}
+            className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 cursor-ns-resize touch-none select-none"
+          >
+            <div className="absolute left-1/2 -translate-x-1/2 top-1.5 h-1 w-10 rounded-full bg-gray-300" />
+            <Table2 className="h-4 w-4 text-[#0f2e1d] shrink-0" />
+            <span className="text-sm font-semibold text-gray-900">Inventory</span>
+            <span className="text-xs text-gray-400 tabular-nums">{plots.length} plots</span>
+            <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={() => setInvFrac((f) => (f >= 0.95 ? 0.5 : 1))}
+                className="text-gray-400 hover:text-gray-700 p-1"
+                title={invFrac >= 0.95 ? 'Split with map' : 'Full screen'}
+                aria-label={invFrac >= 0.95 ? 'Split with map' : 'Full screen'}
+              >
+                {invFrac >= 0.95 ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={() => setInvOpen(false)}
+                className="text-gray-400 hover:text-gray-700 p-1"
+                title="Hide inventory"
+                aria-label="Hide inventory"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Table */}
+          <div className="flex-1 overflow-auto">
+            {plots.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-sm text-gray-400 p-6 text-center">
+                No plots drawn yet. Turn on Block or Species and use “Draw plot” to add one.
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+                  <tr>
+                    <th className="text-left font-medium px-3 py-2">Species</th>
+                    <th className="text-left font-medium px-3 py-2">Size</th>
+                    <th className="text-right font-medium px-3 py-2">Count</th>
+                    <th className="text-left font-medium px-3 py-2">Readiness</th>
+                    <th className="text-left font-medium px-3 py-2">Block</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {plots.map((p) => (
+                    <tr key={p.id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 text-gray-900">{p.species || <span className="text-gray-300">—</span>}</td>
+                      <td className="px-3 py-2 text-gray-700">
+                        {p.size != null ? `${p.size}-Gallon` : <span className="text-gray-300">—</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums font-medium text-gray-900">
+                        {invCounts ? (invCounts[p.id] ?? 0).toLocaleString() : invCounting ? '…' : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700">
+                        {p.readinessDate ? fmtReadiness(p.readinessDate) : <span className="text-gray-300">—</span>}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700">
+                        {p.block != null ? p.block : <span className="text-gray-300">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
