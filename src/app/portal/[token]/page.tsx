@@ -88,7 +88,7 @@ export default function PortalPage() {
       <div className="fixed inset-0 flex flex-col">
         <header className="flex items-center gap-3 px-4 py-2.5 bg-[#0f2e1d] text-white shrink-0 border-b border-black/20">
           <Image
-            src="/images/plnt-logo-white.svg"
+            src="/images/plnt-logo-darkbg.svg"
             alt="PLNT"
             width={90}
             height={30}
