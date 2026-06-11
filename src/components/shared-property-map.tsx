@@ -149,9 +149,11 @@ function plotAreaAcres(latlngs: L.LatLng[]): number {
 
 const DEFAULT_PLOT_COLOR = '#10b981'
 
-// Color a plot by block (when the Block layer is on and a block is set), else green.
+// Color a plot by block when the Block layer is on; otherwise by size when
+// viewing sizes alone (block off); else green.
 function plotColor(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
   if (annot.block && plot.block != null) return stringToColor(`block-${plot.block}`)
+  if (annot.size && plot.size != null) return stringToColor(`size-${plot.size}`)
   return DEFAULT_PLOT_COLOR
 }
 
@@ -168,11 +170,10 @@ function fmtReadiness(date: string): string {
 // so toggling a layer off hides the boundaries that depended on it.
 function activePlotParts(plot: SharePlot, annot: Record<AnnotKey, boolean>): string[] {
   const parts: string[] = []
-  if (annot.block && plot.block != null) {
-    parts.push(`Block ${plot.block}`)
-    // Size is a sub-layer of block — it only appears alongside it.
-    if (annot.size && plot.size != null) parts.push(`${plot.size}-gallon`)
-  }
+  // Block and size are captured together at draw time but display independently,
+  // so you can view just sizes (block off) or just block numbers (size off).
+  if (annot.block && plot.block != null) parts.push(`Block ${plot.block}`)
+  if (annot.size && plot.size != null) parts.push(`${plot.size}-Gallon`)
   if (annot.species && plot.species) parts.push(plot.species)
   return parts
 }
@@ -180,10 +181,8 @@ function activePlotParts(plot: SharePlot, annot: Record<AnnotKey, boolean>): str
 // Full popup HTML for a plot — every active toggle's field.
 function plotPopupHtml(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
   const rows: string[] = []
-  if (annot.block && plot.block != null) {
-    rows.push(`<div><strong>Block:</strong> ${plot.block}</div>`)
-    if (annot.size && plot.size != null) rows.push(`<div><strong>Size:</strong> ${plot.size}-gallon</div>`)
-  }
+  if (annot.block && plot.block != null) rows.push(`<div><strong>Block:</strong> ${plot.block}</div>`)
+  if (annot.size && plot.size != null) rows.push(`<div><strong>Size:</strong> ${plot.size}-Gallon</div>`)
   if (annot.species && plot.species) {
     rows.push(`<div><strong>Species:</strong> ${plot.species}</div>`)
     if (plot.readinessDate) rows.push(`<div><strong>Ready:</strong> ${fmtReadiness(plot.readinessDate)}</div>`)
@@ -699,7 +698,7 @@ export default function SharedPropertyMap({
       popupEl.appendChild(del)
       polygon.bindPopup(popupEl)
 
-      polygon.bindTooltip(parts.join(' | '), { permanent: true, direction: 'center', className: 'plnt-plot-label' })
+      polygon.bindTooltip(parts.join(' -- '), { permanent: true, direction: 'center', className: 'plnt-plot-label' })
       layer.addLayer(polygon)
     }
   }, [plots, annot, deletePlot])
@@ -909,7 +908,8 @@ export default function SharedPropertyMap({
                 <p className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
                   Plot data
                 </p>
-                {/* Block, with Size nested beneath it (like RGB → Plant markers) */}
+                {/* Block, with Size grouped beneath it. Size displays independently
+                    (view sizes without block numbers), but is captured with block at draw time. */}
                 <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
                   <input
                     type="checkbox"
@@ -919,17 +919,15 @@ export default function SharedPropertyMap({
                   />
                   <span className="text-sm text-gray-800 flex-1">{ANNOT_META.block.label}</span>
                 </label>
-                {annot.block && (
-                  <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 pl-7 hover:bg-gray-50">
-                    <input
-                      type="checkbox"
-                      checked={annot.size}
-                      onChange={(e) => setAnnot((p) => ({ ...p, size: e.target.checked }))}
-                      className="rounded border-gray-300"
-                    />
-                    <span className="text-xs text-gray-600 flex-1">{ANNOT_META.size.label}</span>
-                  </label>
-                )}
+                <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 pl-7 hover:bg-gray-50">
+                  <input
+                    type="checkbox"
+                    checked={annot.size}
+                    onChange={(e) => setAnnot((p) => ({ ...p, size: e.target.checked }))}
+                    className="rounded border-gray-300"
+                  />
+                  <span className="text-xs text-gray-600 flex-1">{ANNOT_META.size.label}</span>
+                </label>
                 {/* Species */}
                 <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
                   <input
@@ -941,7 +939,7 @@ export default function SharedPropertyMap({
                   <span className="text-sm text-gray-800 flex-1">{ANNOT_META.species.label}</span>
                 </label>
                 <p className="px-1.5 pt-0.5 text-[11px] text-gray-400">
-                  {anyAnnot ? 'Use “Draw plot” to add a boundary.' : 'Turn one on to draw boundary plots.'}
+                  {anyAnnot ? 'Use “Draw plot” to add a boundary.' : 'Turn on Block or Species to draw.'}
                 </p>
               </div>
             </div>
