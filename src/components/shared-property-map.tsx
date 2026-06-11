@@ -168,8 +168,11 @@ function fmtReadiness(date: string): string {
 // so toggling a layer off hides the boundaries that depended on it.
 function activePlotParts(plot: SharePlot, annot: Record<AnnotKey, boolean>): string[] {
   const parts: string[] = []
-  if (annot.block && plot.block != null) parts.push(`Block ${plot.block}`)
-  if (annot.size && plot.size != null) parts.push(`${plot.size}-gallon`)
+  if (annot.block && plot.block != null) {
+    parts.push(`Block ${plot.block}`)
+    // Size is a sub-layer of block — it only appears alongside it.
+    if (annot.size && plot.size != null) parts.push(`${plot.size}-gallon`)
+  }
   if (annot.species && plot.species) parts.push(plot.species)
   return parts
 }
@@ -177,8 +180,10 @@ function activePlotParts(plot: SharePlot, annot: Record<AnnotKey, boolean>): str
 // Full popup HTML for a plot — every active toggle's field.
 function plotPopupHtml(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
   const rows: string[] = []
-  if (annot.block && plot.block != null) rows.push(`<div><strong>Block:</strong> ${plot.block}</div>`)
-  if (annot.size && plot.size != null) rows.push(`<div><strong>Size:</strong> ${plot.size} gal</div>`)
+  if (annot.block && plot.block != null) {
+    rows.push(`<div><strong>Block:</strong> ${plot.block}</div>`)
+    if (annot.size && plot.size != null) rows.push(`<div><strong>Size:</strong> ${plot.size}-gallon</div>`)
+  }
   if (annot.species && plot.species) {
     rows.push(`<div><strong>Species:</strong> ${plot.species}</div>`)
     if (plot.readinessDate) rows.push(`<div><strong>Ready:</strong> ${fmtReadiness(plot.readinessDate)}</div>`)
@@ -231,7 +236,8 @@ export default function SharedPropertyMap({
 
   // ---- Annotation layers (Block / Size / Species) + viewer-drawn plots ----
   const [annot, setAnnot] = useState<Record<AnnotKey, boolean>>({ block: false, size: false, species: false })
-  const anyAnnot = annot.block || annot.size || annot.species
+  // Size is a sub-layer of block, so it can't enable drawing on its own.
+  const anyAnnot = annot.block || annot.species
   const [plots, setPlots] = useState<SharePlot[]>([])
   const [isDrawing, setIsDrawing] = useState(false)
   // Draft holds the just-finished polygon awaiting the tag form.
@@ -611,6 +617,11 @@ export default function SharedPropertyMap({
 
   const savePlot = useCallback(async () => {
     if (!draft || !data.accessToken) return
+    // Block and its container size are captured together — both required.
+    if (annot.block && (!form.block.trim() || !form.size.trim())) {
+      setSaveError('Block and container size are both required.')
+      return
+    }
     setSaving(true)
     setSaveError('')
     try {
@@ -620,8 +631,9 @@ export default function SharedPropertyMap({
         body: JSON.stringify({
           boundary: draft.boundary,
           areaAcres: draft.areaAcres,
+          // Size rides with block (its sub-layer), so it's sent whenever block is.
           block: annot.block ? form.block : undefined,
-          size: annot.size ? form.size : undefined,
+          size: annot.block ? form.size : undefined,
           species: annot.species ? form.species : undefined,
           readinessDate: annot.species ? form.readinessDate : undefined,
           email: viewerEmail,
@@ -745,30 +757,34 @@ export default function SharedPropertyMap({
                 Area: <span className="font-medium text-gray-700">{draft.areaAcres.toFixed(2)} acres</span>
               </p>
               {annot.block && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">{ANNOT_META.block.hint}</label>
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    value={form.block}
-                    onChange={(e) => setForm((f) => ({ ...f, block: e.target.value }))}
-                    placeholder="e.g. 12"
-                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-              )}
-              {annot.size && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">{ANNOT_META.size.hint}</label>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    value={form.size}
-                    onChange={(e) => setForm((f) => ({ ...f, size: e.target.value }))}
-                    placeholder="e.g. 5"
-                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      {ANNOT_META.block.hint} <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      value={form.block}
+                      onChange={(e) => setForm((f) => ({ ...f, block: e.target.value }))}
+                      placeholder="e.g. 12"
+                      className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      {ANNOT_META.size.hint} <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={form.size}
+                      onChange={(e) => setForm((f) => ({ ...f, size: e.target.value }))}
+                      placeholder="e.g. 5"
+                      className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                </>
               )}
               {annot.species && (
                 <>
@@ -893,17 +909,37 @@ export default function SharedPropertyMap({
                 <p className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
                   Plot data
                 </p>
-                {(['block', 'size', 'species'] as AnnotKey[]).map((key) => (
-                  <label key={key} className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
+                {/* Block, with Size nested beneath it (like RGB → Plant markers) */}
+                <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
+                  <input
+                    type="checkbox"
+                    checked={annot.block}
+                    onChange={(e) => setAnnot((p) => ({ ...p, block: e.target.checked }))}
+                    className="rounded border-gray-300"
+                  />
+                  <span className="text-sm text-gray-800 flex-1">{ANNOT_META.block.label}</span>
+                </label>
+                {annot.block && (
+                  <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 pl-7 hover:bg-gray-50">
                     <input
                       type="checkbox"
-                      checked={annot[key]}
-                      onChange={(e) => setAnnot((p) => ({ ...p, [key]: e.target.checked }))}
+                      checked={annot.size}
+                      onChange={(e) => setAnnot((p) => ({ ...p, size: e.target.checked }))}
                       className="rounded border-gray-300"
                     />
-                    <span className="text-sm text-gray-800 flex-1">{ANNOT_META[key].label}</span>
+                    <span className="text-xs text-gray-600 flex-1">{ANNOT_META.size.label}</span>
                   </label>
-                ))}
+                )}
+                {/* Species */}
+                <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
+                  <input
+                    type="checkbox"
+                    checked={annot.species}
+                    onChange={(e) => setAnnot((p) => ({ ...p, species: e.target.checked }))}
+                    className="rounded border-gray-300"
+                  />
+                  <span className="text-sm text-gray-800 flex-1">{ANNOT_META.species.label}</span>
+                </label>
                 <p className="px-1.5 pt-0.5 text-[11px] text-gray-400">
                   {anyAnnot ? 'Use “Draw plot” to add a boundary.' : 'Turn one on to draw boundary plots.'}
                 </p>
