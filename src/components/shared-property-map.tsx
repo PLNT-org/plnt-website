@@ -572,12 +572,23 @@ export default function SharedPropertyMap({
     drawMarkersRef.current = []
 
     const handleClick = (e: L.LeafletMouseEvent) => {
+      // Close the shape by clicking back on the first vertex (needs >= 3 points).
+      if (drawPointsRef.current.length >= 3) {
+        const first = map.latLngToContainerPoint(drawPointsRef.current[0])
+        const here = map.latLngToContainerPoint(e.latlng)
+        if (first.distanceTo(here) <= 14) {
+          finishDrawing()
+          return
+        }
+      }
+      const isFirst = drawPointsRef.current.length === 0
       drawPointsRef.current.push(e.latlng)
+      // The first vertex is drawn larger/hollow so it reads as the "click to close" target.
       const marker = L.circleMarker(e.latlng, {
-        radius: 5,
-        fillColor: DEFAULT_PLOT_COLOR,
-        color: '#fff',
-        weight: 2,
+        radius: isFirst ? 7 : 5,
+        fillColor: isFirst ? '#ffffff' : DEFAULT_PLOT_COLOR,
+        color: isFirst ? DEFAULT_PLOT_COLOR : '#fff',
+        weight: isFirst ? 3 : 2,
         opacity: 1,
         fillOpacity: 1,
       }).addTo(map)
@@ -814,31 +825,19 @@ export default function SharedPropertyMap({
       `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
 
-      {/* Draw-plot control — appears once a Block/Size/Species layer is on */}
-      {anyAnnot && !draft && (
-        <div className="absolute bottom-3 left-14 z-[1000]">
-          {!isDrawing ? (
-            <button
-              onClick={startDrawing}
-              className="rounded-md bg-green-600 text-white shadow px-3 py-2 text-sm font-medium flex items-center gap-2 hover:bg-green-700"
-            >
-              <Pencil className="h-4 w-4" />
-              Draw plot
-            </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <div className="rounded-md bg-white shadow px-3 py-2 text-xs text-gray-700">
-                <span className="font-medium text-green-600">Drawing</span> — click to add points, double-click to
-                finish
-              </div>
-              <button
-                onClick={cancelDrawing}
-                className="rounded-md bg-white shadow px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
+      {/* Drawing instructions — stays in the corner; the Draw button lives in the panel */}
+      {isDrawing && !draft && (
+        <div className="absolute bottom-3 left-14 z-[1000] flex items-center gap-2">
+          <div className="rounded-md bg-white shadow px-3 py-2 text-xs text-gray-700">
+            <span className="font-medium text-green-600">Drawing</span> — click to add points, then click the first
+            point (or double-click) to finish
+          </div>
+          <button
+            onClick={cancelDrawing}
+            className="rounded-md bg-white shadow px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            Cancel
+          </button>
         </div>
       )}
 
@@ -1006,9 +1005,24 @@ export default function SharedPropertyMap({
 
               {/* Plot data — draw + tag boundary plots */}
               <div className="mt-1 pt-1.5 border-t border-gray-100">
-                <p className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
-                  Plot data
-                </p>
+                <div className="flex items-center justify-between px-1.5 pb-1">
+                  <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400">Plot data</span>
+                  {isDrawing ? (
+                    <span className="text-[11px] font-medium text-green-600">Drawing…</span>
+                  ) : (
+                    anyAnnot &&
+                    !draft && (
+                      <button
+                        onClick={startDrawing}
+                        className="flex items-center gap-1 rounded bg-green-600 text-white px-2 py-0.5 text-[11px] font-medium hover:bg-green-700"
+                        title="Draw a boundary plot"
+                      >
+                        <Pencil className="h-3 w-3" />
+                        Draw
+                      </button>
+                    )
+                  )}
+                </div>
                 {/* Block, with Size grouped beneath it. Size displays independently
                     (view sizes without block numbers), but is captured with block at draw time. */}
                 <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
@@ -1039,9 +1053,9 @@ export default function SharedPropertyMap({
                   />
                   <span className="text-sm text-gray-800 flex-1">{ANNOT_META.species.label}</span>
                 </label>
-                <p className="px-1.5 pt-0.5 text-[11px] text-gray-400">
-                  {anyAnnot ? 'Use “Draw plot” to add a boundary.' : 'Turn on Block or Species to draw.'}
-                </p>
+                {!anyAnnot && (
+                  <p className="px-1.5 pt-0.5 text-[11px] text-gray-400">Turn on Block or Species to draw.</p>
+                )}
               </div>
             </div>
           </div>
