@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, Table2 } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, Table2, Download } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 
 export type LayerType = 'rgb' | 'ndvi' | 'chm'
@@ -780,6 +780,30 @@ export default function SharedPropertyMap({
     window.addEventListener('pointerup', up)
   }
 
+  // Export the current location's plots as CSV (matches the drawer's columns).
+  const exportInventoryCSV = () => {
+    const cell = (v: unknown) => {
+      const s = v == null ? '' : String(v)
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    }
+    const headers = ['Species', 'Size (gal)', 'Count', 'Readiness', 'Block']
+    const rows = plots.map((p) => [
+      p.species || '',
+      p.size != null ? p.size : '',
+      invCounts ? invCounts[p.id] ?? 0 : '',
+      p.readinessDate ? fmtReadiness(p.readinessDate) : '',
+      p.block != null ? p.block : '',
+    ])
+    const csv = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\n')
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+    const a = document.createElement('a')
+    a.href = url
+    const slug = (data.title || 'inventory').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase()
+    a.download = `${slug || 'inventory'}-inventory.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
 
   return (
@@ -1044,8 +1068,9 @@ export default function SharedPropertyMap({
         <Maximize2 className="h-4 w-4" />
       </button>
 
-      {/* Bottom-center legend + interactive range slider per visible ramp layer */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000] flex flex-col items-center gap-2 max-w-[90vw]">
+      {/* Bottom-center legend + interactive range slider per visible ramp layer.
+          Raised to clear the centered Inventory pill when both are present. */}
+      <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-[1000] flex flex-col items-center gap-2 max-w-[90vw]">
         {data.layers.map((layer) => {
           const meta = LAYER_META[layer.type]
           if (!meta.ramp || !visible[layer.type]) return null
@@ -1114,7 +1139,7 @@ export default function SharedPropertyMap({
       {!invOpen && (
         <button
           onClick={() => setInvOpen(true)}
-          className="absolute bottom-3 right-3 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"
+          className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"
           title="Show inventory"
         >
           <Table2 className="h-4 w-4" />
@@ -1140,6 +1165,15 @@ export default function SharedPropertyMap({
             <span className="text-sm font-semibold text-gray-900">Inventory</span>
             <span className="text-xs text-gray-400 tabular-nums">{plots.length} plots</span>
             <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={exportInventoryCSV}
+                disabled={plots.length === 0}
+                className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
+                title="Download CSV"
+                aria-label="Download inventory as CSV"
+              >
+                <Download className="h-4 w-4" />
+              </button>
               <button
                 onClick={() => setInvFrac((f) => (f >= 0.95 ? 0.5 : 1))}
                 className="text-gray-400 hover:text-gray-700 p-1"
