@@ -53,6 +53,7 @@ gcp-sa-key.json
 # Local survey publish configs (machine-specific paths); keep the template
 scripts/*.json
 !scripts/survey.example.json
+!scripts/reflight.example.json
 
 # Python bytecode (aruco-service)
 __pycache__/

@@ -102,11 +102,28 @@ export async function POST(
       })
     )
 
+    // Every (non-expired) location this same email is authorized for, so the
+    // viewer can offer a location switcher. Gated by having just cleared this
+    // share's email check above, so it can't be used to enumerate arbitrary
+    // emails' shares.
+    const { data: locShares } = await supabaseAdmin
+      .from('property_shares')
+      .select('token, title, client_name, expires_at')
+      .contains('allowed_emails', [normalizedEmail])
+    const now = Date.now()
+    const locations = (locShares || [])
+      .filter((s) => !s.expires_at || new Date(s.expires_at).getTime() > now)
+      .map((s) => ({ token: s.token, title: s.title, client_name: s.client_name }))
+
     return NextResponse.json({
       title: share.title,
       client_name: share.client_name,
       bounds: share.bounds,
       layers,
+      // Lets the viewer call the gated plots API (draw/save boundary plots).
+      accessToken,
+      // All locations (shares) this email can view; powers the location dropdown.
+      locations,
     })
   } catch (error) {
     return NextResponse.json(

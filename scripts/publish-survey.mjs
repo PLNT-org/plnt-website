@@ -14,9 +14,13 @@
 //   node scripts/publish-survey.mjs                                # interactive mode (prompts you)
 //
 // Config flags: "upload_cogs": false skips archiving COGs (tiles only).
-//   "share_id": "<uuid>" re-tiles/updates an EXISTING share in place (keeps its
-//   link/token, replaces its tiles, updates layers/bounds; title/emails are only
-//   changed if also present in the config).
+//   Re-flighting a property? Point at the EXISTING share to update it in place —
+//   keeps its link/token, replaces tiles, updates layers/bounds, and PRESERVES
+//   every drawn boundary (share_plots stay keyed to the same share). Identify it
+//   any of three ways: "share_id": "<uuid>", "token": "<token>", or
+//   "share_url": "https://.../share/<token>". Title/emails only change if also
+//   present in the config. A given update target must already exist — the script
+//   refuses to silently create a new share (which would orphan your boundaries).
 //   "boundary": { "from_layer": "rgb" } clips NDVI/CHM to the (already-cropped)
 //   RGB's footprint so all layers align and exclude neighbouring land; or
 //   { "geojson": "/path/boundary.geojson" } clips every layer to that polygon.
@@ -199,6 +203,30 @@ function slugify(s) {
   )
 }
 
+// Pull the share token out of a /share/<token> URL, or return the bare token.
+function extractToken(s) {
+  const m = String(s).match(/\/share\/([^/?#\s]+)/)
+  return (m ? m[1] : String(s)).trim()
+}
+
+// Resolve a re-flight update target (a UUID, a token, or a full share URL) to
+// the actual { id, token } row. Returns null if nothing matches. Updating a
+// missing target would orphan the property's drawn boundaries, so callers must
+// treat null as a hard error rather than falling back to creating a new share.
+async function resolveExistingShare(supabase, raw) {
+  const val = String(raw || '').trim()
+  if (!val) return null
+  const col = UUID_RE.test(val) ? 'id' : 'token'
+  const lookup = col === 'id' ? val : extractToken(val)
+  const { data, error } = await supabase
+    .from('property_shares')
+    .select('id, token')
+    .eq(col, lookup)
+    .maybeSingle()
+  if (error) throw new Error(`Looking up share by ${col}: ${error.message}`)
+  return data || null
+}
+
 // Interactive setup: prompts for everything, writes a scripts/<slug>.json config,
 // and returns the path so the rest of the pipeline can read it back.
 async function interactiveSetup() {
@@ -215,8 +243,8 @@ async function interactiveSetup() {
   console.log('\nInteractive publish — I\'ll ask a few questions then run the pipeline.\n')
   console.log('Tip: drag a .tif from Finder into Terminal to paste its full path.\n')
 
-  const share_id = (await ask('Update an existing share? Paste its share_id (blank for new)')).trim()
-  const isUpdate = !!share_id
+  const updateRef = (await ask('Re-flighting a property? Paste its share link, token, or share_id (blank for a new share)')).trim()
+  const isUpdate = !!updateRef
 
   const title = isUpdate
     ? await ask('Title (blank to keep existing)')
@@ -273,7 +301,12 @@ async function interactiveSetup() {
   rl.close()
 
   const cfg = {}
-  if (share_id) cfg.share_id = share_id
+  if (updateRef) {
+    // Store as share_id when it's a UUID, otherwise as a token (URLs are reduced
+    // to their token) — main() resolves any of the three back to the share row.
+    if (UUID_RE.test(updateRef)) cfg.share_id = updateRef
+    else cfg.token = extractToken(updateRef)
+  }
   if (title) cfg.title = title
   if (client_name) cfg.client_name = client_name
   if (emails) cfg.allowed_emails = emails
@@ -284,7 +317,7 @@ async function interactiveSetup() {
   if (typeof plant_count === 'number' && !Number.isNaN(plant_count)) cfg.plant_count = plant_count
   cfg.layers = layers
 
-  const base = title ? slugify(title) : `update-${share_id.slice(0, 8)}`
+  const base = title ? slugify(title) : `update-${(cfg.share_id || cfg.token || 'share').slice(0, 8)}`
   let outPath = join(process.cwd(), 'scripts', `${base}.json`)
   if (existsSync(outPath)) {
     outPath = join(process.cwd(), 'scripts', `${base}-${Date.now()}.json`)
@@ -300,20 +333,47 @@ async function main() {
   let configPath = process.argv[2]
   if (!configPath) configPath = await interactiveSetup()
   const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
-  const isUpdate = !!(cfg.share_id && UUID_RE.test(cfg.share_id))
-  if (!isUpdate && !cfg.title) throw new Error('config.title is required for a new share')
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!url || !key) throw new Error('Set NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in env')
   const supabase = createClient(url, key)
 
-  const shareId = isUpdate ? cfg.share_id : randomUUID()
+  // Re-flight? Resolve the existing share by id, token, or share URL. If the
+  // config names a target but it can't be found, stop — updating a phantom row
+  // would orphan this property's drawn boundaries.
+  const updateRef = cfg.share_id || cfg.token || cfg.share_url
+  let existingShare = null
+  if (updateRef) {
+    existingShare = await resolveExistingShare(supabase, updateRef)
+    if (!existingShare) {
+      throw new Error(
+        `Update target not found: "${updateRef}".\n` +
+          `   Re-check the share_id / token / share_url, or remove it from the config to publish a brand-new share.`
+      )
+    }
+  }
+  const isUpdate = !!existingShare
+  if (!isUpdate && !cfg.title) throw new Error('config.title is required for a new share')
+
+  const shareId = isUpdate ? existingShare.id : randomUUID()
   const zoom = cfg.zoom || DEFAULT_ZOOM
   const uploadCogs = cfg.upload_cogs !== false
   const work = mkdtempSync(join(tmpdir(), 'plnt-survey-'))
   mkdirSync(join(work, 'tiles')) // gdal2tiles (GDAL 3.13) only creates the leaf dir, not parents
   console.log(`${isUpdate ? 'Updating' : 'Publishing'} share ${shareId}\nWork dir: ${work}\n`)
+
+  // Reassure (and audit) that re-flighting keeps the boundaries drawn so far.
+  if (isUpdate) {
+    const { count, error } = await supabase
+      .from('share_plots')
+      .select('id', { count: 'exact', head: true })
+      .eq('share_id', shareId)
+    if (!error) {
+      const n = count ?? 0
+      console.log(`🔒 Update in place — preserving ${n} drawn boundar${n === 1 ? 'y' : 'ies'} across this flight.\n`)
+    }
+  }
 
   // ---- Resolve the (optional) property-boundary cutline ----
   // Clips every layer to the same polygon so the client never sees neighbouring
@@ -479,9 +539,7 @@ async function main() {
     if (cfg.expires_at !== undefined) update.expires_at = cfg.expires_at || null
     const { error } = await supabase.from('property_shares').update(update).eq('id', shareId)
     if (error) throw new Error(`Update share: ${error.message}`)
-    const { data, error: tErr } = await supabase.from('property_shares').select('token').eq('id', shareId).single()
-    if (tErr || !data) throw new Error(`Fetch token: ${tErr?.message}`)
-    token = data.token
+    token = existingShare.token
   } else {
     token = randomBytes(24).toString('base64url')
     const { error } = await supabase.from('property_shares').insert({

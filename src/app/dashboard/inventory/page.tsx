@@ -55,6 +55,29 @@ interface InventoryItem {
   date_counted: string
   plot_id?: string
   plot_name?: string
+  size?: number | null // container size (gallons), from field plots
+  block?: number | null // block / bed #, from field plots
+  readiness?: string | null // yyyy-mm-dd, from viewer-drawn field plots
+  location_id?: string // share id the field plot belongs to
+}
+
+// One viewer-drawn plot, returned by /api/inventory/field-plots.
+interface FieldPlot {
+  id: string
+  species: string | null
+  size: number | null // container size (gallons)
+  block: number | null // block / bed #
+  count: number // AI-detected plants inside the drawn boundary
+  areaAcres: number
+  readiness: string | null
+  locationId: string // share id the plot belongs to
+  locationName: string // share title
+}
+
+// A location (property share) the user owns.
+interface Location {
+  id: string
+  title: string
 }
 
 // Demo data
@@ -121,13 +144,16 @@ const DEMO_INVENTORY: InventoryItem[] = [
   },
 ]
 
-type SortField = 'species_name' | 'count' | 'date_counted' | 'plot_name' | 'category'
+type SortField = 'species_name' | 'count' | 'date_counted' | 'plot_name' | 'category' | 'readiness' | 'size' | 'block'
 type SortDirection = 'asc' | 'desc'
 
 export default function InventoryPage() {
   const { session, isDemo, loading: authLoading, user } = useAuth()
 
   const [inventory, setInventory] = useState<InventoryItem[]>([])
+  const [fieldPlots, setFieldPlots] = useState<InventoryItem[]>([])
+  const [locations, setLocations] = useState<Location[]>([])
+  const [selectedLocationId, setSelectedLocationId] = useState<string>('all')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -161,6 +187,7 @@ export default function InventoryPage() {
     }
 
     loadOrthomosaics()
+    loadFieldPlots()
   }, [session, isDemo, authLoading])
 
   // Fetch aggregate when orthomosaic selection changes
@@ -195,6 +222,34 @@ export default function InventoryPage() {
       console.error('Load orthomosaics error:', err)
       setError('Failed to load orthomosaics')
       setIsLoading(false)
+    }
+  }
+
+  // Field plots are drawn by viewers on this user's property shares. They're
+  // independent of the orthomosaic selector, so they load once and always show.
+  const loadFieldPlots = async () => {
+    try {
+      const res = await authFetch('/api/inventory/field-plots', {
+        cache: 'no-store',
+        headers: { Authorization: `Bearer ${session?.access_token}` },
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      const items: InventoryItem[] = (data.fieldPlots || []).map((fp: FieldPlot) => ({
+        id: fp.id,
+        species_name: fp.species || 'Unspecified',
+        count: fp.count,
+        date_counted: '', // field plots aren't tied to a count date
+        plot_name: fp.locationName || undefined, // keeps location searchable
+        size: fp.size,
+        block: fp.block,
+        readiness: fp.readiness,
+        location_id: fp.locationId,
+      }))
+      setFieldPlots(items)
+      setLocations(data.locations || [])
+    } catch (err) {
+      console.error('Load field plots error:', err)
     }
   }
 
@@ -250,12 +305,11 @@ export default function InventoryPage() {
     }
   }
 
-  // Get unique categories and plots for filters
-  const categories = [...new Set(inventory.map((item) => item.category).filter(Boolean))]
-  const plots = [...new Set(inventory.map((item) => item.plot_name).filter(Boolean))]
+  // Orthomosaic-derived plant counts + viewer-drawn field plots, shown together.
+  const allItems = [...inventory, ...fieldPlots]
 
   // Filter and sort inventory
-  const filteredInventory = inventory
+  const filteredInventory = allItems
     .filter((item) => {
       const matchesSearch =
         item.species_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -264,8 +318,11 @@ export default function InventoryPage() {
 
       const matchesCategory = categoryFilter === 'all' || item.category === categoryFilter
       const matchesPlot = plotFilter === 'all' || item.plot_name === plotFilter
+      // A specific location shows only that location's field plots (AI-count
+      // rows have no location, so they drop out when one is selected).
+      const matchesLocation = selectedLocationId === 'all' || item.location_id === selectedLocationId
 
-      return matchesSearch && matchesCategory && matchesPlot
+      return matchesSearch && matchesCategory && matchesPlot && matchesLocation
     })
     .sort((a, b) => {
       let aVal: string | number = a[sortField] ?? ''
@@ -274,6 +331,12 @@ export default function InventoryPage() {
       if (sortField === 'count') {
         aVal = a.count
         bVal = b.count
+      } else if (sortField === 'size') {
+        aVal = a.size ?? -Infinity
+        bVal = b.size ?? -Infinity
+      } else if (sortField === 'block') {
+        aVal = a.block ?? -Infinity
+        bVal = b.block ?? -Infinity
       } else if (sortField === 'date_counted') {
         aVal = new Date(a.date_counted).getTime()
         bVal = new Date(b.date_counted).getTime()
@@ -314,14 +377,14 @@ export default function InventoryPage() {
 
   // Export to CSV
   const exportCSV = () => {
-    const headers = ['Species', 'Scientific Name', 'Category', 'Count', 'Date Counted', 'Plot']
+    const headers = ['Species', 'Size (gal)', 'Count', 'Readiness Date', 'Date Counted', 'Block']
     const rows = filteredInventory.map((item) => [
       item.species_name,
-      item.scientific_name || '',
-      item.category || '',
+      item.size != null ? item.size.toString() : '',
       item.count.toString(),
-      new Date(item.date_counted).toLocaleDateString(),
-      item.plot_name || '',
+      item.readiness ? new Date(`${item.readiness}T00:00:00`).toLocaleDateString() : '',
+      item.date_counted ? new Date(item.date_counted).toLocaleDateString() : '',
+      item.block != null ? item.block.toString() : '',
     ])
 
     const csvContent = [headers.join(','), ...rows.map((row) => row.join(','))].join('\n')
@@ -392,42 +455,29 @@ export default function InventoryPage() {
               <Search className="h-4 w-4 text-gray-400" />
               <Input
                 type="search"
-                placeholder="Search species, plot..."
+                placeholder="Search species..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="border-0 bg-gray-100"
               />
             </div>
 
-            {/* Category filter */}
-            <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-              <SelectTrigger className="w-[140px]">
-                <SelectValue placeholder="Category" />
-              </SelectTrigger>
-              <SelectContent className="z-[1100]">
-                <SelectItem value="all">All Categories</SelectItem>
-                {categories.map((cat) => (
-                  <SelectItem key={cat} value={cat!}>
-                    {cat}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            {/* Plot filter */}
-            <Select value={plotFilter} onValueChange={setPlotFilter}>
-              <SelectTrigger className="w-[160px]">
-                <SelectValue placeholder="Plot" />
-              </SelectTrigger>
-              <SelectContent className="z-[1100]">
-                <SelectItem value="all">All Plots</SelectItem>
-                {plots.map((plot) => (
-                  <SelectItem key={plot} value={plot!}>
-                    {plot}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {/* Location filter */}
+            {locations.length > 0 && (
+              <Select value={selectedLocationId} onValueChange={setSelectedLocationId}>
+                <SelectTrigger className="w-[200px]">
+                  <SelectValue placeholder="Location" />
+                </SelectTrigger>
+                <SelectContent className="z-[1100]">
+                  <SelectItem value="all">All Locations</SelectItem>
+                  {locations.map((loc) => (
+                    <SelectItem key={loc.id} value={loc.id}>
+                      {loc.title}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
 
             {/* Summary */}
             <div className="ml-auto text-sm text-gray-600">
@@ -464,7 +514,7 @@ export default function InventoryPage() {
               <Table2 className="h-12 w-12 mx-auto text-gray-300 mb-4" />
               <h3 className="text-lg font-medium mb-2">No Inventory Data</h3>
               <p className="text-gray-600 mb-4">
-                {searchQuery || categoryFilter !== 'all' || plotFilter !== 'all'
+                {searchQuery || categoryFilter !== 'all' || plotFilter !== 'all' || selectedLocationId !== 'all'
                   ? 'No items match your filters.'
                   : orthomosaics.length === 0
                     ? 'No completed orthomosaics found. Upload drone images to get started.'
@@ -494,10 +544,10 @@ export default function InventoryPage() {
                   </TableHead>
                   <TableHead
                     className="cursor-pointer hover:bg-gray-50"
-                    onClick={() => handleSort('category')}
+                    onClick={() => handleSort('size')}
                   >
-                    Type
-                    <SortIndicator field="category" />
+                    Size
+                    <SortIndicator field="size" />
                   </TableHead>
                   <TableHead
                     className="cursor-pointer hover:bg-gray-50 text-right"
@@ -508,6 +558,13 @@ export default function InventoryPage() {
                   </TableHead>
                   <TableHead
                     className="cursor-pointer hover:bg-gray-50"
+                    onClick={() => handleSort('readiness')}
+                  >
+                    Readiness Date
+                    <SortIndicator field="readiness" />
+                  </TableHead>
+                  <TableHead
+                    className="cursor-pointer hover:bg-gray-50"
                     onClick={() => handleSort('date_counted')}
                   >
                     Date Counted
@@ -515,10 +572,10 @@ export default function InventoryPage() {
                   </TableHead>
                   <TableHead
                     className="cursor-pointer hover:bg-gray-50"
-                    onClick={() => handleSort('plot_name')}
+                    onClick={() => handleSort('block')}
                   >
-                    Plot
-                    <SortIndicator field="plot_name" />
+                    Block
+                    <SortIndicator field="block" />
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -533,28 +590,24 @@ export default function InventoryPage() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell>
-                      {item.category && (
-                        <Badge variant="outline" className="text-xs">
-                          {item.category}
-                        </Badge>
-                      )}
+                    <TableCell className="text-sm">
+                      {item.size != null ? `${item.size} gal` : <span className="text-gray-300">—</span>}
                     </TableCell>
                     <TableCell className="text-right font-medium">
                       {item.count.toLocaleString()}
                     </TableCell>
                     <TableCell className="text-sm">
-                      {new Date(item.date_counted).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell>
-                      {item.plot_name && (
-                        <Link
-                          href={`/dashboard/plots?plot=${item.plot_id}`}
-                          className="text-green-600 hover:underline"
-                        >
-                          {item.plot_name}
-                        </Link>
+                      {item.readiness ? (
+                        new Date(`${item.readiness}T00:00:00`).toLocaleDateString()
+                      ) : (
+                        <span className="text-gray-300">—</span>
                       )}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {item.date_counted ? new Date(item.date_counted).toLocaleDateString() : '—'}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {item.block != null ? item.block : <span className="text-gray-300">—</span>}
                     </TableCell>
                   </TableRow>
                 ))}

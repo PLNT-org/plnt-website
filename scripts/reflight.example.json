@@ -1,0 +1,35 @@
+{
+  "_comment": "BI-WEEKLY RE-FLIGHT template. Updates an EXISTING share in place: same /share/<token> link, same drawn boundaries (they're preserved), tiles swapped for the new flight. Copy this, fill in the share you're re-flighting + the new flight's files, then run: node scripts/publish-survey.mjs scripts/reflight.example.json",
+
+  "_identify_the_share": "Pick ONE of share_url / token / share_id to name the share to update. share_url is easiest — paste the link you already share with the client.",
+  "share_url": "https://app.plnt.net/share/PASTE_TOKEN_HERE",
+
+  "_optional_metadata": "Omit these to keep the existing title/emails. Include any you want to change this flight.",
+  "zoom": "13-22",
+  "upload_cogs": true,
+
+  "_new_flight_files": "Point each layer at THIS flight's orthophotos (the boundaries don't move; only the imagery underneath updates).",
+  "layers": {
+    "rgb": {
+      "input": "/absolute/path/to/THIS_FLIGHT/rgb_orthophoto.tif"
+    },
+    "ndvi": {
+      "input": "/absolute/path/to/THIS_FLIGHT/nir_red_orthophoto.tif",
+      "nir_band": 2,
+      "red_band": 1,
+      "alpha_band": 3,
+      "value_min": -0.1,
+      "value_max": 0.9
+    },
+    "chm": {
+      "input": "/absolute/path/to/THIS_FLIGHT/canopy_height.tif",
+      "value_min": 0,
+      "value_max": 5
+    }
+  },
+
+  "_recount_plants": "Set this to THIS flight's orthomosaic id (from upload-ortho.mjs). It refreshes points.json so the inventory re-counts plants inside each fixed boundary against the latest map. Drop it if this flight has no detections yet.",
+  "plant_points": {
+    "orthomosaic_id": "PASTE_THIS_FLIGHTS_ORTHOMOSAIC_UUID_HERE"
+  }
+}

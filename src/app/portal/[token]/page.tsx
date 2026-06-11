@@ -17,22 +17,20 @@ const SharedPropertyMap = dynamic(() => import('@/components/shared-property-map
   ),
 })
 
-export default function SharePage() {
+export default function PortalPage() {
   const params = useParams()
-  const urlToken = Array.isArray(params.token) ? params.token[0] : params.token
+  const portalToken = Array.isArray(params.token) ? params.token[0] : params.token
 
   const [email, setEmail] = useState('')
   const [loading, setLoading] = useState(false)
   const [switching, setSwitching] = useState(false)
   const [error, setError] = useState('')
   const [data, setData] = useState<SharedPropertyData | null>(null)
-  // Which location (share token) is currently open — starts at the URL's token.
-  const [currentToken, setCurrentToken] = useState<string>(urlToken as string)
+  const [currentToken, setCurrentToken] = useState<string>('')
 
-  // Open a location: redeem its email gate and load its layers. The same email
-  // is authorized for every location in the dropdown, so this passes for each.
+  // Open a location (property share) through the normal share access flow — the
+  // email is authorized for it, so this passes and mints the tile/plots token.
   const loadShare = async (tok: string, opts: { switching?: boolean } = {}) => {
-    if (!email.trim()) return
     opts.switching ? setSwitching(true) : setLoading(true)
     setError('')
     try {
@@ -43,7 +41,7 @@ export default function SharePage() {
       })
       const body = await res.json()
       if (!res.ok) {
-        setError(body.error || 'Unable to open this survey.')
+        setError(body.error || 'Unable to open this location.')
         return
       }
       setData(body)
@@ -56,7 +54,33 @@ export default function SharePage() {
     }
   }
 
-  const submit = () => loadShare(urlToken as string)
+  // Clear the portal's email gate, then open the first location it returns.
+  const submit = async () => {
+    if (!email.trim()) return
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/portal/${portalToken}/access`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim() }),
+      })
+      const body = await res.json()
+      if (!res.ok) {
+        setError(body.error || 'Unable to open this portal.')
+        return
+      }
+      if (!body.locations || body.locations.length === 0) {
+        setError('No locations are shared with this email yet.')
+        return
+      }
+      await loadShare(body.locations[0].token)
+    } catch {
+      setError('Something went wrong. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   if (data) {
     return (
@@ -111,9 +135,9 @@ export default function SharePage() {
           <Leaf className="h-6 w-6 text-green-600" />
           <span className="text-lg font-semibold text-gray-900">PLNT</span>
         </div>
-        <h1 className="text-xl font-bold text-gray-900 mt-4">View property survey</h1>
+        <h1 className="text-xl font-bold text-gray-900 mt-4">View your surveys</h1>
         <p className="text-sm text-gray-500 mt-1 mb-5">
-          Enter your email to access this drone survey. Access is limited to authorized addresses.
+          Enter your email to access your drone surveys. You can switch between locations once inside.
         </p>
 
         <label className="block text-sm font-medium text-gray-700 mb-1.5">Email address</label>
@@ -138,7 +162,7 @@ export default function SharePage() {
           ) : (
             <>
               <Lock className="h-4 w-4 mr-2" />
-              View survey
+              View surveys
             </>
           )}
         </Button>

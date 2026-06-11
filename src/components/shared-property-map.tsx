@@ -1,12 +1,36 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, RotateCcw, Leaf } from 'lucide-react'
+import { Layers, X, Maximize2, RotateCcw, Leaf, Pencil, Trash2, Check } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 
 export type LayerType = 'rgb' | 'ndvi' | 'chm'
+
+interface GeoJSONPolygon {
+  type: 'Polygon'
+  coordinates: number[][][]
+}
+
+// A viewer-drawn boundary plot, tagged via the Block/Size/Species annotation layers.
+export interface SharePlot {
+  id: string
+  boundary: GeoJSONPolygon
+  areaAcres?: number | null
+  block?: number | null // block / bed / plot #
+  size?: number | null // container size (gallons)
+  species?: string | null
+  readinessDate?: string | null // yyyy-mm-dd
+}
+
+// The three annotation layers the viewer can toggle on to draw + tag plots.
+type AnnotKey = 'block' | 'size' | 'species'
+const ANNOT_META: Record<AnnotKey, { label: string; hint: string }> = {
+  block: { label: 'Block', hint: 'Block / bed / plot number' },
+  size: { label: 'Size', hint: 'Container size (gallons)' },
+  species: { label: 'Species', hint: 'Species name + readiness date' },
+}
 
 export interface ShareLayer {
   type: LayerType
@@ -19,11 +43,19 @@ export interface ShareLayer {
   pointsUrl?: string // signed URL to points.json ([[lat,lng],...]); per-plant dots, RGB only
 }
 
+export interface ShareLocation {
+  token: string
+  title: string
+  client_name?: string | null
+}
+
 export interface SharedPropertyData {
   title: string
   client_name?: string | null
   bounds: { north: number; south: number; east: number; west: number }
   layers: ShareLayer[]
+  accessToken?: string // gates the plots API (draw/save boundary plots)
+  locations?: ShareLocation[] // other locations this viewer's email can open
 }
 
 const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales beyond
@@ -86,7 +118,79 @@ function fmtValue(layer: ShareLayer, v: number): string {
   return meta.unit ? `${fixed} ${meta.unit}` : fixed
 }
 
-export default function SharedPropertyMap({ data }: { data: SharedPropertyData }) {
+// Stable color from a string — used to color plots by block when that layer is on.
+const PLOT_PALETTE = [
+  '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e',
+  '#14b8a6', '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1',
+  '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#f43f5e',
+]
+function stringToColor(str: string): string {
+  let hash = 0
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash)
+  return PLOT_PALETTE[Math.abs(hash) % PLOT_PALETTE.length]
+}
+
+// Polygon area in acres (Shoelace with spherical correction).
+function plotAreaAcres(latlngs: L.LatLng[]): number {
+  if (latlngs.length < 3) return 0
+  const earthRadius = 6371000
+  let area = 0
+  for (let i = 0; i < latlngs.length; i++) {
+    const j = (i + 1) % latlngs.length
+    const lat1 = (latlngs[i].lat * Math.PI) / 180
+    const lat2 = (latlngs[j].lat * Math.PI) / 180
+    const lng1 = (latlngs[i].lng * Math.PI) / 180
+    const lng2 = (latlngs[j].lng * Math.PI) / 180
+    area += (lng2 - lng1) * (2 + Math.sin(lat1) + Math.sin(lat2))
+  }
+  area = Math.abs((area * earthRadius * earthRadius) / 2)
+  return Math.round(area * 0.000247105 * 100) / 100
+}
+
+const DEFAULT_PLOT_COLOR = '#10b981'
+
+// Color a plot by block (when the Block layer is on and a block is set), else green.
+function plotColor(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
+  if (annot.block && plot.block != null) return stringToColor(`block-${plot.block}`)
+  return DEFAULT_PLOT_COLOR
+}
+
+function fmtReadiness(date: string): string {
+  const d = new Date(`${date}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return date
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// Compact label shown on the map for a plot, built only from active toggles.
+function plotPrimaryLabel(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
+  if (annot.species && plot.species) return plot.species
+  if (annot.block && plot.block != null) return `Block ${plot.block}`
+  if (annot.size && plot.size != null) return `${plot.size} gal`
+  return ''
+}
+
+// Full popup HTML for a plot — every active toggle's field.
+function plotPopupHtml(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
+  const rows: string[] = []
+  if (annot.block && plot.block != null) rows.push(`<div><strong>Block:</strong> ${plot.block}</div>`)
+  if (annot.size && plot.size != null) rows.push(`<div><strong>Size:</strong> ${plot.size} gal</div>`)
+  if (annot.species && plot.species) {
+    rows.push(`<div><strong>Species:</strong> ${plot.species}</div>`)
+    if (plot.readinessDate) rows.push(`<div><strong>Ready:</strong> ${fmtReadiness(plot.readinessDate)}</div>`)
+  }
+  if (plot.areaAcres != null) rows.push(`<div style="color:#6b7280;">${plot.areaAcres.toFixed(2)} acres</div>`)
+  return `<div style="min-width:120px;font-size:12px;line-height:1.5;">${rows.join('') || '<em>Plot</em>'}</div>`
+}
+
+export default function SharedPropertyMap({
+  data,
+  token,
+  viewerEmail,
+}: {
+  data: SharedPropertyData
+  token: string
+  viewerEmail?: string
+}) {
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<L.Map | null>(null)
 
@@ -120,6 +224,24 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 640px)').matches
   )
 
+  // ---- Annotation layers (Block / Size / Species) + viewer-drawn plots ----
+  const [annot, setAnnot] = useState<Record<AnnotKey, boolean>>({ block: false, size: false, species: false })
+  const anyAnnot = annot.block || annot.size || annot.species
+  const [plots, setPlots] = useState<SharePlot[]>([])
+  const [isDrawing, setIsDrawing] = useState(false)
+  // Draft holds the just-finished polygon awaiting the tag form.
+  const [draft, setDraft] = useState<{ boundary: GeoJSONPolygon; areaAcres: number } | null>(null)
+  const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '' })
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+
+  const plotsLayerRef = useRef<L.LayerGroup | null>(null)
+  const drawPointsRef = useRef<L.LatLng[]>([])
+  const drawMarkersRef = useRef<L.CircleMarker[]>([])
+  const drawPolygonRef = useRef<L.Polygon | null>(null)
+  const rubberBandRef = useRef<L.Polyline | null>(null)
+  const closingLineRef = useRef<L.Polyline | null>(null)
+
   const resetView = () => {
     const map = mapRef.current
     if (!map) return
@@ -147,6 +269,9 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
     map.fitBounds([[south, west], [north, east]])
     L.control.scale({ position: 'bottomleft' }).addTo(map)
     mapRef.current = map
+
+    // Layer group that holds all saved viewer-drawn plots (redrawn by an effect).
+    plotsLayerRef.current = L.layerGroup().addTo(map)
 
     for (const layer of data.layers) {
       if (layer.tilesUrl) {
@@ -176,6 +301,7 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
       cogRangeRef.current = {}
       pointsLayerRef.current = null
       pointsCanvasRef.current = null
+      plotsLayerRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -341,11 +467,353 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
     }
   }, [visible, showPoints, rgbLayer])
 
+  // Load any previously-saved plots for this share once we have an access token.
+  useEffect(() => {
+    if (!data.accessToken) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/share/${token}/plots?k=${encodeURIComponent(data.accessToken!)}`)
+        if (!res.ok) return
+        const body = await res.json()
+        if (!cancelled && Array.isArray(body.plots)) setPlots(body.plots)
+      } catch {
+        // Non-fatal — the map still works without saved plots.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [token, data.accessToken])
+
+  // Tear down an in-progress drawing: remove map handlers + temporary layers.
+  const teardownDraw = useCallback(() => {
+    const map = mapRef.current
+    if (!map) return
+    const h = (map as any)._sharePlotDraw
+    if (h) {
+      map.off('click', h.handleClick)
+      map.off('dblclick', h.handleDbl)
+      map.off('contextmenu', h.handleCtx)
+      map.off('mousemove', h.handleMove)
+      ;(map as any)._sharePlotDraw = null
+    }
+    map.doubleClickZoom.enable()
+    drawPolygonRef.current?.remove()
+    drawPolygonRef.current = null
+    rubberBandRef.current?.remove()
+    rubberBandRef.current = null
+    closingLineRef.current?.remove()
+    closingLineRef.current = null
+    drawMarkersRef.current.forEach((m) => m.remove())
+    drawMarkersRef.current = []
+  }, [])
+
+  // Finish the polygon and open the tag form (if it has enough points).
+  const finishDrawing = useCallback(() => {
+    const points = drawPointsRef.current.slice()
+    teardownDraw()
+    drawPointsRef.current = []
+    setIsDrawing(false)
+    if (points.length < 3) return
+    const ring = points.map((p) => [p.lng, p.lat])
+    ring.push(ring[0]) // close the polygon
+    setForm({ block: '', size: '', species: '', readinessDate: '' })
+    setSaveError('')
+    setDraft({ boundary: { type: 'Polygon', coordinates: [ring] }, areaAcres: plotAreaAcres(points) })
+  }, [teardownDraw])
+
+  const cancelDrawing = useCallback(() => {
+    teardownDraw()
+    drawPointsRef.current = []
+    setIsDrawing(false)
+  }, [teardownDraw])
+
+  // Begin click-to-add-points drawing. Double-click or right-click finishes.
+  const startDrawing = useCallback(() => {
+    const map = mapRef.current
+    if (!map) return
+    setDraft(null)
+    setSaveError('')
+    setIsDrawing(true)
+    drawPointsRef.current = []
+    drawMarkersRef.current.forEach((m) => m.remove())
+    drawMarkersRef.current = []
+
+    const handleClick = (e: L.LeafletMouseEvent) => {
+      drawPointsRef.current.push(e.latlng)
+      const marker = L.circleMarker(e.latlng, {
+        radius: 5,
+        fillColor: DEFAULT_PLOT_COLOR,
+        color: '#fff',
+        weight: 2,
+        opacity: 1,
+        fillOpacity: 1,
+      }).addTo(map)
+      drawMarkersRef.current.push(marker)
+      drawPolygonRef.current?.remove()
+      if (drawPointsRef.current.length >= 2) {
+        drawPolygonRef.current = L.polygon(drawPointsRef.current, {
+          color: DEFAULT_PLOT_COLOR,
+          weight: 2,
+          fillColor: DEFAULT_PLOT_COLOR,
+          fillOpacity: 0.1,
+          dashArray: '5, 5',
+        }).addTo(map)
+      }
+    }
+    const handleDbl = (e: L.LeafletMouseEvent) => {
+      L.DomEvent.stopPropagation(e.originalEvent)
+      finishDrawing()
+    }
+    const handleCtx = (e: L.LeafletMouseEvent) => {
+      L.DomEvent.preventDefault(e.originalEvent)
+      finishDrawing()
+    }
+    const handleMove = (e: L.LeafletMouseEvent) => {
+      const pts = drawPointsRef.current
+      if (pts.length === 0) return
+      rubberBandRef.current?.remove()
+      rubberBandRef.current = L.polyline([pts[pts.length - 1], e.latlng], {
+        color: DEFAULT_PLOT_COLOR,
+        weight: 2,
+        dashArray: '5, 10',
+        opacity: 0.7,
+      }).addTo(map)
+      if (pts.length >= 2) {
+        closingLineRef.current?.remove()
+        closingLineRef.current = L.polyline([e.latlng, pts[0]], {
+          color: DEFAULT_PLOT_COLOR,
+          weight: 2,
+          dashArray: '3, 6',
+          opacity: 0.4,
+        }).addTo(map)
+      }
+    }
+
+    map.on('click', handleClick)
+    map.on('dblclick', handleDbl)
+    map.on('contextmenu', handleCtx)
+    map.on('mousemove', handleMove)
+    map.doubleClickZoom.disable()
+    ;(map as any)._sharePlotDraw = { handleClick, handleDbl, handleCtx, handleMove }
+  }, [finishDrawing])
+
+  const discardDraft = () => {
+    setDraft(null)
+    setSaveError('')
+  }
+
+  const savePlot = useCallback(async () => {
+    if (!draft || !data.accessToken) return
+    setSaving(true)
+    setSaveError('')
+    try {
+      const res = await fetch(`/api/share/${token}/plots?k=${encodeURIComponent(data.accessToken)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          boundary: draft.boundary,
+          areaAcres: draft.areaAcres,
+          block: annot.block ? form.block : undefined,
+          size: annot.size ? form.size : undefined,
+          species: annot.species ? form.species : undefined,
+          readinessDate: annot.species ? form.readinessDate : undefined,
+          email: viewerEmail,
+        }),
+      })
+      const body = await res.json()
+      if (!res.ok) {
+        setSaveError(body.error || 'Could not save plot.')
+        return
+      }
+      setPlots((prev) => [...prev, body.plot])
+      setDraft(null)
+    } catch {
+      setSaveError('Something went wrong. Please try again.')
+    } finally {
+      setSaving(false)
+    }
+  }, [draft, data.accessToken, token, annot, form, viewerEmail])
+
+  const deletePlot = useCallback(
+    async (id: string) => {
+      setPlots((prev) => prev.filter((p) => p.id !== id)) // optimistic
+      if (!data.accessToken) return
+      try {
+        await fetch(
+          `/api/share/${token}/plots?k=${encodeURIComponent(data.accessToken)}&id=${encodeURIComponent(id)}`,
+          { method: 'DELETE' }
+        )
+      } catch {
+        // Optimistic removal stands; a reload will reconcile if it failed.
+      }
+    },
+    [data.accessToken, token]
+  )
+
+  // Redraw saved plots whenever the set changes or an annotation toggle flips
+  // (toggles change the color/label, so we rebuild the layer).
+  useEffect(() => {
+    const layer = plotsLayerRef.current
+    if (!layer) return
+    layer.clearLayers()
+    for (const plot of plots) {
+      const ring = plot.boundary?.coordinates?.[0]
+      if (!ring) continue
+      const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
+      const color = plotColor(plot, annot)
+      const polygon = L.polygon(coords, { color, weight: 2, fillColor: color, fillOpacity: 0.2 })
+
+      const popupEl = document.createElement('div')
+      popupEl.innerHTML = plotPopupHtml(plot, annot)
+      const del = document.createElement('button')
+      del.textContent = 'Delete plot'
+      del.style.cssText =
+        'margin-top:6px;font-size:11px;color:#dc2626;background:none;border:none;cursor:pointer;padding:0;'
+      del.onclick = () => {
+        polygon.closePopup()
+        deletePlot(plot.id)
+      }
+      popupEl.appendChild(del)
+      polygon.bindPopup(popupEl)
+
+      const label = anyAnnot ? plotPrimaryLabel(plot, annot) : ''
+      if (label) {
+        polygon.bindTooltip(label, { permanent: true, direction: 'center', className: 'plnt-plot-label' })
+      }
+      layer.addLayer(polygon)
+    }
+  }, [plots, annot, anyAnnot, deletePlot])
+
   const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
 
   return (
     <div className="relative h-full w-full">
+      <style>{`
+        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; color: #fff; font-weight: 600; font-size: 11px; text-shadow: 0 1px 2px rgba(0,0,0,0.9); white-space: nowrap; }
+        .plnt-plot-label::before { display: none; }
+      `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
+
+      {/* Draw-plot control — appears once a Block/Size/Species layer is on */}
+      {anyAnnot && !draft && (
+        <div className="absolute bottom-3 left-14 z-[1000]">
+          {!isDrawing ? (
+            <button
+              onClick={startDrawing}
+              className="rounded-md bg-green-600 text-white shadow px-3 py-2 text-sm font-medium flex items-center gap-2 hover:bg-green-700"
+            >
+              <Pencil className="h-4 w-4" />
+              Draw plot
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <div className="rounded-md bg-white shadow px-3 py-2 text-xs text-gray-700">
+                <span className="font-medium text-green-600">Drawing</span> — click to add points, double-click to
+                finish
+              </div>
+              <button
+                onClick={cancelDrawing}
+                className="rounded-md bg-white shadow px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tag form — shown after a polygon is drawn */}
+      {draft && (
+        <div className="absolute inset-0 z-[1100] flex items-center justify-center bg-black/20 p-4">
+          <div className="w-full max-w-xs rounded-lg bg-white shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
+              <span className="text-sm font-semibold text-gray-900">Tag this plot</span>
+              <button onClick={discardDraft} className="text-gray-400 hover:text-gray-700" aria-label="Discard plot">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-xs text-gray-500">
+                Area: <span className="font-medium text-gray-700">{draft.areaAcres.toFixed(2)} acres</span>
+              </p>
+              {annot.block && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">{ANNOT_META.block.hint}</label>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    value={form.block}
+                    onChange={(e) => setForm((f) => ({ ...f, block: e.target.value }))}
+                    placeholder="e.g. 12"
+                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+              )}
+              {annot.size && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">{ANNOT_META.size.hint}</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    value={form.size}
+                    onChange={(e) => setForm((f) => ({ ...f, size: e.target.value }))}
+                    placeholder="e.g. 5"
+                    className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+              )}
+              {annot.species && (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Species</label>
+                    <input
+                      type="text"
+                      value={form.species}
+                      onChange={(e) => setForm((f) => ({ ...f, species: e.target.value }))}
+                      placeholder="e.g. Coast live oak"
+                      className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Readiness date</label>
+                    <input
+                      type="date"
+                      value={form.readinessDate}
+                      onChange={(e) => setForm((f) => ({ ...f, readinessDate: e.target.value }))}
+                      className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                </>
+              )}
+              {saveError && <p className="text-xs text-red-600">{saveError}</p>}
+            </div>
+            <div className="flex gap-2 px-4 py-3 border-t border-gray-100">
+              <button
+                onClick={discardDraft}
+                className="flex-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={savePlot}
+                disabled={saving}
+                className="flex-1 rounded-md bg-green-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-60 flex items-center justify-center gap-1.5"
+              >
+                {saving ? (
+                  'Saving…'
+                ) : (
+                  <>
+                    <Check className="h-4 w-4" />
+                    Save
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCount && (
         <div className="absolute top-3 left-3 z-[1000] rounded-lg bg-[#0f2e1d]/95 text-white shadow-lg px-3 py-2 flex items-center gap-2">
@@ -413,6 +881,27 @@ export default function SharedPropertyMap({ data }: { data: SharedPropertyData }
                   </div>
                 )
               })}
+
+              {/* Plot data — draw + tag boundary plots */}
+              <div className="mt-1 pt-1.5 border-t border-gray-100">
+                <p className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                  Plot data
+                </p>
+                {(['block', 'size', 'species'] as AnnotKey[]).map((key) => (
+                  <label key={key} className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={annot[key]}
+                      onChange={(e) => setAnnot((p) => ({ ...p, [key]: e.target.checked }))}
+                      className="rounded border-gray-300"
+                    />
+                    <span className="text-sm text-gray-800 flex-1">{ANNOT_META[key].label}</span>
+                  </label>
+                ))}
+                <p className="px-1.5 pt-0.5 text-[11px] text-gray-400">
+                  {anyAnnot ? 'Use “Draw plot” to add a boundary.' : 'Turn one on to draw boundary plots.'}
+                </p>
+              </div>
             </div>
           </div>
         ) : (
