@@ -938,7 +938,7 @@ export default function SharedPropertyMap({
       )}
 
       {showCount && (
-        <div className="absolute top-3 left-3 z-[1000] rounded-lg bg-[#0f2e1d]/95 text-white shadow-lg px-3 py-2 flex items-center gap-2">
+        <div className="absolute top-3 left-14 z-[1000] rounded-lg bg-[#0f2e1d]/95 text-white shadow-lg px-3 py-2 flex items-center gap-2">
           <Leaf className="h-4 w-4 text-green-300 shrink-0" />
           <span className="text-sm font-semibold tabular-nums">{rgbLayer!.plant_count!.toLocaleString()}</span>
           <span className="text-xs text-green-200/80">plants counted</span>
