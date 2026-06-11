@@ -62,40 +62,44 @@ export default function SharePage() {
   if (data) {
     return (
       <div className="fixed inset-0 flex flex-col">
-        <header className="flex items-center gap-3 px-4 py-2.5 bg-[#0f2e1d] text-white shrink-0 border-b border-black/20">
-          <Image
-            src="/images/plnt-logo-darkbg.svg"
-            alt="PLNT"
-            width={90}
-            height={30}
-            className="h-6 w-auto shrink-0"
-            priority
-          />
-          <div className="h-5 w-px bg-white/15 shrink-0" />
-          <div className="min-w-0 flex-1">
+        <header className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 py-2.5 bg-[#0f2e1d] text-white shrink-0 border-b border-black/20">
+          {/* Left: location title + client (where the logo used to be) */}
+          <div className="min-w-0">
             <h1 className="text-sm sm:text-base font-semibold leading-tight truncate">{data.title}</h1>
             {data.client_name && (
               <p className="text-[11px] sm:text-xs text-green-200/80 truncate">{data.client_name}</p>
             )}
           </div>
-          {data.locations && data.locations.length > 1 && (
-            <div className="flex items-center gap-2 shrink-0">
-              {switching && <Loader2 className="h-4 w-4 animate-spin text-green-200" />}
-              <select
-                value={currentToken}
-                onChange={(e) => loadShare(e.target.value, { switching: true })}
-                disabled={switching}
-                aria-label="Switch location"
-                className="max-w-[12rem] sm:max-w-[16rem] truncate rounded-md bg-white/10 border border-white/20 text-green-50 text-xs sm:text-sm px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-60"
-              >
-                {data.locations.map((loc) => (
-                  <option key={loc.token} value={loc.token} className="text-gray-900">
-                    {loc.title}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          {/* Center: brand */}
+          <Image
+            src="/images/plnt-logo-darkbg.svg"
+            alt="PLNT"
+            width={90}
+            height={30}
+            className="h-6 w-auto"
+            priority
+          />
+          {/* Right: location switcher */}
+          <div className="justify-self-end min-w-0 flex items-center gap-2">
+            {data.locations && data.locations.length > 1 && (
+              <>
+                {switching && <Loader2 className="h-4 w-4 animate-spin text-green-200 shrink-0" />}
+                <select
+                  value={currentToken}
+                  onChange={(e) => loadShare(e.target.value, { switching: true })}
+                  disabled={switching}
+                  aria-label="Switch location"
+                  className="max-w-[12rem] sm:max-w-[16rem] truncate rounded-md bg-white/10 border border-white/20 text-green-50 text-xs sm:text-sm px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-60"
+                >
+                  {data.locations.map((loc) => (
+                    <option key={loc.token} value={loc.token} className="text-gray-900">
+                      {loc.title}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+          </div>
         </header>
         <div className="flex-1 relative">
           <SharedPropertyMap
