@@ -269,6 +269,8 @@ export default function SharedPropertyMap({
   const [drawMode, setDrawMode] = useState<'block' | 'species' | null>(null)
   // Draft holds the just-finished polygon awaiting the tag form.
   const [draft, setDraft] = useState<{ boundary: GeoJSONPolygon; areaAcres: number } | null>(null)
+  // The saved plot currently being edited (fields only — boundary untouched).
+  const [editing, setEditing] = useState<SharePlot | null>(null)
   const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '' })
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
@@ -659,8 +661,23 @@ export default function SharedPropertyMap({
 
   const discardDraft = () => {
     setDraft(null)
+    setEditing(null)
     setSaveError('')
   }
+
+  // Open the tag form pre-filled to edit a saved plot's fields (not its boundary).
+  const startEdit = useCallback((plot: SharePlot) => {
+    setDrawMode(plot.species ? 'species' : 'block')
+    setForm({
+      block: plot.block != null ? String(plot.block) : '',
+      size: plot.size != null ? String(plot.size) : '',
+      species: plot.species || '',
+      readinessDate: plot.readinessDate || '',
+    })
+    setSaveError('')
+    setDraft(null)
+    setEditing(plot)
+  }, [])
 
   const savePlot = useCallback(async () => {
     if (!draft || !data.accessToken) return
@@ -704,6 +721,45 @@ export default function SharedPropertyMap({
     }
   }, [draft, data.accessToken, token, drawMode, form, viewerEmail])
 
+  // Save edits to an existing plot's fields (PATCH — boundary stays put).
+  const updatePlot = useCallback(async () => {
+    if (!editing || !data.accessToken) return
+    if (drawMode === 'block' && (!form.block.trim() || !form.size.trim())) {
+      setSaveError('Block and container size are both required.')
+      return
+    }
+    if (drawMode === 'species' && !form.species.trim()) {
+      setSaveError('Species is required.')
+      return
+    }
+    setSaving(true)
+    setSaveError('')
+    try {
+      const res = await fetch(`/api/share/${token}/plots?k=${encodeURIComponent(data.accessToken)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editing.id,
+          block: drawMode === 'block' ? form.block : undefined,
+          size: drawMode === 'block' ? form.size : undefined,
+          species: drawMode === 'species' ? form.species : undefined,
+          readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
+        }),
+      })
+      const body = await res.json()
+      if (!res.ok) {
+        setSaveError(body.error || 'Could not save changes.')
+        return
+      }
+      setPlots((prev) => prev.map((p) => (p.id === body.plot.id ? body.plot : p)))
+      setEditing(null)
+    } catch {
+      setSaveError('Something went wrong. Please try again.')
+    } finally {
+      setSaving(false)
+    }
+  }, [editing, data.accessToken, token, drawMode, form])
+
   const deletePlot = useCallback(
     async (id: string) => {
       setPlots((prev) => prev.filter((p) => p.id !== id)) // optimistic
@@ -739,21 +795,31 @@ export default function SharedPropertyMap({
 
       const popupEl = document.createElement('div')
       popupEl.innerHTML = plotPopupHtml(plot, annot)
+      const actions = document.createElement('div')
+      actions.style.cssText = 'margin-top:6px;display:flex;gap:12px;'
+      const edit = document.createElement('button')
+      edit.textContent = 'Edit'
+      edit.style.cssText = 'font-size:11px;color:#16a34a;background:none;border:none;cursor:pointer;padding:0;'
+      edit.onclick = () => {
+        polygon.closePopup()
+        startEdit(plot)
+      }
       const del = document.createElement('button')
       del.textContent = 'Delete plot'
-      del.style.cssText =
-        'margin-top:6px;font-size:11px;color:#dc2626;background:none;border:none;cursor:pointer;padding:0;'
+      del.style.cssText = 'font-size:11px;color:#dc2626;background:none;border:none;cursor:pointer;padding:0;'
       del.onclick = () => {
         polygon.closePopup()
         deletePlot(plot.id)
       }
-      popupEl.appendChild(del)
+      actions.appendChild(edit)
+      actions.appendChild(del)
+      popupEl.appendChild(actions)
       polygon.bindPopup(popupEl)
 
       polygon.bindTooltip(parts.join(' -- '), { permanent: true, direction: 'center', className: 'plnt-plot-label' })
       layer.addLayer(polygon)
     }
-  }, [plots, annot, deletePlot])
+  }, [plots, annot, deletePlot, startEdit])
 
   // When the inventory opens, fetch the plant points once and count how many
   // fall inside each plot's boundary — same point-in-polygon as the dashboard.
@@ -887,19 +953,22 @@ export default function SharedPropertyMap({
         </div>
       )}
 
-      {/* Tag form — shown after a polygon is drawn */}
-      {draft && (
+      {/* Tag form — shown after a polygon is drawn (draft) or when editing a plot */}
+      {(draft || editing) && (
         <div className="absolute inset-0 z-[1100] flex items-center justify-center bg-black/20 p-4">
           <div className="w-full max-w-xs rounded-lg bg-white shadow-xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
-              <span className="text-sm font-semibold text-gray-900">Tag this plot</span>
-              <button onClick={discardDraft} className="text-gray-400 hover:text-gray-700" aria-label="Discard plot">
+              <span className="text-sm font-semibold text-gray-900">{editing ? 'Edit plot' : 'Tag this plot'}</span>
+              <button onClick={discardDraft} className="text-gray-400 hover:text-gray-700" aria-label="Close">
                 <X className="h-4 w-4" />
               </button>
             </div>
             <div className="p-4 space-y-3">
               <p className="text-xs text-gray-500">
-                Area: <span className="font-medium text-gray-700">{draft.areaAcres.toFixed(2)} acres</span>
+                Area:{' '}
+                <span className="font-medium text-gray-700">
+                  {((draft ? draft.areaAcres : editing?.areaAcres) ?? 0).toFixed(2)} acres
+                </span>
               </p>
               {drawMode === 'block' && (
                 <>
@@ -964,7 +1033,7 @@ export default function SharedPropertyMap({
                 Cancel
               </button>
               <button
-                onClick={savePlot}
+                onClick={editing ? updatePlot : savePlot}
                 disabled={saving}
                 className="flex-1 rounded-md bg-green-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-60 flex items-center justify-center gap-1.5"
               >

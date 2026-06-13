@@ -128,6 +128,60 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ plot: toClientPlot(data) })
 }
 
+// PATCH — update a plot's tagged fields (block/size/species/readinessDate) by
+// id, without touching its boundary. Only the keys present in the body change.
+export async function PATCH(request: NextRequest) {
+  const shareId = shareIdFromRequest(request)
+  if (!shareId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  let body: any
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  }
+
+  const id = body?.id
+  if (!id) {
+    return NextResponse.json({ error: 'A plot id is required.' }, { status: 400 })
+  }
+
+  const update: Record<string, any> = { updated_at: new Date().toISOString() }
+  if ('block' in body) {
+    const n = body.block === null || body.block === '' ? null : Number.parseInt(String(body.block), 10)
+    update.block = Number.isFinite(n as number) ? n : null
+  }
+  if ('size' in body) {
+    const n = body.size === null || body.size === '' ? null : Number(body.size)
+    update.container_size = Number.isFinite(n as number) ? n : null
+  }
+  if ('species' in body) {
+    update.species = typeof body.species === 'string' && body.species.trim() ? body.species.trim() : null
+  }
+  if ('readinessDate' in body) {
+    update.readiness_date =
+      typeof body.readinessDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.readinessDate)
+        ? body.readinessDate
+        : null
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('share_plots')
+    .update(update)
+    .eq('id', id)
+    .eq('share_id', shareId) // never let one share edit another's plots
+    .select('id, boundary, area_acres, block, container_size, species, readiness_date')
+    .single()
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+
+  return NextResponse.json({ plot: toClientPlot(data) })
+}
+
 // DELETE — remove a plot by id (scoped to this share). Body or query: { id }.
 export async function DELETE(request: NextRequest) {
   const shareId = shareIdFromRequest(request)
