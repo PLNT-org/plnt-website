@@ -41,7 +41,7 @@ export default function SharePage() {
 
   // Open a location: redeem its email gate and load its layers. The same email
   // is authorized for every location in the dropdown, so this passes for each.
-  const loadShare = async (tok: string, opts: { switching?: boolean } = {}) => {
+  const loadShare = async (tok: string, opts: { switching?: boolean; flightKey?: string } = {}) => {
     if (!email.trim()) return
     opts.switching ? setSwitching(true) : setLoading(true)
     setError('')
@@ -58,13 +58,20 @@ export default function SharePage() {
       }
       setData(body)
       setCurrentToken(tok)
-      setSelectedFlightKey(body.flights?.[0]?.key ?? '')
+      setSelectedFlightKey(opts.flightKey ?? body.flights?.[0]?.key ?? '')
     } catch {
       setError('Something went wrong. Please try again.')
     } finally {
       setLoading(false)
       setSwitching(false)
     }
+  }
+
+  // Pick a parcel + date from its dropdown. Same parcel = swap date; different
+  // parcel = load it (and jump straight to the chosen date).
+  const pickFlight = (tok: string, flightKey: string) => {
+    if (tok === currentToken) setSelectedFlightKey(flightKey)
+    else loadShare(tok, { switching: true, flightKey })
   }
 
   const submit = () => loadShare(urlToken as string)
@@ -96,38 +103,39 @@ export default function SharePage() {
             className="h-6 w-auto"
             priority
           />
-          {/* Right: flight-date + location switchers */}
-          <div className="justify-self-end min-w-0 flex items-center gap-2">
+          {/* Right: one labeled date dropdown per parcel */}
+          <div className="justify-self-end min-w-0 flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
             {switching && <Loader2 className="h-4 w-4 animate-spin text-green-200 shrink-0" />}
-            {flights.length > 1 && (
-              <select
-                value={selectedFlight?.key ?? ''}
-                onChange={(e) => setSelectedFlightKey(e.target.value)}
-                aria-label="Flight date"
-                className="max-w-[10rem] truncate rounded-md bg-white/10 border border-white/20 text-green-50 text-xs sm:text-sm px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-400"
-              >
-                {flights.map((f) => (
-                  <option key={f.key} value={f.key} className="text-gray-900">
-                    {formatFlightDate(f.date)}
-                  </option>
-                ))}
-              </select>
-            )}
-            {data.locations && data.locations.length > 1 && (
-              <select
-                value={currentToken}
-                onChange={(e) => loadShare(e.target.value, { switching: true })}
-                disabled={switching}
-                aria-label="Switch location"
-                className="max-w-[12rem] sm:max-w-[16rem] truncate rounded-md bg-white/10 border border-white/20 text-green-50 text-xs sm:text-sm px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-60"
-              >
-                {data.locations.map((loc) => (
-                  <option key={loc.token} value={loc.token} className="text-gray-900">
+            {(data.locations || []).map((loc) => {
+              const isActive = loc.token === currentToken
+              return (
+                <div key={loc.token} className="flex items-center gap-1.5">
+                  <span
+                    className={`text-[11px] truncate max-w-[7rem] ${isActive ? 'text-green-100 font-medium' : 'text-green-200/70'}`}
+                  >
                     {loc.title}
-                  </option>
-                ))}
-              </select>
-            )}
+                  </span>
+                  <select
+                    value={isActive ? selectedFlight?.key ?? '' : ''}
+                    onChange={(e) => pickFlight(loc.token, e.target.value)}
+                    disabled={switching}
+                    aria-label={`${loc.title} flight date`}
+                    className={`max-w-[9rem] truncate rounded-md bg-white/10 text-green-50 text-xs sm:text-sm px-2 py-1.5 border focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-60 ${isActive ? 'border-green-400/70' : 'border-white/20'}`}
+                  >
+                    {!isActive && (
+                      <option value="" disabled>
+                        Select date…
+                      </option>
+                    )}
+                    {(loc.flights || []).map((f) => (
+                      <option key={f.key} value={f.key} className="text-gray-900">
+                        {formatFlightDate(f.date)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )
+            })}
           </div>
         </header>
         <div className="flex-1 relative">

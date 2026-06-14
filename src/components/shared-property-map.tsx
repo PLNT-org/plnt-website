@@ -47,6 +47,7 @@ export interface ShareLocation {
   token: string
   title: string
   client_name?: string | null
+  flights?: { key: string; date: string | null }[] // dates for this parcel's dropdown
 }
 
 export interface ShareFlight {

@@ -130,12 +130,24 @@ export async function POST(
     // emails' shares.
     const { data: locShares } = await supabaseAdmin
       .from('property_shares')
-      .select('token, title, client_name, expires_at')
+      .select('token, title, client_name, expires_at, flights')
       .contains('allowed_emails', [normalizedEmail])
     const now = Date.now()
     const locations = (locShares || [])
       .filter((s) => !s.expires_at || new Date(s.expires_at).getTime() > now)
-      .map((s) => ({ token: s.token, title: s.title, client_name: s.client_name }))
+      .map((s) => {
+        const fl: StoredFlight[] =
+          Array.isArray(s.flights) && s.flights.length > 0 ? s.flights : [{ key: 'legacy', date: null, layers: [] }]
+        return {
+          token: s.token,
+          title: s.title,
+          client_name: s.client_name,
+          // Just keys + dates for the per-parcel date dropdown (newest first).
+          flights: fl
+            .map((f) => ({ key: f.key, date: f.date ?? null }))
+            .sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))),
+        }
+      })
 
     return NextResponse.json({
       title: share.title,
