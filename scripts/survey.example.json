@@ -2,6 +2,7 @@
   "title": "North Field — Spring 2026",
   "client_name": "Green Valley Nursery",
   "allowed_emails": ["client@example.com", "manager@example.com"],
+  "flight_date": "2026-04-15",
   "expires_at": null,
   "zoom": "13-22",
   "upload_cogs": true,

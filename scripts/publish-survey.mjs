@@ -13,11 +13,13 @@
 //   node scripts/publish-survey.mjs scripts/survey.example.json   # use a config file
 //   node scripts/publish-survey.mjs                                # interactive mode (prompts you)
 //
-// Config flags: "upload_cogs": false skips archiving COGs (tiles only).
-//   Re-flighting a property? Point at the EXISTING share to update it in place —
-//   keeps its link/token, replaces tiles, updates layers/bounds, and PRESERVES
-//   every drawn boundary (share_plots stay keyed to the same share). Identify it
-//   any of three ways: "share_id": "<uuid>", "token": "<token>", or
+// Config flags: "flight_date": "YYYY-MM-DD" is REQUIRED — each publish is a dated
+//   flight stored under ${shareId}/${flight_date}; viewers switch between dates.
+//   "upload_cogs": false skips archiving COGs (tiles only).
+//   Re-flighting a property? Point at the EXISTING share to add a new dated flight
+//   in place — keeps its link/token, ADDS this flight (previous flights remain),
+//   and PRESERVES every drawn boundary (share_plots stay keyed to the same share).
+//   Identify it any of three ways: "share_id": "<uuid>", "token": "<token>", or
 //   "share_url": "https://.../share/<token>". Title/emails only change if also
 //   present in the config. A given update target must already exist — the script
 //   refuses to silently create a new share (which would orphan your boundaries).
@@ -99,8 +101,8 @@ function walk(dir) {
   return out
 }
 
-// Recursively remove an existing share's tile subtree (used when re-tiling).
-async function deleteTiles(supabase, shareId) {
+// Recursively remove a flight's tile subtree (used when re-tiling the same date).
+async function deleteTiles(supabase, flightPrefix) {
   const listAll = async (prefix) => {
     const out = []
     let offset = 0
@@ -117,7 +119,7 @@ async function deleteTiles(supabase, shareId) {
     }
     return out
   }
-  const paths = await listAll(`${shareId}/tiles`)
+  const paths = await listAll(`${flightPrefix}/tiles`)
   for (let i = 0; i < paths.length; i += 1000) {
     await supabase.storage.from(SHARE_BUCKET).remove(paths.slice(i, i + 1000))
   }
@@ -258,6 +260,7 @@ async function interactiveSetup() {
   if (!isUpdate && !emails) throw new Error('At least one authorized email is required')
 
   const expires_at = await ask('Expires YYYY-MM-DD (blank for none)')
+  const flight_date = await ask('Flight date YYYY-MM-DD (the date this orthophoto was flown)')
 
   const layers = {}
   const rgb = await askPath('RGB .tif (blank to skip)')
@@ -310,6 +313,7 @@ async function interactiveSetup() {
   if (title) cfg.title = title
   if (client_name) cfg.client_name = client_name
   if (emails) cfg.allowed_emails = emails
+  if (flight_date) cfg.flight_date = flight_date
   cfg.expires_at = expires_at || null
   cfg.zoom = zoom
   cfg.upload_cogs = !uploadCogsAns.toLowerCase().startsWith('n')
@@ -357,11 +361,21 @@ async function main() {
   if (!isUpdate && !cfg.title) throw new Error('config.title is required for a new share')
 
   const shareId = isUpdate ? existingShare.id : randomUUID()
+
+  // Each publish is a dated flight stored under ${shareId}/${flightKey}. Multiple
+  // flights accumulate per parcel so viewers can switch between dates.
+  const flightDate = String(cfg.flight_date || '').trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(flightDate)) {
+    throw new Error('config.flight_date is required, formatted YYYY-MM-DD (the date this orthophoto was flown)')
+  }
+  const flightKey = flightDate
+  const flightPrefix = `${shareId}/${flightKey}`
+
   const zoom = cfg.zoom || DEFAULT_ZOOM
   const uploadCogs = cfg.upload_cogs !== false
   const work = mkdtempSync(join(tmpdir(), 'plnt-survey-'))
   mkdirSync(join(work, 'tiles')) // gdal2tiles (GDAL 3.13) only creates the leaf dir, not parents
-  console.log(`${isUpdate ? 'Updating' : 'Publishing'} share ${shareId}\nWork dir: ${work}\n`)
+  console.log(`${isUpdate ? 'Updating' : 'Publishing'} share ${shareId} — flight ${flightKey}\nWork dir: ${work}\n`)
 
   // Reassure (and audit) that re-flighting keeps the boundaries drawn so far.
   if (isUpdate) {
@@ -487,21 +501,21 @@ async function main() {
 
   if (processed.length === 0) throw new Error('No layers had an "input" path')
 
-  // ---- Phase 2: upload ----
-  if (isUpdate) {
-    console.log('update mode: clearing old tiles...')
-    const removed = await deleteTiles(supabase, shareId)
-    console.log(`  removed ${removed} old tiles\n`)
+  // ---- Phase 2: upload (under this flight's prefix) ----
+  // Clear any prior tiles for THIS flight date (re-tiling); other flights untouched.
+  {
+    const removed = await deleteTiles(supabase, flightPrefix)
+    if (removed > 0) console.log(`cleared ${removed} existing tiles for flight ${flightKey}\n`)
   }
   const layers = []
   for (const p of processed) {
     console.log(`=== ${p.type}: uploading ===`)
     if (uploadCogs) {
       console.log('    COG...')
-      await uploadCog(supabase, `${shareId}/${p.type}_cog.tif`, p.cogPath)
+      await uploadCog(supabase, `${flightPrefix}/${p.type}_cog.tif`, p.cogPath)
     }
-    await uploadTileDir(supabase, p.tileDir, `${shareId}/tiles/${p.type}`)
-    const layer = { type: p.type, storage_path: `${shareId}/${p.type}_cog.tif`, bounds: p.bounds, tiled: true }
+    await uploadTileDir(supabase, p.tileDir, `${flightPrefix}/tiles/${p.type}`)
+    const layer = { type: p.type, storage_path: `${flightPrefix}/${p.type}_cog.tif`, bounds: p.bounds, tiled: true }
     if (p.type !== 'rgb') {
       layer.value_min = p.value_min
       layer.value_max = p.value_max
@@ -515,7 +529,7 @@ async function main() {
       if (orthoId) {
         console.log('    fetching plant points...')
         const pts = await fetchPlantPoints(supabase, orthoId)
-        const ptsPath = `${shareId}/points.json`
+        const ptsPath = `${flightPrefix}/points.json`
         const body = Buffer.from(JSON.stringify(pts))
         await withRetry(() => supabase.storage.from(SHARE_BUCKET).upload(ptsPath, body, { contentType: 'application/json', upsert: true }), 'points.json upload')
         layer.points_path = ptsPath
@@ -528,11 +542,21 @@ async function main() {
     layers.push(layer)
   }
 
-  // ---- Phase 3: create or update the share ----
+  // ---- Phase 3: create or update the share, merging this flight in ----
   const bounds = unionBounds(layers.map((l) => l.bounds))
+  const flight = { key: flightKey, date: flightDate, bounds, layers }
   let token
   if (isUpdate) {
-    const update = { layers, bounds, updated_at: new Date().toISOString() }
+    // Merge: replace any flight with the same date, then keep newest-first. The
+    // top-level layers/bounds mirror the newest flight.
+    const { data: existing } = await supabase.from('property_shares').select('flights').eq('id', shareId).single()
+    const prior = Array.isArray(existing?.flights) ? existing.flights : []
+    const flights = prior
+      .filter((f) => f.key !== flightKey)
+      .concat(flight)
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+    const latest = flights[0]
+    const update = { flights, layers: latest.layers, bounds: latest.bounds, updated_at: new Date().toISOString() }
     if (cfg.title) update.title = cfg.title
     if (cfg.client_name !== undefined) update.client_name = cfg.client_name || null
     if (cfg.allowed_emails) update.allowed_emails = normalizeEmails(cfg.allowed_emails)
@@ -540,6 +564,7 @@ async function main() {
     const { error } = await supabase.from('property_shares').update(update).eq('id', shareId)
     if (error) throw new Error(`Update share: ${error.message}`)
     token = existingShare.token
+    console.log(`\n   This parcel now has ${flights.length} flight${flights.length === 1 ? '' : 's'}: ${flights.map((f) => f.date).join(', ')}`)
   } else {
     token = randomBytes(24).toString('base64url')
     const { error } = await supabase.from('property_shares').insert({
@@ -548,6 +573,7 @@ async function main() {
       title: cfg.title,
       client_name: cfg.client_name || null,
       allowed_emails: normalizeEmails(cfg.allowed_emails),
+      flights: [flight],
       layers,
       bounds,
       expires_at: cfg.expires_at || null,
@@ -556,7 +582,7 @@ async function main() {
   }
 
   rmSync(work, { recursive: true, force: true })
-  console.log(`\n✅ ${isUpdate ? 'Updated' : 'Published'} "${cfg.title || shareId}" (${layers.map((l) => l.type).join(', ')})`)
+  console.log(`\n✅ ${isUpdate ? 'Updated' : 'Published'} "${cfg.title || shareId}" — flight ${flightKey} (${layers.map((l) => l.type).join(', ')})`)
   console.log(`\n   Share link:  ${SITE_URL}/share/${token}\n`)
 }
 

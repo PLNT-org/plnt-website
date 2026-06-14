@@ -49,6 +49,13 @@ export interface ShareLocation {
   client_name?: string | null
 }
 
+export interface ShareFlight {
+  key: string
+  date: string | null // YYYY-MM-DD
+  bounds: { north: number; south: number; east: number; west: number }
+  layers: ShareLayer[]
+}
+
 export interface SharedPropertyData {
   title: string
   client_name?: string | null
@@ -56,6 +63,7 @@ export interface SharedPropertyData {
   layers: ShareLayer[]
   accessToken?: string // gates the plots API (draw/save boundary plots)
   locations?: ShareLocation[] // other locations this viewer's email can open
+  flights?: ShareFlight[] // dated orthophoto sets for this parcel (newest first)
 }
 
 const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales beyond

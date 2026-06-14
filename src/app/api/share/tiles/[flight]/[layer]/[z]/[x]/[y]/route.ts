@@ -13,11 +13,13 @@ const supabaseAdmin = createClient(
 const LAYERS = new Set(['rgb', 'ndvi', 'chm'])
 
 // Gated tile proxy: streams a private XYZ tile only when the request carries a
-// valid access token (minted after the email gate). The token also tells us
-// which share's tiles to serve, so no per-tile DB lookup is needed.
+// valid access token (minted after the email gate). The token tells us which
+// share, and the `flight` segment selects the dated orthophoto within it — so no
+// per-tile DB lookup is needed. The 'legacy' flight keeps the pre-flights layout
+// (tiles directly under the share folder, no date subfolder).
 export async function GET(
   request: NextRequest,
-  { params }: { params: { layer: string; z: string; x: string; y: string } }
+  { params }: { params: { flight: string; layer: string; z: string; x: string; y: string } }
 ) {
   const k = request.nextUrl.searchParams.get('k') || ''
   const verified = verifyAccessToken(k)
@@ -25,12 +27,19 @@ export async function GET(
     return new NextResponse('Forbidden', { status: 403 })
   }
 
-  const { layer, z, x, y } = params
-  if (!LAYERS.has(layer) || !/^\d+$/.test(z) || !/^\d+$/.test(x) || !/^\d+$/.test(y)) {
+  const { flight, layer, z, x, y } = params
+  if (
+    !LAYERS.has(layer) ||
+    !/^[\w.-]+$/.test(flight) ||
+    !/^\d+$/.test(z) ||
+    !/^\d+$/.test(x) ||
+    !/^\d+$/.test(y)
+  ) {
     return new NextResponse('Bad request', { status: 400 })
   }
 
-  const path = `${verified.shareId}/tiles/${layer}/${z}/${x}/${y}.webp`
+  const prefix = flight === 'legacy' ? verified.shareId : `${verified.shareId}/${flight}`
+  const path = `${prefix}/tiles/${layer}/${z}/${x}/${y}.webp`
   const { data, error } = await supabaseAdmin.storage.from(BUCKETS.PROPERTY_SHARES).download(path)
   if (error || !data) {
     // Missing tile (outside coverage) — Leaflet treats a 404 as a blank tile.

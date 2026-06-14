@@ -18,6 +18,13 @@ const SharedPropertyMap = dynamic(() => import('@/components/shared-property-map
   ),
 })
 
+function formatFlightDate(date: string | null): string {
+  if (!date) return 'Survey'
+  const d = new Date(`${date}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return date
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
 export default function PortalPage() {
   const params = useParams()
   const portalToken = Array.isArray(params.token) ? params.token[0] : params.token
@@ -28,6 +35,7 @@ export default function PortalPage() {
   const [error, setError] = useState('')
   const [data, setData] = useState<SharedPropertyData | null>(null)
   const [currentToken, setCurrentToken] = useState<string>('')
+  const [selectedFlightKey, setSelectedFlightKey] = useState<string>('')
 
   // Open a location (property share) through the normal share access flow — the
   // email is authorized for it, so this passes and mints the tile/plots token.
@@ -47,6 +55,7 @@ export default function PortalPage() {
       }
       setData(body)
       setCurrentToken(tok)
+      setSelectedFlightKey(body.flights?.[0]?.key ?? '')
     } catch {
       setError('Something went wrong. Please try again.')
     } finally {
@@ -84,6 +93,12 @@ export default function PortalPage() {
   }
 
   if (data) {
+    const flights = data.flights || []
+    const selectedFlight = flights.find((f) => f.key === selectedFlightKey) || flights[0]
+    const mapData: SharedPropertyData = selectedFlight
+      ? { ...data, bounds: selectedFlight.bounds, layers: selectedFlight.layers }
+      : data
+
     return (
       <div className="fixed inset-0 flex flex-col">
         <header className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 py-2.5 bg-[#0f2e1d] text-white shrink-0 border-b border-black/20">
@@ -103,32 +118,44 @@ export default function PortalPage() {
             className="h-6 w-auto"
             priority
           />
-          {/* Right: location switcher */}
+          {/* Right: flight-date + location switchers */}
           <div className="justify-self-end min-w-0 flex items-center gap-2">
+            {switching && <Loader2 className="h-4 w-4 animate-spin text-green-200 shrink-0" />}
+            {flights.length > 1 && (
+              <select
+                value={selectedFlight?.key ?? ''}
+                onChange={(e) => setSelectedFlightKey(e.target.value)}
+                aria-label="Flight date"
+                className="max-w-[10rem] truncate rounded-md bg-white/10 border border-white/20 text-green-50 text-xs sm:text-sm px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-400"
+              >
+                {flights.map((f) => (
+                  <option key={f.key} value={f.key} className="text-gray-900">
+                    {formatFlightDate(f.date)}
+                  </option>
+                ))}
+              </select>
+            )}
             {data.locations && data.locations.length > 1 && (
-              <>
-                {switching && <Loader2 className="h-4 w-4 animate-spin text-green-200 shrink-0" />}
-                <select
-                  value={currentToken}
-                  onChange={(e) => loadShare(e.target.value, { switching: true })}
-                  disabled={switching}
-                  aria-label="Switch location"
-                  className="max-w-[12rem] sm:max-w-[16rem] truncate rounded-md bg-white/10 border border-white/20 text-green-50 text-xs sm:text-sm px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-60"
-                >
-                  {data.locations.map((loc) => (
-                    <option key={loc.token} value={loc.token} className="text-gray-900">
-                      {loc.title}
-                    </option>
-                  ))}
-                </select>
-              </>
+              <select
+                value={currentToken}
+                onChange={(e) => loadShare(e.target.value, { switching: true })}
+                disabled={switching}
+                aria-label="Switch location"
+                className="max-w-[12rem] sm:max-w-[16rem] truncate rounded-md bg-white/10 border border-white/20 text-green-50 text-xs sm:text-sm px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:opacity-60"
+              >
+                {data.locations.map((loc) => (
+                  <option key={loc.token} value={loc.token} className="text-gray-900">
+                    {loc.title}
+                  </option>
+                ))}
+              </select>
             )}
           </div>
         </header>
         <div className="flex-1 relative">
           <SharedPropertyMap
-            key={currentToken}
-            data={data}
+            key={`${currentToken}:${selectedFlight?.key ?? ''}`}
+            data={mapData}
             token={currentToken}
             viewerEmail={email.trim().toLowerCase()}
           />

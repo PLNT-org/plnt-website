@@ -4,6 +4,9 @@
   "_identify_the_share": "Pick ONE of share_url / token / share_id to name the share to update. share_url is easiest — paste the link you already share with the client.",
   "share_url": "https://app.plnt.net/share/PASTE_TOKEN_HERE",
 
+  "_flight_date": "REQUIRED. The date this flight was flown (YYYY-MM-DD). Adds a new dated flight; previous flights stay and viewers can switch between them.",
+  "flight_date": "2026-06-12",
+
   "_optional_metadata": "Omit these to keep the existing title/emails. Include any you want to change this flight.",
   "zoom": "13-22",
   "upload_cogs": true,

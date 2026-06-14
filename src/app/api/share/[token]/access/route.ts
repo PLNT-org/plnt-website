@@ -21,10 +21,18 @@ interface StoredLayer {
   points_path?: string
 }
 
+interface StoredFlight {
+  key: string
+  date: string | null
+  bounds?: { north: number; south: number; east: number; west: number }
+  layers: StoredLayer[]
+}
+
 // Gated XYZ tile URL template — served through the proxy that validates the
-// access token and streams from the private property-shares bucket.
-function tileUrlTemplate(layerType: string, accessToken: string): string {
-  return `/api/share/tiles/${layerType}/{z}/{x}/{y}?k=${accessToken}`
+// access token and streams from the private property-shares bucket. `flightKey`
+// selects the dated orthophoto within the share.
+function tileUrlTemplate(flightKey: string, layerType: string, accessToken: string): string {
+  return `/api/share/tiles/${flightKey}/${layerType}/{z}/{x}/{y}?k=${accessToken}`
 }
 
 // POST - Redeem a share link. Requires an email on the share's allowlist.
@@ -43,7 +51,7 @@ export async function POST(
 
     const { data: share, error } = await supabaseAdmin
       .from('property_shares')
-      .select('id, title, client_name, bounds, layers, allowed_emails, expires_at')
+      .select('id, title, client_name, bounds, layers, flights, allowed_emails, expires_at')
       .eq('token', params.token)
       .single()
 
@@ -64,43 +72,57 @@ export async function POST(
     }
 
     const accessToken = signAccessToken(share.id)
-    const storedLayers: StoredLayer[] = Array.isArray(share.layers) ? share.layers : []
-    const layers = await Promise.all(
-      storedLayers.map(async (layer) => {
-        const base = {
-          type: layer.type,
-          bounds: layer.bounds,
-          value_min: layer.value_min,
-          value_max: layer.value_max,
-          plant_count: layer.plant_count,
+
+    // Resolve a stored layer into client-ready URLs for a given flight.
+    const resolveLayer = async (flightKey: string, layer: StoredLayer) => {
+      const base = {
+        type: layer.type,
+        bounds: layer.bounds,
+        value_min: layer.value_min,
+        value_max: layer.value_max,
+        plant_count: layer.plant_count,
+      }
+      if (layer.tiled) {
+        const out: Record<string, any> = { ...base, tilesUrl: tileUrlTemplate(flightKey, layer.type, accessToken) }
+        if (layer.storage_path) {
+          try {
+            out.url = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL)
+          } catch {
+            // COG not archived — fine, the legend slider just won't recolor live.
+          }
         }
-        // For tiled layers: tilesUrl is the fast path. Also include a signed COG
-        // URL so the viewer can switch to live client-side recoloring when the
-        // user drags the legend range away from the baked default.
-        if (layer.tiled) {
-          const out: Record<string, any> = {
-            ...base,
-            tilesUrl: tileUrlTemplate(layer.type, accessToken),
+        if (layer.points_path) {
+          try {
+            out.pointsUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.points_path, SIGNED_URL_TTL)
+          } catch {
+            // No points file — map just won't draw per-plant dots.
           }
-          if (layer.storage_path) {
-            try {
-              out.url = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL)
-            } catch {
-              // COG not archived for this share — that's fine, slider just won't recolor live.
-            }
-          }
-          if (layer.points_path) {
-            try {
-              out.pointsUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.points_path, SIGNED_URL_TTL)
-            } catch {
-              // No points file — map just won't draw per-plant dots.
-            }
-          }
-          return out
         }
-        return { ...base, url: await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL) }
-      })
+        return out
+      }
+      return { ...base, url: await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL) }
+    }
+
+    // Build the dated flights. Fall back to a single 'legacy' flight from the
+    // share's top-level layers if it hasn't been backfilled yet.
+    const storedFlights: StoredFlight[] =
+      Array.isArray(share.flights) && share.flights.length > 0
+        ? share.flights
+        : [{ key: 'legacy', date: null, bounds: share.bounds, layers: Array.isArray(share.layers) ? share.layers : [] }]
+
+    const flights = await Promise.all(
+      storedFlights.map(async (f) => ({
+        key: f.key,
+        date: f.date ?? null,
+        bounds: f.bounds ?? share.bounds,
+        layers: await Promise.all((f.layers || []).map((l) => resolveLayer(f.key, l))),
+      }))
     )
+    // Newest first (nulls last).
+    flights.sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+
+    const latest = flights[0]
+    const layers = latest?.layers ?? []
 
     // Every (non-expired) location this same email is authorized for, so the
     // viewer can offer a location switcher. Gated by having just cleared this
@@ -118,12 +140,14 @@ export async function POST(
     return NextResponse.json({
       title: share.title,
       client_name: share.client_name,
-      bounds: share.bounds,
-      layers,
+      bounds: latest?.bounds ?? share.bounds,
+      layers, // latest flight's layers (back-compat)
       // Lets the viewer call the gated plots API (draw/save boundary plots).
       accessToken,
       // All locations (shares) this email can view; powers the location dropdown.
       locations,
+      // Dated orthophoto sets; powers the flight-date dropdown.
+      flights,
     })
   } catch (error) {
     return NextResponse.json(
