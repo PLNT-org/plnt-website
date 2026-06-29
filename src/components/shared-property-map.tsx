@@ -5,6 +5,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, Table2, Download } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
+import { SPECIES_LIST } from '@/lib/species-list'
 
 export type LayerType = 'rgb' | 'ndvi' | 'chm'
 
@@ -962,9 +963,17 @@ export default function SharedPropertyMap({
         </div>
       )}
 
-      {/* Tag form — shown after a polygon is drawn (draft) or when editing a plot */}
+      {/* Species autocomplete options (nursery availability list) */}
+      <datalist id="plnt-species">
+        {SPECIES_LIST.map((s) => (
+          <option key={s} value={s} />
+        ))}
+      </datalist>
+
+      {/* Tag form — shown after a polygon is drawn (draft) or when editing a plot.
+          z above the inventory drawer so row-edits surface over it. */}
       {(draft || editing) && (
-        <div className="absolute inset-0 z-[1100] flex items-center justify-center bg-black/20 p-4">
+        <div className="absolute inset-0 z-[1200] flex items-center justify-center bg-black/20 p-4">
           <div className="w-full max-w-xs rounded-lg bg-white shadow-xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
               <span className="text-sm font-semibold text-gray-900">{editing ? 'Edit plot' : 'Tag this plot'}</span>
@@ -1015,9 +1024,11 @@ export default function SharedPropertyMap({
                     <label className="block text-xs font-medium text-gray-700 mb-1">Species</label>
                     <input
                       type="text"
+                      list="plnt-species"
+                      autoComplete="off"
                       value={form.species}
                       onChange={(e) => setForm((f) => ({ ...f, species: e.target.value }))}
-                      placeholder="e.g. Coast live oak"
+                      placeholder="Start typing… e.g. Acer rubrum"
                       className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
                     />
                   </div>
@@ -1365,6 +1376,7 @@ export default function SharedPropertyMap({
                     <th className="text-right font-medium px-3 py-2">Count</th>
                     <th className="text-left font-medium px-3 py-2">Readiness</th>
                     <th className="text-left font-medium px-3 py-2">Block</th>
+                    <th className="px-3 py-2 w-10"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -1382,6 +1394,19 @@ export default function SharedPropertyMap({
                       </td>
                       <td className="px-3 py-2 text-gray-700">
                         {r.block != null ? r.block : <span className="text-gray-300">—</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          onClick={() => {
+                            const plot = plots.find((p) => p.id === r.id)
+                            if (plot) startEdit(plot)
+                          }}
+                          className="inline-flex items-center gap-1 text-green-700 hover:text-green-900 text-xs font-medium"
+                          title="Edit this species"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </button>
                       </td>
                     </tr>
                   ))}
