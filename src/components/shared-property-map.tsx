@@ -185,12 +185,18 @@ function ringCentroid(ring: number[][]): [number, number] {
 
 const DEFAULT_PLOT_COLOR = '#10b981'
 
+// Escape text for safe insertion into the tooltip's innerHTML.
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
 // Color a plot by block when the Block layer is on; otherwise by size when
-// viewing sizes alone (block off); else green.
-function plotColor(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
+// viewing sizes alone; else give each plot a distinct color from the palette
+// (by render index) so neighbouring plots are easy to tell apart.
+function plotColor(plot: SharePlot, annot: Record<AnnotKey, boolean>, idx: number): string {
   if (annot.block && plot.block != null) return stringToColor(`block-${plot.block}`)
   if (annot.size && plot.size != null) return stringToColor(`size-${plot.size}`)
-  return DEFAULT_PLOT_COLOR
+  return PLOT_PALETTE[idx % PLOT_PALETTE.length]
 }
 
 function fmtReadiness(date: string): string {
@@ -786,41 +792,55 @@ export default function SharedPropertyMap({
     [data.accessToken, token]
   )
 
-  // Keep each plot label on one line and shrink the font so it fits its
-  // boundary's on-screen width; hide it only if that would be unreadably small.
-  // Recomputed on zoom.
+  // Orient each plot label along the plot's longest edge and shrink the font so
+  // it fits that edge on one line; hide it when it would be unreadably small (the
+  // viewer can still click the plot to see its details). Recomputed on zoom.
   const fitPlotLabels = useCallback(() => {
     const map = mapRef.current
     const layer = plotsLayerRef.current
     if (!map || !layer) return
-    const REF = 11 // reference font size for measuring natural width
+    const REF = 12 // reference font size used to measure the label's natural width
     layer.eachLayer((lyr) => {
       const poly = lyr as L.Polygon
       const tt = poly.getTooltip?.()
       const el = tt?.getElement?.() as HTMLElement | undefined
-      if (!tt || !el) return
-      const b = poly.getBounds()
-      const nw = map.latLngToContainerPoint(b.getNorthWest())
-      const se = map.latLngToContainerPoint(b.getSouthEast())
-      const avail = Math.abs(se.x - nw.x) - 6
-      // Measure the label's natural single-line width at the reference size.
+      const span = el?.querySelector('.plnt-label-inner') as HTMLElement | null
+      if (!tt || !el || !span) return
+
+      // Longest edge of the polygon in screen pixels → text length budget + angle.
+      const ringLL = poly.getLatLngs()[0] as L.LatLng[]
+      if (!Array.isArray(ringLL) || ringLL.length < 2) return
+      let bestLen = 0
+      let bestAng = 0
+      for (let i = 0; i < ringLL.length; i++) {
+        const a = map.latLngToContainerPoint(ringLL[i])
+        const c = map.latLngToContainerPoint(ringLL[(i + 1) % ringLL.length])
+        const len = Math.hypot(c.x - a.x, c.y - a.y)
+        if (len > bestLen) {
+          bestLen = len
+          bestAng = Math.atan2(c.y - a.y, c.x - a.x)
+        }
+      }
+      let deg = (bestAng * 180) / Math.PI
+      if (deg > 90) deg -= 180
+      else if (deg < -90) deg += 180
+
+      // Natural single-line width at REF is zoom-independent — measure once, cache.
+      let natural = Number(span.dataset.natw || 0)
+      if (!natural) {
+        span.style.fontSize = `${REF}px`
+        natural = span.scrollWidth
+        span.dataset.natw = String(natural)
+      }
+
+      const avail = bestLen - 8
+      if (avail < 16 || natural <= 0 || REF * (avail / natural) < 7) {
+        el.style.display = 'none'
+        return
+      }
       el.style.display = ''
-      el.style.whiteSpace = 'nowrap'
-      el.style.maxWidth = 'none'
-      el.style.fontSize = `${REF}px`
-      const natural = el.scrollWidth
-      if (avail < 18 || natural <= 0) {
-        el.style.display = 'none'
-        return
-      }
-      const fitted = REF * (avail / natural)
-      if (fitted < 7) {
-        // Would have to shrink below readable size to fit — hide until zoomed in.
-        el.style.display = 'none'
-        return
-      }
-      el.style.fontSize = `${Math.min(14, Math.round(fitted))}px`
-      tt.update() // re-center for the new size
+      span.style.fontSize = `${Math.min(16, Math.round(REF * (avail / natural)))}px`
+      span.style.transform = `translate(-50%, -50%) rotate(${deg.toFixed(1)}deg)`
     })
   }, [])
 
@@ -830,7 +850,8 @@ export default function SharedPropertyMap({
     const layer = plotsLayerRef.current
     if (!layer) return
     layer.clearLayers()
-    for (const plot of plots) {
+    for (let idx = 0; idx < plots.length; idx++) {
+      const plot = plots[idx]
       const ring = plot.boundary?.coordinates?.[0]
       if (!ring) continue
       // Only draw the boundary if at least one active layer applies to it, so
@@ -838,7 +859,7 @@ export default function SharedPropertyMap({
       const parts = activePlotParts(plot, annot)
       if (parts.length === 0) continue
       const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
-      const color = plotColor(plot, annot)
+      const color = plotColor(plot, annot, idx)
       const polygon = L.polygon(coords, { color, weight: 2, fillColor: color, fillOpacity: 0.2 })
 
       const popupEl = document.createElement('div')
@@ -864,7 +885,11 @@ export default function SharedPropertyMap({
       popupEl.appendChild(actions)
       polygon.bindPopup(popupEl)
 
-      polygon.bindTooltip(parts.join(' -- '), { permanent: true, direction: 'center', className: 'plnt-plot-label' })
+      polygon.bindTooltip(`<span class="plnt-label-inner">${escapeHtml(parts.join(' -- '))}</span>`, {
+        permanent: true,
+        direction: 'center',
+        className: 'plnt-plot-label',
+      })
       layer.addLayer(polygon)
     }
     fitPlotLabels()
@@ -992,8 +1017,9 @@ export default function SharedPropertyMap({
   return (
     <div ref={rootRef} className="relative h-full w-full">
       <style>{`
-        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; color: #fff; font-weight: 600; font-size: 11px; line-height: 1.1; text-align: center; white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,0.95); pointer-events: none; }
+        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; margin: 0; width: 0; height: 0; overflow: visible; pointer-events: none; }
         .plnt-plot-label::before { display: none; }
+        .plnt-label-inner { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); transform-origin: center; display: inline-block; white-space: nowrap; color: #fff; font-weight: 700; line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.85); pointer-events: none; }
       `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
 
