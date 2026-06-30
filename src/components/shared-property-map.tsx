@@ -907,11 +907,22 @@ export default function SharedPropertyMap({
       popupEl.appendChild(actions)
       polygon.bindPopup(popupEl)
 
-      polygon.bindTooltip(`<span class="plnt-label-inner">${escapeHtml(parts.join(' -- '))}</span>`, {
-        permanent: true,
-        direction: 'center',
-        className: 'plnt-plot-label',
-      })
+      // On-map label shows block/size only — species is view-on-click (popup),
+      // since species names are too long to read inside the plots. Species plots
+      // stay drawn + clickable (no text label).
+      const mapLabel = [
+        annot.block && plot.block != null ? `Block ${plot.block}` : null,
+        annot.size && plot.size != null ? `${plot.size}-Gallon` : null,
+      ]
+        .filter(Boolean)
+        .join(' -- ')
+      if (mapLabel) {
+        polygon.bindTooltip(`<span class="plnt-label-inner">${escapeHtml(mapLabel)}</span>`, {
+          permanent: true,
+          direction: 'center',
+          className: 'plnt-plot-label',
+        })
+      }
       layer.addLayer(polygon)
     }
     fitPlotLabels()
