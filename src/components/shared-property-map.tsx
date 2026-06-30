@@ -185,18 +185,21 @@ function ringCentroid(ring: number[][]): [number, number] {
 
 const DEFAULT_PLOT_COLOR = '#10b981'
 
+// A few muted colors cycled across plots so neighbours are easy to tell apart
+// without being garish.
+const PLOT_PALETTE4 = ['#3f7d5a', '#3f6f9e', '#b1894d', '#7d5e88']
+
 // Escape text for safe insertion into the tooltip's innerHTML.
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 // Color a plot by block when the Block layer is on; otherwise by size when
-// viewing sizes alone; else give each plot a distinct color from the palette
-// (by render index) so neighbouring plots are easy to tell apart.
+// viewing sizes alone; else cycle the muted 4-color palette by render index.
 function plotColor(plot: SharePlot, annot: Record<AnnotKey, boolean>, idx: number): string {
   if (annot.block && plot.block != null) return stringToColor(`block-${plot.block}`)
   if (annot.size && plot.size != null) return stringToColor(`size-${plot.size}`)
-  return PLOT_PALETTE[idx % PLOT_PALETTE.length]
+  return PLOT_PALETTE4[idx % PLOT_PALETTE4.length]
 }
 
 function fmtReadiness(date: string): string {
@@ -794,20 +797,41 @@ export default function SharedPropertyMap({
 
   // Orient each plot label along the plot's longest edge and shrink the font so
   // it fits that edge on one line; hide it when it would be unreadably small (the
-  // viewer can still click the plot to see its details). Recomputed on zoom.
+  // viewer can still click the plot to see its details). Leaflet centers the
+  // label box on the plot; we only rotate the inner text. Recomputed on zoom.
   const fitPlotLabels = useCallback(() => {
     const map = mapRef.current
     const layer = plotsLayerRef.current
     if (!map || !layer) return
     const REF = 12 // reference font size used to measure the label's natural width
+    const view = map.getBounds()
     layer.eachLayer((lyr) => {
       const poly = lyr as L.Polygon
       const tt = poly.getTooltip?.()
       const el = tt?.getElement?.() as HTMLElement | undefined
-      const span = el?.querySelector('.plnt-label-inner') as HTMLElement | null
-      if (!tt || !el || !span) return
+      if (!tt || !el) return
+      // Off-screen labels don't need updating.
+      if (!view.intersects(poly.getBounds())) {
+        el.style.display = 'none'
+        return
+      }
 
-      // Longest edge of the polygon in screen pixels → text length budget + angle.
+      // Cache the label text and its natural width at REF (both zoom-independent).
+      if (!el.dataset.txt) el.dataset.txt = (el.textContent || '').trim()
+      const text = el.dataset.txt
+      let natural = Number(el.dataset.natw || 0)
+      if (!natural) {
+        const sp = el.querySelector('.plnt-label-inner') as HTMLElement | null
+        if (sp) {
+          sp.style.fontSize = `${REF}px`
+          natural = sp.scrollWidth
+          el.dataset.natw = String(natural)
+        }
+      }
+      if (!text || !natural) return
+
+      // Longest polygon edge in screen pixels → text budget + angle (angle is
+      // constant across zoom; only the pixel length scales).
       const ringLL = poly.getLatLngs()[0] as L.LatLng[]
       if (!Array.isArray(ringLL) || ringLL.length < 2) return
       let bestLen = 0
@@ -825,22 +849,20 @@ export default function SharedPropertyMap({
       if (deg > 90) deg -= 180
       else if (deg < -90) deg += 180
 
-      // Natural single-line width at REF is zoom-independent — measure once, cache.
-      let natural = Number(span.dataset.natw || 0)
-      if (!natural) {
-        span.style.fontSize = `${REF}px`
-        natural = span.scrollWidth
-        span.dataset.natw = String(natural)
-      }
-
       const avail = bestLen - 8
-      if (avail < 16 || natural <= 0 || REF * (avail / natural) < 7) {
+      if (avail < 16 || REF * (avail / natural) < 7) {
         el.style.display = 'none'
         return
       }
+      const fs = Math.min(16, Math.round(REF * (avail / natural)))
+      const sig = `${fs}|${Math.round(deg)}`
+      if (el.style.display !== 'none' && el.dataset.sig === sig) return // unchanged
+      el.dataset.sig = sig
       el.style.display = ''
-      span.style.fontSize = `${Math.min(16, Math.round(REF * (avail / natural)))}px`
-      span.style.transform = `translate(-50%, -50%) rotate(${deg.toFixed(1)}deg)`
+      // Re-render the label content (re-centers the box) with the fitted font + rotation.
+      poly.setTooltipContent(
+        `<span class="plnt-label-inner" style="font-size:${fs}px;transform:rotate(${deg.toFixed(1)}deg)">${escapeHtml(text)}</span>`
+      )
     })
   }, [])
 
@@ -1017,9 +1039,9 @@ export default function SharedPropertyMap({
   return (
     <div ref={rootRef} className="relative h-full w-full">
       <style>{`
-        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; margin: 0; width: 0; height: 0; overflow: visible; pointer-events: none; }
+        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; margin: 0; overflow: visible; pointer-events: none; }
         .plnt-plot-label::before { display: none; }
-        .plnt-label-inner { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); transform-origin: center; display: inline-block; white-space: nowrap; color: #fff; font-weight: 700; line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.85); pointer-events: none; }
+        .plnt-label-inner { display: inline-block; white-space: nowrap; transform-origin: center center; color: #fff; font-weight: 700; line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.85); pointer-events: none; }
       `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
 
