@@ -786,29 +786,40 @@ export default function SharedPropertyMap({
     [data.accessToken, token]
   )
 
-  // Size each plot label to its boundary's on-screen width (wrap to fit), and
-  // hide it when the boundary is too small to hold text. Recomputed on zoom.
+  // Keep each plot label on one line and shrink the font so it fits its
+  // boundary's on-screen width; hide it only if that would be unreadably small.
+  // Recomputed on zoom.
   const fitPlotLabels = useCallback(() => {
     const map = mapRef.current
     const layer = plotsLayerRef.current
     if (!map || !layer) return
+    const REF = 11 // reference font size for measuring natural width
     layer.eachLayer((lyr) => {
       const poly = lyr as L.Polygon
       const tt = poly.getTooltip?.()
-      const el = tt?.getElement?.()
+      const el = tt?.getElement?.() as HTMLElement | undefined
       if (!tt || !el) return
       const b = poly.getBounds()
       const nw = map.latLngToContainerPoint(b.getNorthWest())
       const se = map.latLngToContainerPoint(b.getSouthEast())
-      const w = Math.abs(se.x - nw.x)
-      if (w < 30) {
-        // Boundary too small on screen to hold a readable label.
+      const avail = Math.abs(se.x - nw.x) - 6
+      // Measure the label's natural single-line width at the reference size.
+      el.style.display = ''
+      el.style.whiteSpace = 'nowrap'
+      el.style.maxWidth = 'none'
+      el.style.fontSize = `${REF}px`
+      const natural = el.scrollWidth
+      if (avail < 18 || natural <= 0) {
         el.style.display = 'none'
         return
       }
-      el.style.display = ''
-      el.style.maxWidth = `${Math.max(40, Math.round(w) - 8)}px`
-      el.style.fontSize = `${Math.max(8, Math.min(12, Math.round(w / 9)))}px`
+      const fitted = REF * (avail / natural)
+      if (fitted < 7) {
+        // Would have to shrink below readable size to fit — hide until zoomed in.
+        el.style.display = 'none'
+        return
+      }
+      el.style.fontSize = `${Math.min(14, Math.round(fitted))}px`
       tt.update() // re-center for the new size
     })
   }, [])
@@ -981,7 +992,7 @@ export default function SharedPropertyMap({
   return (
     <div ref={rootRef} className="relative h-full w-full">
       <style>{`
-        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; color: #fff; font-weight: 600; font-size: 11px; line-height: 1.05; text-align: center; white-space: normal; word-break: break-word; text-shadow: 0 1px 2px rgba(0,0,0,0.95); pointer-events: none; }
+        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; color: #fff; font-weight: 600; font-size: 11px; line-height: 1.1; text-align: center; white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,0.95); pointer-events: none; }
         .plnt-plot-label::before { display: none; }
       `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
