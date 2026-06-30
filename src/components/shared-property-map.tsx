@@ -786,6 +786,33 @@ export default function SharedPropertyMap({
     [data.accessToken, token]
   )
 
+  // Size each plot label to its boundary's on-screen width (wrap to fit), and
+  // hide it when the boundary is too small to hold text. Recomputed on zoom.
+  const fitPlotLabels = useCallback(() => {
+    const map = mapRef.current
+    const layer = plotsLayerRef.current
+    if (!map || !layer) return
+    layer.eachLayer((lyr) => {
+      const poly = lyr as L.Polygon
+      const tt = poly.getTooltip?.()
+      const el = tt?.getElement?.()
+      if (!tt || !el) return
+      const b = poly.getBounds()
+      const nw = map.latLngToContainerPoint(b.getNorthWest())
+      const se = map.latLngToContainerPoint(b.getSouthEast())
+      const w = Math.abs(se.x - nw.x)
+      if (w < 30) {
+        // Boundary too small on screen to hold a readable label.
+        el.style.display = 'none'
+        return
+      }
+      el.style.display = ''
+      el.style.maxWidth = `${Math.max(40, Math.round(w) - 8)}px`
+      el.style.fontSize = `${Math.max(8, Math.min(12, Math.round(w / 9)))}px`
+      tt.update() // re-center for the new size
+    })
+  }, [])
+
   // Redraw saved plots whenever the set changes or an annotation toggle flips
   // (toggles change the color/label, so we rebuild the layer).
   useEffect(() => {
@@ -829,7 +856,19 @@ export default function SharedPropertyMap({
       polygon.bindTooltip(parts.join(' -- '), { permanent: true, direction: 'center', className: 'plnt-plot-label' })
       layer.addLayer(polygon)
     }
-  }, [plots, annot, deletePlot, startEdit])
+    fitPlotLabels()
+  }, [plots, annot, deletePlot, startEdit, fitPlotLabels])
+
+  // Re-fit labels to their boundaries as the map zooms.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const handler = () => fitPlotLabels()
+    map.on('zoomend', handler)
+    return () => {
+      map.off('zoomend', handler)
+    }
+  }, [fitPlotLabels])
 
   // When the inventory opens, fetch the plant points once and count how many
   // fall inside each plot's boundary — same point-in-polygon as the dashboard.
@@ -942,7 +981,7 @@ export default function SharedPropertyMap({
   return (
     <div ref={rootRef} className="relative h-full w-full">
       <style>{`
-        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; color: #fff; font-weight: 600; font-size: 11px; text-shadow: 0 1px 2px rgba(0,0,0,0.9); white-space: nowrap; }
+        .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; color: #fff; font-weight: 600; font-size: 11px; line-height: 1.05; text-align: center; white-space: normal; word-break: break-word; text-shadow: 0 1px 2px rgba(0,0,0,0.95); pointer-events: none; }
         .plnt-plot-label::before { display: none; }
       `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
