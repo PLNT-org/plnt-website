@@ -42,6 +42,7 @@ export interface ShareLayer {
   value_max?: number
   plant_count?: number // in-boundary plant count (RGB layer only); shown when RGB is active
   pointsUrl?: string // signed URL to points.json ([[lat,lng],...]); per-plant dots, RGB only
+  maxNativeZoom?: number // deepest zoom this layer has tiles for (default 22)
 }
 
 export interface ShareLocation {
@@ -347,7 +348,7 @@ export default function SharedPropertyMap({
             [layer.bounds.south, layer.bounds.west],
             [layer.bounds.north, layer.bounds.east],
           ],
-          maxNativeZoom: MAX_NATIVE_ZOOM,
+          maxNativeZoom: layer.maxNativeZoom ?? MAX_NATIVE_ZOOM,
           maxZoom: 24,
           zIndex: Z_INDEX[layer.type],
           crossOrigin: true,

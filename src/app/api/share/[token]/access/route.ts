@@ -19,6 +19,7 @@ interface StoredLayer {
   tiled?: boolean
   plant_count?: number
   points_path?: string
+  max_zoom?: number // deepest zoom level tiles were generated for (default 22)
 }
 
 interface StoredFlight {
@@ -81,6 +82,7 @@ export async function POST(
         value_min: layer.value_min,
         value_max: layer.value_max,
         plant_count: layer.plant_count,
+        maxNativeZoom: layer.max_zoom ?? 22,
       }
       if (layer.tiled) {
         const out: Record<string, any> = { ...base, tilesUrl: tileUrlTemplate(flightKey, layer.type, accessToken) }

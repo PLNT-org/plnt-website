@@ -40,7 +40,7 @@ import { createInterface } from 'readline/promises'
 
 const SHARE_BUCKET = 'property-shares' // private: holds both COGs and tiles, gated by the share access token
 const SITE_URL = (process.env.SITE_URL || 'http://localhost:3000').replace(/\/$/, '')
-const DEFAULT_ZOOM = '13-22'
+const DEFAULT_ZOOM = '13-23' // z23 ≈ 1.5 cm/px — captures typical 2 cm/px ortho detail
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const COG_OPTS = ['-of', 'COG', '-co', 'COMPRESS=DEFLATE', '-co', 'BLOCKSIZE=512', '-co', 'OVERVIEW_RESAMPLING=AVERAGE', '-co', 'BIGTIFF=IF_SAFER']
 const UPLOAD_CONCURRENCY = 24
@@ -487,7 +487,7 @@ async function main() {
     console.log(`=== ${type}: tiling (z ${zoom}, webp) ===`)
     // RGB: lossy webp (great for photographic imagery, small). NDVI/CHM: lossless
     // webp so the color-mapped boundaries stay crisp.
-    const webpOpts = type === 'rgb' ? ['--webp-quality=88'] : ['--webp-lossless']
+    const webpOpts = type === 'rgb' ? ['--webp-quality=90'] : ['--webp-lossless']
     gdal('gdal2tiles.py', ['--xyz', '-z', zoom, '-w', 'none', '--processes=4', '--tiledriver=WEBP', ...webpOpts, tileSource, tileDir])
 
     const entry = { type, cogPath: cog, tileDir, bounds }
@@ -515,7 +515,8 @@ async function main() {
       await uploadCog(supabase, `${flightPrefix}/${p.type}_cog.tif`, p.cogPath)
     }
     await uploadTileDir(supabase, p.tileDir, `${flightPrefix}/tiles/${p.type}`)
-    const layer = { type: p.type, storage_path: `${flightPrefix}/${p.type}_cog.tif`, bounds: p.bounds, tiled: true }
+    const topZoom = parseInt(String(zoom).split('-').pop(), 10) || 22
+    const layer = { type: p.type, storage_path: `${flightPrefix}/${p.type}_cog.tif`, bounds: p.bounds, tiled: true, max_zoom: topZoom }
     if (p.type !== 'rgb') {
       layer.value_min = p.value_min
       layer.value_max = p.value_max
