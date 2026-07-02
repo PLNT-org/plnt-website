@@ -126,16 +126,18 @@ export async function POST(
     const latest = flights[0]
     const layers = latest?.layers ?? []
 
-    // Every (non-expired) location this same email is authorized for, so the
-    // viewer can offer a location switcher. Gated by having just cleared this
-    // share's email check above, so it can't be used to enumerate arbitrary
-    // emails' shares.
+    // Locations for the switcher: other parcels this email can view, scoped to
+    // the SAME client as this share so one client's link never lists another
+    // client's parcels (e.g. the operator, who is on everything). Gated by having
+    // just cleared this share's email check above.
+    const sameClient = (share.client_name || '').trim().toLowerCase()
     const { data: locShares } = await supabaseAdmin
       .from('property_shares')
       .select('token, title, client_name, expires_at, flights')
       .contains('allowed_emails', [normalizedEmail])
     const now = Date.now()
     const locations = (locShares || [])
+      .filter((s) => (s.client_name || '').trim().toLowerCase() === sameClient)
       .filter((s) => !s.expires_at || new Date(s.expires_at).getTime() > now)
       .map((s) => {
         const fl: StoredFlight[] =
