@@ -150,7 +150,7 @@ export default function PortalPage() {
                     )}
                     {(loc.flights || []).map((f) => (
                       <option key={f.key} value={f.key} className="text-gray-900">
-                        {formatFlightDate(f.date)}
+                        {f.label || formatFlightDate(f.date)}
                       </option>
                     ))}
                   </select>

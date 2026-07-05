@@ -25,6 +25,7 @@ interface StoredLayer {
 interface StoredFlight {
   key: string
   date: string | null
+  label?: string | null // shown in the dropdown instead of the date when set
   bounds?: { north: number; south: number; east: number; west: number }
   layers: StoredLayer[]
 }
@@ -116,6 +117,7 @@ export async function POST(
       storedFlights.map(async (f) => ({
         key: f.key,
         date: f.date ?? null,
+        label: f.label ?? null,
         bounds: f.bounds ?? share.bounds,
         layers: await Promise.all((f.layers || []).map((l) => resolveLayer(f.key, l))),
       }))
@@ -146,9 +148,9 @@ export async function POST(
           token: s.token,
           title: s.title,
           client_name: s.client_name,
-          // Just keys + dates for the per-parcel date dropdown (newest first).
+          // Just keys + dates + labels for the per-parcel dropdown (newest first).
           flights: fl
-            .map((f) => ({ key: f.key, date: f.date ?? null }))
+            .map((f) => ({ key: f.key, date: f.date ?? null, label: f.label ?? null }))
             .sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))),
         }
       })

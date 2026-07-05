@@ -49,12 +49,13 @@ export interface ShareLocation {
   token: string
   title: string
   client_name?: string | null
-  flights?: { key: string; date: string | null }[] // dates for this parcel's dropdown
+  flights?: { key: string; date: string | null; label?: string | null }[] // this parcel's dropdown entries
 }
 
 export interface ShareFlight {
   key: string
   date: string | null // YYYY-MM-DD
+  label?: string | null // shown in the dropdown instead of the date when set
   bounds: { north: number; south: number; east: number; west: number }
   layers: ShareLayer[]
 }

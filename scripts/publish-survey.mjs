@@ -362,13 +362,19 @@ async function main() {
 
   const shareId = isUpdate ? existingShare.id : randomUUID()
 
-  // Each publish is a dated flight stored under ${shareId}/${flightKey}. Multiple
-  // flights accumulate per parcel so viewers can switch between dates.
+  // Each publish is a flight stored under ${shareId}/${flightKey}. Multiple
+  // flights accumulate per parcel so viewers can switch between them.
+  //   flight_date:  YYYY-MM-DD (required)
+  //   flight_key:   storage/identity key (default = flight_date). Set a distinct
+  //                 key to keep TWO flights on the same date (e.g. altitudes).
+  //   flight_label: what the viewer's dropdown shows (default = the date).
   const flightDate = String(cfg.flight_date || '').trim()
   if (!/^\d{4}-\d{2}-\d{2}$/.test(flightDate)) {
     throw new Error('config.flight_date is required, formatted YYYY-MM-DD (the date this orthophoto was flown)')
   }
-  const flightKey = flightDate
+  const flightKey = (cfg.flight_key ? String(cfg.flight_key).trim() : flightDate)
+  if (!/^[\w.-]+$/.test(flightKey)) throw new Error('config.flight_key must be letters/digits/-/. only')
+  const flightLabel = cfg.flight_label ? String(cfg.flight_label).trim() : null
   const flightPrefix = `${shareId}/${flightKey}`
 
   const zoom = cfg.zoom || DEFAULT_ZOOM
@@ -545,7 +551,7 @@ async function main() {
 
   // ---- Phase 3: create or update the share, merging this flight in ----
   const bounds = unionBounds(layers.map((l) => l.bounds))
-  const flight = { key: flightKey, date: flightDate, bounds, layers }
+  const flight = { key: flightKey, date: flightDate, label: flightLabel, bounds, layers }
   let token
   if (isUpdate) {
     // Merge: replace any flight with the same date, then keep newest-first. The
@@ -565,7 +571,7 @@ async function main() {
     const { error } = await supabase.from('property_shares').update(update).eq('id', shareId)
     if (error) throw new Error(`Update share: ${error.message}`)
     token = existingShare.token
-    console.log(`\n   This parcel now has ${flights.length} flight${flights.length === 1 ? '' : 's'}: ${flights.map((f) => f.date).join(', ')}`)
+    console.log(`\n   This parcel now has ${flights.length} flight${flights.length === 1 ? '' : 's'}: ${flights.map((f) => f.label || f.date).join(', ')}`)
   } else {
     token = randomBytes(24).toString('base64url')
     const { error } = await supabase.from('property_shares').insert({
