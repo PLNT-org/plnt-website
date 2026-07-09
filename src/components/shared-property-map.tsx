@@ -72,6 +72,11 @@ export interface SharedPropertyData {
 
 const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales beyond
 
+// A viewer's manual correction to the plant count on a gated share.
+type PointEdit = { id: string; kind: 'add' | 'remove'; lat: number; lng: number }
+// Round to 6 decimals to match points.json, so a 'remove' keys to the exact dot.
+const ptKey = (lat: number, lng: number) => `${lat.toFixed(6)},${lng.toFixed(6)}`
+
 // ColorBrewer RdYlGn (red = low/stressed, green = high/healthy) for NDVI.
 const RDYLGN: number[][] = [
   [165, 0, 38], [215, 48, 39], [244, 109, 67], [253, 174, 97], [254, 224, 139],
@@ -242,10 +247,12 @@ export default function SharedPropertyMap({
   data,
   token,
   viewerEmail,
+  flightKey,
 }: {
   data: SharedPropertyData
   token: string
   viewerEmail?: string
+  flightKey?: string
 }) {
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<L.Map | null>(null)
@@ -276,6 +283,17 @@ export default function SharedPropertyMap({
   const [cogLoading, setCogLoading] = useState<Record<string, boolean>>({})
   const [showPoints, setShowPoints] = useState(true)
   const [pointsLoading, setPointsLoading] = useState(false)
+
+  // ---- Viewer count corrections (add missed / remove double-counted plants) ----
+  const [pointEdits, setPointEdits] = useState<PointEdit[]>([])
+  const [editingCount, setEditingCount] = useState(false)
+  const [savingPoint, setSavingPoint] = useState(false)
+  // Refs so the long-lived map/marker click handlers always see current values
+  // without being torn down and rebuilt on every edit.
+  const editingCountRef = useRef(false)
+  const skipNextMapClickRef = useRef(false)
+  const addPointRef = useRef<(latlng: L.LatLng) => void>(() => {})
+  const deletePointRef = useRef<(pt: { lat: number; lng: number; addId?: string }) => void>(() => {})
   const [panelOpen, setPanelOpen] = useState(() =>
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 640px)').matches
   )
@@ -477,7 +495,16 @@ export default function SharedPropertyMap({
   // The plant count is tied to the RGB orthophoto, so it's only meaningful (and
   // only shown) while the RGB layer is the active one.
   const rgbLayer = data.layers.find((l) => l.type === 'rgb')
-  const showCount = !!visible['rgb'] && typeof rgbLayer?.plant_count === 'number'
+  // Displayed count = the baked detection count, plus viewer corrections. A
+  // 'remove' only ever hides a real detected dot, so this stays accurate even
+  // before points.json loads (no need to diff the full array).
+  const baseCount = rgbLayer?.plant_count ?? pointsDataRef.current?.length ?? 0
+  const addCount = pointEdits.reduce((n, e) => n + (e.kind === 'add' ? 1 : 0), 0)
+  const removeCount = pointEdits.reduce((n, e) => n + (e.kind === 'remove' ? 1 : 0), 0)
+  const effectiveCount = baseCount + addCount - removeCount
+  const hasEdits = pointEdits.length > 0
+  const canEditCount = !!rgbLayer?.pointsUrl && !!data.accessToken
+  const showCount = !!visible['rgb'] && (typeof rgbLayer?.plant_count === 'number' || hasEdits)
 
   // Per-plant dots, tied to RGB visibility + the markers toggle. Fetch the
   // [lat,lng] list once, build the canvas marker group once, then just add/
@@ -488,14 +515,16 @@ export default function SharedPropertyMap({
     const wantPoints = !!visible['rgb'] && showPoints && !!rgbLayer?.pointsUrl
     let cancelled = false
 
+    // Merge viewer edits over the detected dots: drop removed ones, add new ones.
+    const removedKeys = new Set(
+      pointEdits.filter((e) => e.kind === 'remove').map((e) => ptKey(e.lat, e.lng))
+    )
+    const adds = pointEdits.filter((e) => e.kind === 'add')
+
     const ensure = async () => {
+      const prev = pointsLayerRef.current
       if (!wantPoints) {
-        const g = pointsLayerRef.current
-        if (g && map.hasLayer(g)) map.removeLayer(g)
-        return
-      }
-      if (pointsLayerRef.current) {
-        if (!map.hasLayer(pointsLayerRef.current)) pointsLayerRef.current.addTo(map)
+        if (prev && map.hasLayer(prev)) map.removeLayer(prev)
         return
       }
       setPointsLoading(true)
@@ -508,18 +537,35 @@ export default function SharedPropertyMap({
         if (!pointsCanvasRef.current) pointsCanvasRef.current = L.canvas({ padding: 0.5 })
         const renderer = pointsCanvasRef.current
         const group = L.layerGroup()
-        for (const [lat, lng] of pointsDataRef.current!) {
-          L.circleMarker([lat, lng], {
+        // In edit mode a dot is a click target (removes it); the handler reads
+        // refs so we never rebuild the group just to toggle edit mode on/off.
+        const onDotClick = (pt: { lat: number; lng: number; addId?: string }) => () => {
+          if (!editingCountRef.current) return
+          // Leaflet fires this marker click before the map click; flag it so the
+          // same click doesn't also drop a new point (see the map-click handler).
+          skipNextMapClickRef.current = true
+          deletePointRef.current(pt)
+        }
+        const addDot = (lat: number, lng: number, addId?: string) => {
+          const m = L.circleMarker([lat, lng], {
             renderer,
             radius: 3,
-            fillColor: '#22c55e',
+            fillColor: addId ? '#f59e0b' : '#22c55e', // viewer-added = amber, detected = green
             fillOpacity: 1,
             color: '#ffffff',
             weight: 1,
             opacity: 1,
-          }).addTo(group)
+          })
+          m.on('click', onDotClick({ lat, lng, addId }))
+          m.addTo(group)
         }
+        for (const [lat, lng] of pointsDataRef.current!) {
+          if (removedKeys.has(ptKey(lat, lng))) continue
+          addDot(lat, lng)
+        }
+        for (const a of adds) addDot(a.lat, a.lng, a.id)
         if (cancelled) return
+        if (prev && map.hasLayer(prev)) map.removeLayer(prev)
         pointsLayerRef.current = group
         group.addTo(map)
       } catch (err) {
@@ -533,7 +579,139 @@ export default function SharedPropertyMap({
     return () => {
       cancelled = true
     }
-  }, [visible, showPoints, rgbLayer])
+  }, [visible, showPoints, rgbLayer, pointEdits])
+
+  // ---- Count-correction handlers ----
+  // Add a plant the model missed at the clicked location.
+  const addPoint = useCallback(
+    async (latlng: L.LatLng) => {
+      if (!data.accessToken || savingPoint) return
+      const lat = Math.round(latlng.lat * 1e6) / 1e6
+      const lng = Math.round(latlng.lng * 1e6) / 1e6
+      setSavingPoint(true)
+      try {
+        const res = await fetch(`/api/share/${token}/points?k=${encodeURIComponent(data.accessToken)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flightKey: flightKey ?? '', kind: 'add', lat, lng, email: viewerEmail }),
+        })
+        const body = await res.json()
+        if (res.ok && body.edit) {
+          setPointEdits((p) => (p.some((e) => e.id === body.edit.id) ? p : [...p, body.edit]))
+        }
+      } catch {
+        /* leave the count as-is on failure */
+      } finally {
+        setSavingPoint(false)
+      }
+    },
+    [data.accessToken, token, flightKey, viewerEmail, savingPoint]
+  )
+
+  // Remove a dot: undo a prior add (delete its edit), or hide a detected dot
+  // (record a 'remove' correction).
+  const deletePoint = useCallback(
+    async (pt: { lat: number; lng: number; addId?: string }) => {
+      if (!data.accessToken) return
+      setSavingPoint(true)
+      try {
+        if (pt.addId) {
+          const res = await fetch(
+            `/api/share/${token}/points?k=${encodeURIComponent(data.accessToken)}&id=${encodeURIComponent(pt.addId)}`,
+            { method: 'DELETE' }
+          )
+          if (res.ok) setPointEdits((p) => p.filter((e) => e.id !== pt.addId))
+        } else {
+          const res = await fetch(`/api/share/${token}/points?k=${encodeURIComponent(data.accessToken)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flightKey: flightKey ?? '', kind: 'remove', lat: pt.lat, lng: pt.lng, email: viewerEmail }),
+          })
+          const body = await res.json()
+          if (res.ok && body.edit) {
+            setPointEdits((p) => (p.some((e) => e.id === body.edit.id) ? p : [...p, body.edit]))
+          }
+        }
+      } catch {
+        /* leave the count as-is on failure */
+      } finally {
+        setSavingPoint(false)
+      }
+    },
+    [data.accessToken, token, flightKey, viewerEmail]
+  )
+
+  // Clear every correction on this flight, back to the raw detection count.
+  const resetPointEdits = useCallback(async () => {
+    if (!data.accessToken || pointEdits.length === 0) return
+    setSavingPoint(true)
+    try {
+      const res = await fetch(
+        `/api/share/${token}/points?k=${encodeURIComponent(data.accessToken)}&flight=${encodeURIComponent(flightKey ?? '')}&all=1`,
+        { method: 'DELETE' }
+      )
+      if (res.ok) setPointEdits([])
+    } catch {
+      /* ignore */
+    } finally {
+      setSavingPoint(false)
+    }
+  }, [data.accessToken, token, flightKey, pointEdits.length])
+
+  // Keep the handler refs + mode flag current for the map/marker listeners.
+  useEffect(() => {
+    addPointRef.current = addPoint
+  }, [addPoint])
+  useEffect(() => {
+    deletePointRef.current = deletePoint
+  }, [deletePoint])
+  useEffect(() => {
+    editingCountRef.current = editingCount
+  }, [editingCount])
+
+  // Load this flight's saved corrections once we have an access token.
+  useEffect(() => {
+    if (!data.accessToken) {
+      setPointEdits([])
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(
+          `/api/share/${token}/points?k=${encodeURIComponent(data.accessToken!)}&flight=${encodeURIComponent(flightKey ?? '')}`
+        )
+        if (!res.ok) return
+        const body = await res.json()
+        if (!cancelled && Array.isArray(body.edits)) setPointEdits(body.edits)
+      } catch {
+        /* ignore */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [data.accessToken, token, flightKey])
+
+  // While editing, a map click (not on a dot) adds a plant there.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !editingCount) return
+    const onClick = (e: L.LeafletMouseEvent) => {
+      if (skipNextMapClickRef.current) {
+        skipNextMapClickRef.current = false
+        return
+      }
+      addPointRef.current(e.latlng)
+    }
+    map.on('click', onClick)
+    const el = map.getContainer()
+    el.style.cursor = 'crosshair'
+    return () => {
+      map.off('click', onClick)
+      el.style.cursor = ''
+    }
+  }, [editingCount])
 
   // Load any previously-saved plots for this share once we have an access token.
   useEffect(() => {
@@ -597,11 +775,22 @@ export default function SharedPropertyMap({
     setIsDrawing(false)
   }, [teardownDraw])
 
+  // Enter/exit count-correction mode. Defined here (after cancelDrawing) so the
+  // two modes can cleanly exclude each other.
+  const startEditCount = useCallback(() => {
+    if (isDrawing) cancelDrawing() // count editing and plot drawing are mutually exclusive
+    setVisible((p) => ({ ...p, rgb: true }))
+    setShowPoints(true) // you need the dots visible to remove them
+    setEditingCount(true)
+  }, [isDrawing, cancelDrawing])
+  const stopEditCount = useCallback(() => setEditingCount(false), [])
+
   // Begin click-to-add-points drawing in a given layer's mode. The mode decides
   // which fields the tag form collects (block+size vs species+readiness).
   const startDrawing = useCallback((mode: 'block' | 'species') => {
     const map = mapRef.current
     if (!map) return
+    setEditingCount(false) // count editing and plot drawing are mutually exclusive
     setDrawMode(mode)
     setDraft(null)
     setSaveError('')
@@ -958,11 +1147,17 @@ export default function SharedPropertyMap({
         if (!cancelled) setInvCounting(false)
       }
       if (cancelled) return
-      const pts = pointsDataRef.current
-      if (!pts) {
+      const base = pointsDataRef.current
+      if (!base) {
         setInvCounts(null)
         return
       }
+      // Count against the corrected set so the drawer agrees with the badge.
+      const removedKeys = new Set(
+        pointEdits.filter((e) => e.kind === 'remove').map((e) => ptKey(e.lat, e.lng))
+      )
+      const pts: [number, number][] = base.filter(([lat, lng]) => !removedKeys.has(ptKey(lat, lng)))
+      for (const a of pointEdits) if (a.kind === 'add') pts.push([a.lat, a.lng])
       const counts: Record<string, number> = {}
       for (const plot of plots) {
         const ring = plot.boundary?.coordinates?.[0]
@@ -976,7 +1171,7 @@ export default function SharedPropertyMap({
     return () => {
       cancelled = true
     }
-  }, [invOpen, plots, rgbLayer])
+  }, [invOpen, plots, rgbLayer, pointEdits])
 
   // Drag the sheet's top edge to resize it (clamped between a peek and full screen).
   const startInvResize = (e: React.PointerEvent) => {
@@ -1185,8 +1380,16 @@ export default function SharedPropertyMap({
       {showCount && (
         <div className="absolute top-3 left-14 z-[1000] rounded-lg bg-[#0f2e1d]/95 text-white shadow-lg px-3 py-2 flex items-center gap-2">
           <Leaf className="h-4 w-4 text-green-300 shrink-0" />
-          <span className="text-sm font-semibold tabular-nums">{rgbLayer!.plant_count!.toLocaleString()}</span>
+          <span className="text-sm font-semibold tabular-nums">{effectiveCount.toLocaleString()}</span>
           <span className="text-xs text-green-200/80">plants counted</span>
+          {hasEdits && (
+            <span
+              className="text-[10px] text-amber-300 border-l border-white/20 pl-2"
+              title={`Adjusted by a viewer: ${addCount} added, ${removeCount} removed`}
+            >
+              edited
+            </span>
+          )}
         </div>
       )}
 
@@ -1240,10 +1443,48 @@ export default function SharedPropertyMap({
                         />
                         <span className="h-2.5 w-2.5 rounded-full bg-[#22c55e] shrink-0 ring-1 ring-white" />
                         <span className="text-xs text-gray-600 flex-1">
-                          Plant markers{typeof layer.plant_count === 'number' ? ` (${layer.plant_count.toLocaleString()})` : ''}
+                          Plant markers{typeof layer.plant_count === 'number' ? ` (${effectiveCount.toLocaleString()})` : ''}
                         </span>
                         {pointsLoading && <span className="text-[10px] text-gray-400">loading…</span>}
                       </label>
+                    )}
+                    {layer.type === 'rgb' && canEditCount && isOn && (
+                      <div className="pl-6 pt-1.5">
+                        <button
+                          onClick={() => (editingCount ? stopEditCount() : startEditCount())}
+                          className={`w-full flex items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium border transition-colors ${
+                            editingCount
+                              ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
+                              : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                          }`}
+                        >
+                          {editingCount ? <Check className="h-3 w-3" /> : <Pencil className="h-3 w-3" />}
+                          {editingCount ? 'Done' : 'Add / remove plants'}
+                        </button>
+                        {editingCount && (
+                          <p className="mt-1 text-[10px] leading-snug text-gray-500">
+                            Click the map to <span className="font-medium text-amber-600">add</span> a plant; click a
+                            dot to <span className="font-medium text-red-600">remove</span> it.
+                            {savingPoint && <span className="text-gray-400"> · saving…</span>}
+                          </p>
+                        )}
+                        {hasEdits && (
+                          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-gray-500">
+                            <span className="truncate">
+                              {addCount > 0 && `+${addCount} added`}
+                              {addCount > 0 && removeCount > 0 && ' · '}
+                              {removeCount > 0 && `−${removeCount} removed`}
+                            </span>
+                            <button
+                              onClick={resetPointEdits}
+                              disabled={savingPoint}
+                              className="shrink-0 text-gray-400 underline hover:text-red-600 disabled:opacity-50"
+                            >
+                              Reset
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 )

@@ -165,6 +165,7 @@ export default function PortalPage() {
             data={mapData}
             token={currentToken}
             viewerEmail={email.trim().toLowerCase()}
+            flightKey={selectedFlight?.key ?? ''}
           />
         </div>
       </div>

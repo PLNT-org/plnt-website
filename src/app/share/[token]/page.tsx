@@ -144,6 +144,7 @@ export default function SharePage() {
             data={mapData}
             token={currentToken}
             viewerEmail={email.trim().toLowerCase()}
+            flightKey={selectedFlight?.key ?? ''}
           />
         </div>
       </div>
