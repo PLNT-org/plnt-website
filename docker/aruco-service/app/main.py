@@ -358,6 +358,10 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
             r_dedup=request.r_dedup,
             include_classes=request.include_classes,
             progress_every=request.concurrent_tiles,
+            engine=request.engine,
+            sam3_prompt=request.sam3_prompt,
+            roboflow_api_key=os.environ.get("ROBOFLOW_API_KEY"),
+            region=request.region,
         ):
             if event["type"] == "result":
                 result_event = event
@@ -397,8 +401,11 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
             "updated_at": "now()",
         })
 
-        # Delete existing AI labels
-        await sb.delete_ai_labels(request.orthomosaic_id)
+        # Store under a source that reflects the engine, so SAM 3 results sit
+        # ALONGSIDE the YOLO ones ("ai") rather than replacing them. Each engine
+        # only clears its own prior labels for this ortho.
+        label_source = "sam3" if request.engine == "sam3" else "ai"
+        await sb.delete_labels_by_source(request.orthomosaic_id, label_source)
 
         # Insert new labels
         labels = [{
@@ -408,7 +415,7 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
             "longitude": det["longitude"],
             "pixel_x": det["pixel_x"],
             "pixel_y": det["pixel_y"],
-            "source": "ai",
+            "source": label_source,
             "confidence": det["confidence"],
             "label": det.get("class", "plant"),
             "verified": False,

@@ -49,6 +49,17 @@ gcloud artifacts repositories create "${REPO}" \
 echo ">> Building image with Cloud Build (amd64, ~10-20 min on first build)..."
 gcloud builds submit "${HERE}" --tag "${IMAGE}" --project "${PROJECT_ID}"
 
+# Pass ROBOFLOW_API_KEY through to the service (needed for the SAM 3 engine).
+# --update-env-vars MERGES, so it won't clobber other env vars already set on the
+# service. `source ../../.env.local` (or export it) before running to include it.
+ENV_ARGS=()
+if [ -n "${ROBOFLOW_API_KEY:-}" ]; then
+  ENV_ARGS+=(--update-env-vars "ROBOFLOW_API_KEY=${ROBOFLOW_API_KEY}")
+  echo ">> Passing ROBOFLOW_API_KEY to the service (SAM 3 enabled)."
+else
+  echo ">> NOTE: ROBOFLOW_API_KEY not set in this shell — SAM 3 engine will 500 until you set it."
+fi
+
 echo ">> Deploying to Cloud Run with an NVIDIA L4 GPU..."
 # NOTE: a brand-new project usually has 0 L4 quota. If this step errors with a
 # quota message, request "Total Nvidia L4 GPU allocation, per project per region"
@@ -64,7 +75,8 @@ gcloud run deploy "${SERVICE}" \
   --timeout 600 \
   --min-instances 0 --max-instances 2 \
   --port 8001 \
-  --allow-unauthenticated
+  --allow-unauthenticated \
+  ${ENV_ARGS[@]+"${ENV_ARGS[@]}"}
 
 echo ">> Done. Service URL:"
 gcloud run services describe "${SERVICE}" --region "${REGION}" --project "${PROJECT_ID}" \

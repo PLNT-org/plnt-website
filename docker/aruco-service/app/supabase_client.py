@@ -31,15 +31,23 @@ class SupabaseClient:
             if res.status_code >= 400:
                 logger.error(f"Failed to update job {job_id}: {res.status_code} {res.text[:200]}")
 
-    async def delete_ai_labels(self, orthomosaic_id: str):
-        """Delete existing AI labels for an orthomosaic."""
+    async def delete_labels_by_source(self, orthomosaic_id: str, source: str):
+        """Delete existing labels for an orthomosaic from one source only.
+
+        Scoping by source lets a SAM 3 (source='sam3') run replace its own prior
+        results without touching the YOLO (source='ai') set, and vice versa.
+        """
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.delete(
-                f"{self.base_url}/plant_labels?orthomosaic_id=eq.{orthomosaic_id}&source=eq.ai",
+                f"{self.base_url}/plant_labels?orthomosaic_id=eq.{orthomosaic_id}&source=eq.{source}",
                 headers=self.headers,
             )
             if res.status_code >= 400:
                 logger.error(f"Failed to delete labels: {res.status_code} {res.text[:200]}")
+
+    async def delete_ai_labels(self, orthomosaic_id: str):
+        """Delete existing AI (YOLO) labels for an orthomosaic."""
+        await self.delete_labels_by_source(orthomosaic_id, "ai")
 
     async def insert_labels(self, labels: list[dict]) -> int:
         """Batch insert plant labels. Returns count of successfully inserted labels."""

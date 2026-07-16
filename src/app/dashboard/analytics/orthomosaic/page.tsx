@@ -98,7 +98,7 @@ interface PlantLabel {
   longitude: number
   pixel_x?: number
   pixel_y?: number
-  source: 'manual' | 'ai'
+  source: 'manual' | 'ai' | 'sam3'
   confidence?: number
   label: string
   notes?: string
@@ -169,6 +169,9 @@ export default function OrthomosaicViewerPage() {
 
   // Plant detection state
   const [plantDetecting, setPlantDetecting] = useState(false)
+  // SAM 3 (Roboflow) trial: runs on the drawn region, stored as source='sam3'.
+  const [sam3Detecting, setSam3Detecting] = useState(false)
+  const [sam3Result, setSam3Result] = useState<{ count: number } | null>(null)
   const [boundaryDrawMode, setBoundaryDrawMode] = useState(false)
   const [boundaryPoints, setBoundaryPoints] = useState<{ lat: number; lng: number }[]>([])
   const [cropping, setCropping] = useState(false)
@@ -847,6 +850,80 @@ export default function OrthomosaicViewerPage() {
       alert('Failed to run plant detection. Check console for details.')
     } finally {
       setPlantDetecting(false)
+      setDetectionProgress(null)
+    }
+  }
+
+  // SAM 3 (Meta, via Roboflow hosted PCS) trial. Runs ONLY on the drawn boundary
+  // region to bound cost, stores results as source='sam3' alongside the YOLO
+  // count, and reports the SAM 3 tally for side-by-side comparison.
+  const handlePlantDetectionSam3 = async () => {
+    if (!selectedOrthomosaic || isDemo) return
+    if (boundaryPoints.length < 3) {
+      alert('Draw a test region first: click "Crop to Boundary" to start tracing, drop ≥3 points on the map, then click "Count with SAM 3" instead of cropping.')
+      return
+    }
+    const region = boundaryPoints.map((p) => [p.lng, p.lat]) // WGS84 ring [lng,lat]
+
+    setSam3Detecting(true)
+    setSam3Result(null)
+    setDetectionProgress(null)
+
+    try {
+      const response = await authFetch('/api/detection-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orthomosaicId: selectedOrthomosaic.id,
+          engine: 'sam3',
+          sam3_prompt: 'plant',
+          region,
+        }),
+      })
+      const jobData = await response.json()
+      if (!response.ok && !(response.status === 409 && jobData.jobId)) {
+        alert(jobData.error || 'Failed to start SAM 3 detection')
+        return
+      }
+
+      const jobId = jobData.jobId
+      let completed = false
+      while (!completed) {
+        await new Promise((resolve) => setTimeout(resolve, 3000))
+        const statusRes = await authFetch(`/api/detection-jobs?jobId=${jobId}`)
+        if (!statusRes.ok) continue
+        const status = await statusRes.json()
+
+        if (status.progress) {
+          setDetectionProgress({
+            processedTiles: status.progress.processedTiles || 0,
+            totalTiles: status.progress.totalTiles || 0,
+            detectionsCount: status.progress.detectionsCount || 0,
+            phase: status.progress.phase || status.status,
+          })
+        }
+
+        if (status.status === 'completed') {
+          completed = true
+          const result = status.result || {}
+          setSam3Result({ count: result.totalDetections || 0 })
+          // Refresh the label overlay so the new source='sam3' dots show up.
+          const labelsResponse = await authFetch(
+            `/api/plant-labels?orthomosaicId=${selectedOrthomosaic.id}`,
+            { headers: { Authorization: `Bearer ${session?.access_token}` } }
+          )
+          const labelsData = await labelsResponse.json()
+          if (labelsData.labels) setLabels(labelsData.labels)
+        } else if (status.status === 'failed') {
+          completed = true
+          alert(status.errorMessage || 'SAM 3 detection failed')
+        }
+      }
+    } catch (err) {
+      console.error('Error running SAM 3 detection:', err)
+      alert('Failed to run SAM 3 detection. Check console for details.')
+    } finally {
+      setSam3Detecting(false)
       setDetectionProgress(null)
     }
   }
@@ -1973,6 +2050,31 @@ export default function OrthomosaicViewerPage() {
                       </>
                     )}
                   </Button>
+
+                  {/* SAM 3 (Roboflow) trial — runs on the drawn region only */}
+                  <Button
+                    variant="outline"
+                    onClick={handlePlantDetectionSam3}
+                    disabled={sam3Detecting || plantDetecting || boundaryPoints.length < 3}
+                    title="Trial: run Meta SAM 3 (via Roboflow) on the drawn region and compare its count with YOLO. Draw a boundary first."
+                  >
+                    {sam3Detecting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        SAM 3…
+                      </>
+                    ) : (
+                      <>
+                        <Scan className="h-4 w-4 mr-2" />
+                        Count with SAM 3 (region)
+                      </>
+                    )}
+                  </Button>
+                  {sam3Result && (
+                    <span className="text-sm text-gray-600 self-center">
+                      SAM 3 (region): <b>{sam3Result.count.toLocaleString()}</b> plants
+                    </span>
+                  )}
 
                   <Button
                     variant="outline"

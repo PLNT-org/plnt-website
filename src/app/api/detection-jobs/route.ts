@@ -21,10 +21,17 @@ export async function POST(request: NextRequest) {
     method = 'orthomosaic',
     confidence_threshold = 0.25,
     include_classes = ['plant', 'plants'],
+    engine = 'yolo',
+    sam3_prompt = 'plant',
+    region = null,
   } = body
 
   if (!orthomosaicId) {
     return NextResponse.json({ error: 'orthomosaicId is required' }, { status: 400 })
+  }
+
+  if (engine !== 'yolo' && engine !== 'sam3') {
+    return NextResponse.json({ error: "engine must be 'yolo' or 'sam3'" }, { status: 400 })
   }
 
   const ownershipError = await verifyOrthomosaicOwnership(supabase, orthomosaicId, user.id, isAdmin)
@@ -67,7 +74,7 @@ export async function POST(request: NextRequest) {
       user_id: user.id,
       method,
       status: 'pending',
-      config: { confidence_threshold, include_classes },
+      config: { confidence_threshold, include_classes, engine },
     })
     .select()
     .single()
@@ -93,6 +100,9 @@ export async function POST(request: NextRequest) {
       user_id: user.id,
       supabase_url: process.env.NEXT_PUBLIC_SUPABASE_URL,
       supabase_service_key: process.env.SUPABASE_SERVICE_ROLE_KEY,
+      engine,
+      sam3_prompt,
+      region,
     }),
   }).catch(err => {
     console.error('[DetectionJob] Failed to start Docker job:', err)

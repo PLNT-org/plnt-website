@@ -149,6 +149,15 @@ class AsyncPlantDetectionRequest(BaseModel):
     user_id: str = Field(...)
     supabase_url: str = Field(...)
     supabase_service_key: str = Field(...)
+    # Detection engine: "yolo" (local plnt_v3, default) or "sam3" (Meta SAM 3 via
+    # Roboflow hosted PCS). SAM 3 results store under source="sam3", leaving the
+    # YOLO source="ai" labels untouched for side-by-side comparison.
+    engine: str = Field(default="yolo")
+    sam3_prompt: str = Field(default="plant", description="Concept prompt for SAM 3 PCS")
+    region: Optional[list] = Field(
+        default=None,
+        description="WGS84 ring [[lng,lat], ...] limiting detection to that area (SAM 3 trial)",
+    )
 
 
 # ============================================

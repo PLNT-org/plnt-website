@@ -48,6 +48,22 @@ def pixels_to_wgs84(transform, crs, pixel_xs, pixel_ys):
     return list(lngs), list(lats)
 
 
+def point_in_ring(lng: float, lat: float, ring) -> bool:
+    """Ray-cast point-in-polygon test. `ring` is [[lng, lat], ...] (WGS84)."""
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        if ((yi > lat) != (yj > lat)) and (
+            lng < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi
+        ):
+            inside = not inside
+        j = i
+    return inside
+
+
 def is_tile_empty(image: np.ndarray, x: int, y: int, w: int, h: int) -> bool:
     """Check if a tile region is mostly empty (black/transparent)."""
     tile = image[y:y+h, x:x+w]
@@ -144,8 +160,17 @@ async def detect_plants_local(
     imgsz: int = INFER_IMGSZ,
     include_classes=("plant", "plants"),
     progress_every: int = 20,
+    engine: str = "yolo",
+    sam3_prompt: str = "plant",
+    roboflow_api_key: str | None = None,
+    region=None,
 ):
-    """Run tiled plnt_v3 detection on an orthomosaic image.
+    """Run tiled detection on an orthomosaic image.
+
+    engine="yolo" (default): local plnt_v3. engine="sam3": Meta SAM 3 via
+    Roboflow's hosted PCS endpoint (one HTTP call per tile). `region`, when given
+    as a WGS84 ring [[lng, lat], ...], limits detection to tiles whose center
+    falls inside it — used to bound the cost of the hosted SAM 3 trial.
 
     Async generator yielding NDJSON-ready events:
       {"type": "progress", processedTiles, totalTiles, detectionsCount, phase}
@@ -173,10 +198,22 @@ async def detect_plants_local(
             else:
                 tile_jobs.append((x, y, crop_w, crop_h))
 
+    # Optional region gate: keep only tiles whose center lands inside the drawn
+    # WGS84 polygon. Uses the same correct pixel->WGS84 path as final georef.
+    if region:
+        centers_x = [x + cw / 2 for (x, y, cw, ch) in tile_jobs]
+        centers_y = [y + ch / 2 for (x, y, cw, ch) in tile_jobs]
+        c_lngs, c_lats = pixels_to_wgs84(transform, crs, centers_x, centers_y)
+        tile_jobs = [
+            tj for tj, ln, la in zip(tile_jobs, c_lngs, c_lats)
+            if point_in_ring(ln, la, region)
+        ]
+        logger.info(f"Region gate: {len(tile_jobs)} tiles inside the drawn polygon")
+
     total_tiles = len(tile_jobs)
     logger.info(
         f"Tiling: {img_width}x{img_height}, {total_tiles} tiles to process, "
-        f"{skipped} empty skipped, tile={tile_w}x{tile_h}, stride={stride_x}x{stride_y}"
+        f"{skipped} empty skipped, tile={tile_w}x{tile_h}, stride={stride_x}x{stride_y}, engine={engine}"
     )
 
     yield {
@@ -193,31 +230,49 @@ async def detect_plants_local(
     # (chunks of 16-32 tiles) for ~3x speedup.
     all_detections = []
     progress_every = max(1, progress_every)
-    for idx, (x, y, crop_w, crop_h) in enumerate(tile_jobs, start=1):
-        tile = image[y:y + crop_h, x:x + crop_w]
-        # `image` is already RGB (load_geotiff_for_detection); model expects RGB.
-        for pred in run_tile_inference(model, tile, imgsz=imgsz, conf=confidence):
-            if pred["class"].lower() not in allowed_classes:
-                continue
-            all_detections.append({
-                "x": x + pred["x"],
-                "y": y + pred["y"],
-                "width": pred["width"],
-                "height": pred["height"],
-                "confidence": pred["confidence"],
-                "class": pred["class"],
-            })
 
-        if idx % progress_every == 0 or idx == total_tiles:
-            yield {
-                "type": "progress",
-                "processedTiles": idx,
-                "totalTiles": total_tiles,
-                "detectionsCount": len(all_detections),
-                "phase": "tiling",
-            }
-            # Let the event loop flush streamed bytes / service other tasks.
-            await asyncio.sleep(0)
+    # SAM 3 talks to a hosted HTTP endpoint per tile; share one client for the run.
+    sam3_http = None
+    if engine == "sam3":
+        import httpx
+        from .sam3_client import run_tile_inference_sam3
+        if not roboflow_api_key:
+            raise RuntimeError("SAM3 engine requires ROBOFLOW_API_KEY (not set on the service)")
+        sam3_http = httpx.AsyncClient(timeout=90.0)
+
+    try:
+        for idx, (x, y, crop_w, crop_h) in enumerate(tile_jobs, start=1):
+            tile = image[y:y + crop_h, x:x + crop_w]
+            # `image` is already RGB (load_geotiff_for_detection).
+            if engine == "sam3":
+                preds = await run_tile_inference_sam3(sam3_http, tile, sam3_prompt, roboflow_api_key)
+            else:
+                preds = run_tile_inference(model, tile, imgsz=imgsz, conf=confidence)
+            for pred in preds:
+                if pred["class"].lower() not in allowed_classes:
+                    continue
+                all_detections.append({
+                    "x": x + pred["x"],
+                    "y": y + pred["y"],
+                    "width": pred["width"],
+                    "height": pred["height"],
+                    "confidence": pred["confidence"],
+                    "class": pred["class"],
+                })
+
+            if idx % progress_every == 0 or idx == total_tiles:
+                yield {
+                    "type": "progress",
+                    "processedTiles": idx,
+                    "totalTiles": total_tiles,
+                    "detectionsCount": len(all_detections),
+                    "phase": "tiling",
+                }
+                # Let the event loop flush streamed bytes / service other tasks.
+                await asyncio.sleep(0)
+    finally:
+        if sam3_http is not None:
+            await sam3_http.aclose()
 
     # Centroid dedup across all tiles
     yield {

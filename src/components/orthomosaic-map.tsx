@@ -66,7 +66,7 @@ interface PlantLabel {
   longitude: number
   pixel_x?: number
   pixel_y?: number
-  source: 'manual' | 'ai'
+  source: 'manual' | 'ai' | 'sam3'
   confidence?: number
   label: string
   notes?: string
@@ -350,10 +350,12 @@ export default function OrthomosaicMap({
     if (!showLabels) return
 
     labels.forEach((label) => {
-      // Uniform style for all labels: green dot with white perimeter
+      // Color by detection source so YOLO and SAM 3 counts are distinguishable:
+      // SAM 3 (Roboflow) = amber, YOLO/manual = green. White perimeter throughout.
+      const fillColor = label.source === 'sam3' ? '#f59e0b' : '#22c55e'
       const marker = L.circleMarker([label.latitude, label.longitude], {
         radius: 4,
-        fillColor: '#22c55e',
+        fillColor,
         fillOpacity: 1,
         color: '#ffffff',
         weight: 1,
@@ -366,7 +368,13 @@ export default function OrthomosaicMap({
             ${label.label.charAt(0).toUpperCase() + label.label.slice(1)}
           </div>
           <div style="font-size: 12px; color: #666; margin-bottom: 4px;">
-            ${label.source === 'ai' ? `AI Detection (${Math.round((label.confidence || 0) * 100)}%)` : 'Manual Label'}
+            ${
+              label.source === 'ai'
+                ? `YOLO Detection (${Math.round((label.confidence || 0) * 100)}%)`
+                : label.source === 'sam3'
+                  ? `SAM 3 Detection (${Math.round((label.confidence || 0) * 100)}%)`
+                  : 'Manual Label'
+            }
           </div>
           <div style="font-size: 11px; font-family: monospace; margin-bottom: 8px;">
             ${label.latitude.toFixed(6)}, ${label.longitude.toFixed(6)}
@@ -735,8 +743,12 @@ export default function OrthomosaicMap({
           </div>
           <hr className="my-2" />
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full border-2 border-dashed border-black" />
-            <span>AI (unverified)</span>
+            <div className="w-3 h-3 rounded-full bg-green-500 ring-1 ring-white" />
+            <span>YOLO (plnt_v3)</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 rounded-full bg-amber-500 ring-1 ring-white" />
+            <span>SAM 3 (Roboflow)</span>
           </div>
           {arucoMarkers.length > 0 && (
             <>
