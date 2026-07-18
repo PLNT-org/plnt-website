@@ -20,6 +20,24 @@ EMPTY_TILE_THRESHOLD = 0.9
 # recall depends on running at 1280 (the validated operating point for plnt_v3).
 INFER_IMGSZ = 1280
 
+# plnt_v3's tiling operating point (640 px tiles / 64 px overlap / R=22 dedup) was
+# validated at ~2 cm/px. On a finer ortho, plants span more pixels and a fixed
+# 640 tile covers less ground, so both the tile geometry AND the dedup radius must
+# grow with resolution to keep the model seeing plants at the same effective size.
+# scale = REF_GSD_CM / gsd reproduces the operating point at any GSD (imgsz stays
+# 1280). We only scale UP (finer orthos); at >= 2 cm/px scale is 1.0 so existing
+# orthos are byte-for-byte unchanged. Capped so an extremely fine ortho can't
+# explode tile sizes.
+REF_GSD_CM = 2.0
+MAX_TILING_SCALE = 4.0
+
+
+def scale_for_gsd(gsd_cm: float | None) -> float:
+    """Tiling scale factor for a source GSD (cm/px). 1.0 for >= 2 cm/px."""
+    if not gsd_cm or gsd_cm <= 0:
+        return 1.0
+    return max(1.0, min(MAX_TILING_SCALE, REF_GSD_CM / gsd_cm))
+
 
 def pixels_to_wgs84(transform, crs, pixel_xs, pixel_ys):
     """Batch-convert pixel (col, row) coords to WGS84 (lngs, lats) using the
@@ -64,9 +82,13 @@ def point_in_ring(lng: float, lat: float, ring) -> bool:
     return inside
 
 
-def is_tile_empty(image: np.ndarray, x: int, y: int, w: int, h: int) -> bool:
-    """Check if a tile region is mostly empty (black/transparent)."""
-    tile = image[y:y+h, x:x+w]
+def is_tile_empty(tile: np.ndarray) -> bool:
+    """Check if a tile is mostly empty (black/transparent).
+
+    Takes the already-read tile array so the classification runs on the exact
+    same pixels whether they came from a full in-memory raster or a windowed
+    read — keeping the set of skipped tiles (and thus detections) identical.
+    """
     if tile.size == 0:
         return True
 
@@ -84,23 +106,25 @@ def is_tile_empty(image: np.ndarray, x: int, y: int, w: int, h: int) -> bool:
     return np.mean(is_black) > EMPTY_TILE_THRESHOLD
 
 
-def run_tile_inference(model, tile_rgb: np.ndarray, imgsz: int = INFER_IMGSZ, conf: float = 0.25) -> list[dict]:
-    """Run plnt_v3 on a single tile. Returns center-format detections.
+# Tiles per batched forward pass. Batching keeps the L4 GPU saturated and is the
+# dominant speedup over one predict() per tile; 16 fits comfortably in VRAM at
+# imgsz 1280.
+YOLO_BATCH_TILES = 16
 
-    YOLO emits xyxy corner boxes; we convert to center-format
-    {x, y, width, height} right here at the boundary so everything downstream
-    (GPS conversion, Supabase schema, Leaflet rendering) is untouched.
-    """
-    # Ultralytics treats a numpy-array input as BGR (OpenCV convention) and flips
-    # it BGR->RGB internally before the network. Our tile comes from rasterio as
-    # RGB, so we hand the model BGR, which Ultralytics flips back to the RGB it was
-    # trained on. Passing RGB directly silently swaps the R/B channels and tanks
-    # recall — measured 1,420 detections (RGB) vs 13,266 (BGR) on the same ortho.
-    tile_bgr = np.ascontiguousarray(tile_rgb[:, :, ::-1])
-    r = model.predict(tile_bgr, imgsz=imgsz, conf=conf, verbose=False)[0]
+# BGR NOTE (applies to both the single and batched paths below): Ultralytics
+# treats a numpy-array input as BGR (OpenCV convention) and flips it BGR->RGB
+# internally before the network. Our tiles come from rasterio as RGB, so we hand
+# the model BGR, which Ultralytics flips back to the RGB it was trained on.
+# Passing RGB directly silently swaps R/B and tanks recall — measured 1,420
+# detections (RGB) vs 13,266 (BGR) on the same ortho.
+
+
+def _boxes_to_dets(r) -> list[dict]:
+    """A YOLO Results' xyxy boxes -> center-format {x, y, width, height}
+    detections, so everything downstream (GPS, Supabase schema, Leaflet) is
+    untouched."""
     if r.boxes is None or len(r.boxes) == 0:
         return []
-
     xy = r.boxes.xyxy.cpu().numpy()
     cf = r.boxes.conf.cpu().numpy()
     out = []
@@ -114,6 +138,25 @@ def run_tile_inference(model, tile_rgb: np.ndarray, imgsz: int = INFER_IMGSZ, co
             "class": "plant",
         })
     return out
+
+
+def run_tile_inference(model, tile_rgb: np.ndarray, imgsz: int = INFER_IMGSZ, conf: float = 0.25) -> list[dict]:
+    """Run plnt_v3 on a single tile (BGR-flipped — see the BGR NOTE above)."""
+    tile_bgr = np.ascontiguousarray(tile_rgb[:, :, ::-1])
+    r = model.predict(tile_bgr, imgsz=imgsz, conf=conf, verbose=False)[0]
+    return _boxes_to_dets(r)
+
+
+def run_batch_inference(model, tiles_rgb: list, imgsz: int = INFER_IMGSZ, conf: float = 0.25) -> list[list[dict]]:
+    """Run plnt_v3 on a batch of tiles in ONE forward pass; returns per-tile
+    detections in input order. Per-image results are identical to calling
+    run_tile_inference on each — batching only changes throughput. Same BGR
+    handling as the single-tile path."""
+    if not tiles_rgb:
+        return []
+    batch_bgr = [np.ascontiguousarray(t[:, :, ::-1]) for t in tiles_rgb]
+    results = model.predict(batch_bgr, imgsz=imgsz, conf=conf, verbose=False)
+    return [_boxes_to_dets(r) for r in results]
 
 
 def centroid_dedup(detections: list[dict], r_dedup: int = 22) -> list[dict]:
@@ -147,7 +190,9 @@ def centroid_dedup(detections: list[dict], r_dedup: int = 22) -> list[dict]:
 
 async def detect_plants_local(
     model,
-    image: np.ndarray,
+    tile_reader,
+    img_width: int,
+    img_height: int,
     transform,
     crs,
     *,
@@ -180,23 +225,19 @@ async def detect_plants_local(
     Detections in the final "result" event carry pixel coords, GPS coords,
     confidence, and class.
     """
-    img_height, img_width = image.shape[:2]
     allowed_classes = {c.lower() for c in include_classes}
 
     stride_x = max(1, tile_w - overlap_x)
     stride_y = max(1, tile_h - overlap_y)
 
-    # Build tile jobs, skipping mostly-empty (black/transparent) tiles
+    # Build the full tile grid (coords only — pixels are read per-tile in the
+    # loop below via tile_reader, so nothing large is held in memory here).
     tile_jobs = []
-    skipped = 0
     for y in range(0, img_height, stride_y):
         for x in range(0, img_width, stride_x):
             crop_w = min(tile_w, img_width - x)
             crop_h = min(tile_h, img_height - y)
-            if is_tile_empty(image, x, y, crop_w, crop_h):
-                skipped += 1
-            else:
-                tile_jobs.append((x, y, crop_w, crop_h))
+            tile_jobs.append((x, y, crop_w, crop_h))
 
     # Optional region gate: keep only tiles whose center lands inside the drawn
     # WGS84 polygon. Uses the same correct pixel->WGS84 path as final georef.
@@ -210,10 +251,16 @@ async def detect_plants_local(
         ]
         logger.info(f"Region gate: {len(tile_jobs)} tiles inside the drawn polygon")
 
+    # total_tiles counts every grid tile we visit. Mostly-empty tiles are read
+    # then skipped inside the loop (each tile is read from disk exactly once, not
+    # pre-scanned), so this denominator now includes those empties. They cost
+    # only a windowed read, never inference, and the final count is unaffected —
+    # it comes from the deduped detections, not from this number.
     total_tiles = len(tile_jobs)
+    skipped = 0
     logger.info(
-        f"Tiling: {img_width}x{img_height}, {total_tiles} tiles to process, "
-        f"{skipped} empty skipped, tile={tile_w}x{tile_h}, stride={stride_x}x{stride_y}, engine={engine}"
+        f"Tiling: {img_width}x{img_height}, {total_tiles} grid tiles, "
+        f"tile={tile_w}x{tile_h}, stride={stride_x}x{stride_y}, engine={engine}"
     )
 
     yield {
@@ -231,6 +278,34 @@ async def detect_plants_local(
     all_detections = []
     progress_every = max(1, progress_every)
 
+    def _collect(preds, ox, oy):
+        """Offset a tile's detections into full-ortho pixel space and keep the
+        allowed classes."""
+        for pred in preds:
+            if pred["class"].lower() not in allowed_classes:
+                continue
+            all_detections.append({
+                "x": ox + pred["x"],
+                "y": oy + pred["y"],
+                "width": pred["width"],
+                "height": pred["height"],
+                "confidence": pred["confidence"],
+                "class": pred["class"],
+            })
+
+    # YOLO runs tiles in batches (one GPU forward pass per YOLO_BATCH_TILES) — the
+    # main wall-clock win over one predict() per tile, and what keeps the full-ortho
+    # run inside Cloud Run's instance lifetime. SAM 3 stays per-tile (HTTP calls).
+    batch = []  # list of (x, y, tile_rgb) awaiting a forward pass
+
+    def _flush_batch():
+        if not batch:
+            return
+        per_tile = run_batch_inference(model, [t for (_, _, t) in batch], imgsz=imgsz, conf=confidence)
+        for (bx, by, _), preds in zip(batch, per_tile):
+            _collect(preds, bx, by)
+        batch.clear()
+
     # SAM 3 talks to a hosted HTTP endpoint per tile; share one client for the run.
     sam3_http = None
     if engine == "sam3":
@@ -242,23 +317,16 @@ async def detect_plants_local(
 
     try:
         for idx, (x, y, crop_w, crop_h) in enumerate(tile_jobs, start=1):
-            tile = image[y:y + crop_h, x:x + crop_w]
-            # `image` is already RGB (load_geotiff_for_detection).
-            if engine == "sam3":
-                preds = await run_tile_inference_sam3(sam3_http, tile, sam3_prompt, roboflow_api_key)
+            # Read just this window (a few internal COG tiles) — `tile` is RGB.
+            tile = tile_reader(x, y, crop_w, crop_h)
+            if is_tile_empty(tile):
+                skipped += 1
+            elif engine == "sam3":
+                _collect(await run_tile_inference_sam3(sam3_http, tile, sam3_prompt, roboflow_api_key), x, y)
             else:
-                preds = run_tile_inference(model, tile, imgsz=imgsz, conf=confidence)
-            for pred in preds:
-                if pred["class"].lower() not in allowed_classes:
-                    continue
-                all_detections.append({
-                    "x": x + pred["x"],
-                    "y": y + pred["y"],
-                    "width": pred["width"],
-                    "height": pred["height"],
-                    "confidence": pred["confidence"],
-                    "class": pred["class"],
-                })
+                batch.append((x, y, tile))
+                if len(batch) >= YOLO_BATCH_TILES:
+                    _flush_batch()
 
             if idx % progress_every == 0 or idx == total_tiles:
                 yield {
@@ -270,6 +338,7 @@ async def detect_plants_local(
                 }
                 # Let the event loop flush streamed bytes / service other tasks.
                 await asyncio.sleep(0)
+        _flush_batch()  # any remaining YOLO tiles that didn't fill a batch
     finally:
         if sam3_http is not None:
             await sam3_http.aclose()
@@ -282,6 +351,7 @@ async def detect_plants_local(
         "detectionsCount": len(all_detections),
         "phase": "nms",
     }
+    logger.info(f"Inference done: {total_tiles - skipped} tiles inferred, {skipped} empty skipped")
     logger.info(f"Detections before dedup: {len(all_detections)}")
     final_detections = centroid_dedup(all_detections, r_dedup)
     logger.info(f"Detections after dedup (r={r_dedup}): {len(final_detections)}")

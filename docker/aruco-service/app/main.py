@@ -33,9 +33,11 @@ from .detector import detect_aruco_markers
 from .georef import (
     download_geotiff,
     load_geotiff_for_detection,
+    make_tile_reader,
+    geotiff_gsd_cm,
     cleanup_temp_file,
 )
-from .plant_detection import detect_plants_local
+from .plant_detection import detect_plants_local, scale_for_gsd
 
 from ultralytics import YOLO
 
@@ -260,27 +262,41 @@ async def detect_plants_endpoint(request: PlantDetectionRequest):
             file_size = os.path.getsize(temp_file)
             logger.info(f"Downloaded: {file_size / 1024 / 1024:.1f} MB")
 
-            # Load image
-            yield json.dumps({"type": "status", "message": "Decoding image..."}) + "\n"
-            image, transform, crs = load_geotiff_for_detection(temp_file)
-            logger.info(f"Image shape: {image.shape}, CRS: {crs}")
+            # Open the raster and read tiles on demand (windowed) so a large
+            # ortho never loads fully into memory. `src` stays open for the whole
+            # detection run.
+            yield json.dumps({"type": "status", "message": "Opening orthomosaic..."}) + "\n"
+            with rasterio.open(temp_file) as src:
+                reader, width, height, transform, crs = make_tile_reader(src)
+                # Scale the tiling to the source resolution so plnt_v3 runs at its
+                # validated ~2 cm/px operating point regardless of ortho GSD.
+                gsd_cm = geotiff_gsd_cm(src)
+                sc = scale_for_gsd(gsd_cm)
+                tw, th = round(request.tile_width * sc), round(request.tile_height * sc)
+                ox, oy = round(request.overlap_x * sc), round(request.overlap_y * sc)
+                rd = max(1, round(request.r_dedup * sc))
+                logger.info(f"Image: {width}x{height}, CRS: {crs}, dtype={src.dtypes[0]}, "
+                            f"GSD={gsd_cm and round(gsd_cm, 2)} cm/px, scale={round(sc, 2)} "
+                            f"-> tile={tw}, overlap={ox}, r_dedup={rd}")
 
-            # Shared tiling -> inference -> dedup -> georeference pipeline
-            async for event in detect_plants_local(
-                app.state.model,
-                image,
-                transform,
-                crs,
-                tile_w=request.tile_width,
-                tile_h=request.tile_height,
-                overlap_x=request.overlap_x,
-                overlap_y=request.overlap_y,
-                confidence=request.confidence_threshold,
-                r_dedup=request.r_dedup,
-                include_classes=request.include_classes,
-                progress_every=request.concurrent_tiles,
-            ):
-                yield json.dumps(event) + "\n"
+                # Shared tiling -> inference -> dedup -> georeference pipeline
+                async for event in detect_plants_local(
+                    app.state.model,
+                    reader,
+                    width,
+                    height,
+                    transform,
+                    crs,
+                    tile_w=tw,
+                    tile_h=th,
+                    overlap_x=ox,
+                    overlap_y=oy,
+                    confidence=request.confidence_threshold,
+                    r_dedup=rd,
+                    include_classes=request.include_classes,
+                    progress_every=request.concurrent_tiles,
+                ):
+                    yield json.dumps(event) + "\n"
 
         except Exception as e:
             logger.error(f"Plant detection failed: {str(e)}", exc_info=True)
@@ -335,53 +351,66 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
             "updated_at": "now()",
         })
 
-        # Load image
-        image, transform, crs = load_geotiff_for_detection(temp_file)
-        logger.info(f"[AsyncDetect] Image: {image.shape[1]}x{image.shape[0]}, CRS: {crs}")
-
-        # Shared tiling -> inference -> dedup -> georeference pipeline.
-        # Throttle Supabase progress writes so we don't hammer the DB.
+        # Open the raster and read tiles on demand (windowed) so a large ortho
+        # never loads fully into memory. `src` stays open for the whole run.
         result_event = None
         total_tiles = 0
         last_written = -1
         progress_stride = max(1, request.concurrent_tiles * 5)
-        async for event in detect_plants_local(
-            app.state.model,
-            image,
-            transform,
-            crs,
-            tile_w=request.tile_width,
-            tile_h=request.tile_height,
-            overlap_x=request.overlap_x,
-            overlap_y=request.overlap_y,
-            confidence=request.confidence_threshold,
-            r_dedup=request.r_dedup,
-            include_classes=request.include_classes,
-            progress_every=request.concurrent_tiles,
-            engine=request.engine,
-            sam3_prompt=request.sam3_prompt,
-            roboflow_api_key=os.environ.get("ROBOFLOW_API_KEY"),
-            region=request.region,
-        ):
-            if event["type"] == "result":
-                result_event = event
-            elif event["type"] == "progress":
-                total_tiles = event["totalTiles"]
-                processed = event["processedTiles"]
-                # Always write the dedup ("nms") phase; throttle tiling updates.
-                if (event["phase"] != "tiling"
-                        or processed - last_written >= progress_stride
-                        or processed >= total_tiles):
-                    last_written = processed
-                    await sb.update_job(request.job_id, {
-                        "progress": {
-                            "processedTiles": processed,
-                            "totalTiles": total_tiles,
-                            "detectionsCount": event["detectionsCount"],
-                            "phase": event["phase"],
-                        },
-                        "updated_at": "now()",
-                    })
+        with rasterio.open(temp_file) as src:
+            reader, width, height, transform, crs = make_tile_reader(src)
+            # Scale the tiling to the source resolution so plnt_v3 runs at its
+            # validated ~2 cm/px operating point regardless of ortho GSD.
+            gsd_cm = geotiff_gsd_cm(src)
+            sc = scale_for_gsd(gsd_cm)
+            tw, th = round(request.tile_width * sc), round(request.tile_height * sc)
+            ox, oy = round(request.overlap_x * sc), round(request.overlap_y * sc)
+            rd = max(1, round(request.r_dedup * sc))
+            logger.info(f"[AsyncDetect] Image: {width}x{height}, CRS: {crs}, dtype={src.dtypes[0]}, "
+                        f"GSD={gsd_cm and round(gsd_cm, 2)} cm/px, scale={round(sc, 2)} "
+                        f"-> tile={tw}, overlap={ox}, r_dedup={rd}")
+
+            # Shared tiling -> inference -> dedup -> georeference pipeline.
+            # Throttle Supabase progress writes so we don't hammer the DB.
+            async for event in detect_plants_local(
+                app.state.model,
+                reader,
+                width,
+                height,
+                transform,
+                crs,
+                tile_w=tw,
+                tile_h=th,
+                overlap_x=ox,
+                overlap_y=oy,
+                confidence=request.confidence_threshold,
+                r_dedup=rd,
+                include_classes=request.include_classes,
+                progress_every=request.concurrent_tiles,
+                engine=request.engine,
+                sam3_prompt=request.sam3_prompt,
+                roboflow_api_key=os.environ.get("ROBOFLOW_API_KEY"),
+                region=request.region,
+            ):
+                if event["type"] == "result":
+                    result_event = event
+                elif event["type"] == "progress":
+                    total_tiles = event["totalTiles"]
+                    processed = event["processedTiles"]
+                    # Always write the dedup ("nms") phase; throttle tiling updates.
+                    if (event["phase"] != "tiling"
+                            or processed - last_written >= progress_stride
+                            or processed >= total_tiles):
+                        last_written = processed
+                        await sb.update_job(request.job_id, {
+                            "progress": {
+                                "processedTiles": processed,
+                                "totalTiles": total_tiles,
+                                "detectionsCount": event["detectionsCount"],
+                                "phase": event["phase"],
+                            },
+                            "updated_at": "now()",
+                        })
 
         if result_event is None:
             raise RuntimeError("Detection produced no result event")
@@ -842,10 +871,13 @@ async def crop_to_boundary(request: CropToBoundaryRequest):
         cropped = temp_src.replace(".tif", "_cropped.tif")
         # The GeoJSON cutline is WGS84 (CRS84); gdalwarp auto-reprojects it to the
         # raster's CRS. (No -cutline_srs flag — not supported by this GDAL.)
+        # BIGTIFF=YES: a crop of a large/fine ortho (a 73k x 59k parcel does) can
+        # exceed the 4 GB classic-TIFF limit and abort the write with
+        # "TIFFAppendToStrip: Maximum TIFF file size exceeded".
         warp_cmd = [
             "gdalwarp", "-cutline", cutline, "-crop_to_cutline", "-dstalpha",
             "-of", "GTiff",
-            "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", "-overwrite",
+            "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", "-co", "BIGTIFF=YES", "-overwrite",
             temp_src, cropped,
         ]
         logger.info(f"[Crop] {' '.join(warp_cmd)}")
@@ -853,19 +885,30 @@ async def crop_to_boundary(request: CropToBoundaryRequest):
         if r.returncode != 0:
             logger.error(f"[Crop] gdalwarp failed: {r.stderr[-800:]}")
             return CropToBoundaryResponse(success=False, error=f"gdalwarp failed: {r.stderr[-300:]}")
+        # Cloud Run's /tmp is RAM-backed, so large intermediates count against the
+        # memory limit — drop the source now that the crop is written.
+        cleanup_temp_file(temp_src)
+        temp_src = None
 
-        # COG (DEFLATE keeps the alpha band so the crop stays transparent).
-        cropped_cog = temp_src.replace(".tif", "_cropped_cog.tif")
+        # JPEG COG keeps the crop small enough for a standard upload (a lossless
+        # DEFLATE crop of a big ortho would be several GB, past the 5 GB upload
+        # cap). The alpha band becomes a COG mask so outside-boundary stays
+        # transparent; Q92 matches how the source orthos are already stored.
+        cropped_cog = cropped.replace("_cropped.tif", "_cropped_cog.tif")
         cog_cmd = [
-            "gdal_translate", "-of", "COG", "-co", "COMPRESS=DEFLATE",
-            "-co", "OVERVIEWS=AUTO", "-co", "BLOCKSIZE=512", cropped, cropped_cog,
+            "gdal_translate", "-of", "COG",
+            "-co", "COMPRESS=JPEG", "-co", "QUALITY=92",
+            "-co", "OVERVIEWS=AUTO", "-co", "BLOCKSIZE=512", "-co", "BIGTIFF=YES",
+            cropped, cropped_cog,
         ]
         r2 = subprocess.run(cog_cmd, capture_output=True, text=True, timeout=1800)
         if r2.returncode != 0:
             logger.error(f"[Crop] COG conversion failed: {r2.stderr[-800:]}")
             return CropToBoundaryResponse(success=False, error=f"COG failed: {r2.stderr[-300:]}")
 
-        with rasterio.open(cropped) as src:
+        # Read dims/bounds from the COG (identical to the intermediate) so we can
+        # drop the large DEFLATE intermediate before the upload.
+        with rasterio.open(cropped_cog) as src:
             w, h = src.width, src.height
             b = src.bounds
             crs = src.crs
@@ -874,37 +917,35 @@ async def crop_to_boundary(request: CropToBoundaryRequest):
             else:
                 west, south, east, north = b.left, b.bottom, b.right, b.top
         bounds = {"west": west, "south": south, "east": east, "north": north}
+        cleanup_temp_file(cropped)
+        cropped = None
 
         base = request.supabase_url.rstrip("/")
         sk = request.supabase_service_key
-        tif_path = f"{request.orthomosaic_id}/orthophoto_cropped.tif"
         cog_path = f"{request.orthomosaic_id}/orthophoto_cropped_cog.tif"
 
+        # Upload only the cropped COG — it's the detection/tile source going
+        # forward, and small enough for a single standard request.
+        with open(cropped_cog, "rb") as fh:
+            cog_bytes = fh.read()
         async with httpx_client.AsyncClient(timeout=600.0) as client:
-            async def upload(path, local):
-                with open(local, "rb") as fh:
-                    data = fh.read()
-                rr = await client.post(
-                    f"{base}/storage/v1/object/orthomosaics/{path}",
-                    content=data,
-                    headers={"Authorization": f"Bearer {sk}", "apikey": sk,
-                             "Content-Type": "image/tiff", "x-upsert": "true"},
-                )
-                rr.raise_for_status()
-            await upload(tif_path, cropped)
-            await upload(cog_path, cropped_cog)
+            rr = await client.post(
+                f"{base}/storage/v1/object/orthomosaics/{cog_path}",
+                content=cog_bytes,
+                headers={"Authorization": f"Bearer {sk}", "apikey": sk,
+                         "Content-Type": "image/tiff", "x-upsert": "true"},
+            )
+            rr.raise_for_status()
 
-        def pub(p):
-            return f"{base}/storage/v1/object/public/orthomosaics/{p}"
-
+        cog_url = f"{base}/storage/v1/object/public/orthomosaics/{cog_path}"
         async with httpx_client.AsyncClient(timeout=60.0) as client:
             await client.patch(
                 f"{base}/rest/v1/orthomosaics?id=eq.{request.orthomosaic_id}",
                 headers={"Authorization": f"Bearer {sk}", "apikey": sk,
                          "Content-Type": "application/json", "Prefer": "return=minimal"},
                 json={
-                    "original_tif_url": pub(tif_path),
-                    "orthomosaic_url": pub(cog_path),
+                    "original_tif_url": cog_url,
+                    "orthomosaic_url": cog_url,
                     "bounds": bounds,
                     "image_width": w,
                     "image_height": h,
