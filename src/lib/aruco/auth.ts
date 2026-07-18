@@ -76,3 +76,19 @@ export async function getArucoAuthHeaders(serviceUrl: string): Promise<Record<st
   const idToken = await client.fetchIdToken(serviceUrl)
   return { Authorization: `Bearer ${idToken}` }
 }
+
+/**
+ * OAuth2 access token (cloud-platform scope) for the impersonated invoker SA —
+ * used to call the Cloud Run Admin API (e.g. execute the detection Job), which
+ * needs an access token, not the service-audience ID token above. Returns null
+ * when federation isn't configured (local dev).
+ */
+export async function getArucoAccessToken(): Promise<string | null> {
+  const client = getClient()
+  if (!client) {
+    console.warn('[aruco-auth] WIF env not set — no access token for the Cloud Run Admin API')
+    return null
+  }
+  const { token } = await client.getAccessToken()
+  return token ?? null
+}
