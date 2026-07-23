@@ -1,9 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, Table2, Download } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Table2, Download } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
 
@@ -327,6 +327,8 @@ export default function SharedPropertyMap({
   const [invFrac, setInvFrac] = useState(0.5) // share of the map height the sheet takes
   const [invCounts, setInvCounts] = useState<Record<string, number> | null>(null)
   const [invCounting, setInvCounting] = useState(false)
+  // Which species+size rollup rows are expanded to show their per-block breakdown.
+  const [invExpanded, setInvExpanded] = useState<Set<string>>(new Set())
 
   const resetView = () => {
     const map = mapRef.current
@@ -1261,6 +1263,41 @@ export default function SharedPropertyMap({
   const groupCount = (g: { plotIds: string[] }) =>
     invCounts ? g.plotIds.reduce((sum, id) => sum + (invCounts[id] ?? 0), 0) : null
 
+  // Roll the block-level groups up to one line per (species, size) — the day-to-day
+  // view. Each keeps its per-block breakdown for the expandable drill-down. Sorted
+  // species -> size.
+  type SizeGroup = {
+    key: string
+    species: string | null
+    size: number | null
+    blocks: typeof inventoryGroups
+    readiness: string[]
+  }
+  const speciesSizeGroups = Object.values(
+    inventoryGroups.reduce((acc: Record<string, SizeGroup>, g) => {
+      const key = `${g.size ?? ''}|${(g.species ?? '').trim().toLowerCase()}`
+      if (!acc[key]) acc[key] = { key, species: g.species, size: g.size, blocks: [], readiness: [] }
+      acc[key].blocks.push(g)
+      if (g.readinessDate) acc[key].readiness.push(g.readinessDate)
+      return acc
+    }, {})
+  )
+    .map((ss) => ({
+      key: ss.key,
+      species: ss.species,
+      size: ss.size,
+      blocks: [...ss.blocks].sort((a, b) => (a.block ?? Infinity) - (b.block ?? Infinity)),
+      readinessDate: ss.readiness.length ? ss.readiness.slice().sort()[0] : null,
+    }))
+    .sort(
+      (a, b) =>
+        (a.species ?? '').localeCompare(b.species ?? '') || (a.size ?? Infinity) - (b.size ?? Infinity)
+    )
+
+  // Total count for a species+size rollup = sum across its per-block groups.
+  const sizeGroupCount = (ss: { blocks: { plotIds: string[] }[] }) =>
+    invCounts ? ss.blocks.reduce((sum, b) => sum + (groupCount(b) ?? 0), 0) : null
+
   // Export the current location's species inventory as CSV (matches the drawer's columns).
   const exportInventoryCSV = () => {
     const cell = (v: unknown) => {
@@ -1707,7 +1744,7 @@ export default function SharedPropertyMap({
         >
           <Table2 className="h-4 w-4" />
           Inventory
-          <span className="text-green-300 tabular-nums">({inventoryGroups.length})</span>
+          <span className="text-green-300 tabular-nums">({speciesSizeGroups.length})</span>
           <ChevronUp className="h-4 w-4" />
         </button>
       )}
@@ -1726,11 +1763,11 @@ export default function SharedPropertyMap({
             <div className="absolute left-1/2 -translate-x-1/2 top-1.5 h-1 w-10 rounded-full bg-gray-300" />
             <Table2 className="h-4 w-4 text-[#0f2e1d] shrink-0" />
             <span className="text-sm font-semibold text-gray-900">Inventory</span>
-            <span className="text-xs text-gray-400 tabular-nums">{inventoryGroups.length} lines</span>
+            <span className="text-xs text-gray-400 tabular-nums">{speciesSizeGroups.length} lines</span>
             <div className="ml-auto flex items-center gap-1">
               <button
                 onClick={exportInventoryCSV}
-                disabled={inventoryGroups.length === 0}
+                disabled={speciesSizeGroups.length === 0}
                 className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
                 title="Download CSV"
                 aria-label="Download inventory as CSV"
@@ -1758,7 +1795,7 @@ export default function SharedPropertyMap({
 
           {/* Table */}
           <div className="flex-1 overflow-auto">
-            {inventoryGroups.length === 0 ? (
+            {speciesSizeGroups.length === 0 ? (
               <div className="h-full flex items-center justify-center text-sm text-gray-400 p-6 text-center">
                 No species plots yet. Turn on Species and use its “Draw” button to add one.
               </div>
@@ -1769,51 +1806,91 @@ export default function SharedPropertyMap({
                     <th className="text-left font-medium px-3 py-2">Species</th>
                     <th className="text-left font-medium px-3 py-2">Size</th>
                     <th className="text-right font-medium px-3 py-2">Count</th>
-                    <th className="text-left font-medium px-3 py-2">Block</th>
                     <th className="text-left font-medium px-3 py-2">Readiness Date</th>
-                    <th className="px-3 py-2 w-10"></th>
+                    <th className="px-3 py-2 w-14"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {inventoryGroups.map((g) => (
-                    <tr key={g.key} className="hover:bg-gray-50">
-                      <td className="px-3 py-2 text-gray-900">{g.species || <span className="text-gray-300">—</span>}</td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {g.size != null ? `${g.size}-Gallon` : <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums font-medium text-gray-900">
-                        {invCounts ? (groupCount(g) ?? 0).toLocaleString() : invCounting ? '…' : '—'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {g.block != null ? g.block : <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {g.readinessDate ? fmtReadiness(g.readinessDate) : <span className="text-gray-300">—</span>}
-                      </td>
-                      <td className="px-3 py-2 text-right whitespace-nowrap">
-                        {g.plotIds.length === 1 ? (
-                          <button
-                            onClick={() => {
-                              const plot = plots.find((p) => p.id === g.plotIds[0])
-                              if (plot) startEdit(plot)
-                            }}
-                            className="inline-flex items-center gap-1 text-green-700 hover:text-green-900 text-xs font-medium"
-                            title="Edit this species"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                            Edit
-                          </button>
-                        ) : (
-                          <span
-                            className="text-xs text-gray-400 tabular-nums"
-                            title={`${g.plotIds.length} plots grouped — edit them individually on the map`}
-                          >
-                            {g.plotIds.length} plots
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                  {speciesSizeGroups.map((ss) => {
+                    const expanded = invExpanded.has(ss.key)
+                    return (
+                      <Fragment key={ss.key}>
+                        {/* Species + size rollup — the day-to-day line. Click to drill into blocks. */}
+                        <tr
+                          className="hover:bg-gray-50 cursor-pointer"
+                          onClick={() =>
+                            setInvExpanded((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(ss.key)) next.delete(ss.key)
+                              else next.add(ss.key)
+                              return next
+                            })
+                          }
+                        >
+                          <td className="px-3 py-2 text-gray-900">
+                            <span className="inline-flex items-center gap-1.5">
+                              <ChevronRight
+                                className={`h-3.5 w-3.5 text-gray-400 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`}
+                              />
+                              {ss.species || <span className="text-gray-300">—</span>}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-gray-700">
+                            {ss.size != null ? `${ss.size}-Gallon` : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums font-semibold text-gray-900">
+                            {invCounts ? (sizeGroupCount(ss) ?? 0).toLocaleString() : invCounting ? '…' : '—'}
+                          </td>
+                          <td className="px-3 py-2 text-gray-700">
+                            {ss.readinessDate ? fmtReadiness(ss.readinessDate) : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-3 py-2 text-right text-gray-400 text-xs tabular-nums whitespace-nowrap">
+                            {ss.blocks.length > 1 ? `${ss.blocks.length} blocks` : ''}
+                          </td>
+                        </tr>
+
+                        {/* Per-block drill-down (location detail). */}
+                        {expanded &&
+                          ss.blocks.map((g) => (
+                            <tr key={g.key} className="bg-gray-50/60">
+                              <td className="px-3 py-1.5 pl-9 text-xs text-gray-500">
+                                {g.block != null ? `Block ${g.block}` : 'No block'}
+                              </td>
+                              <td className="px-3 py-1.5" />
+                              <td className="px-3 py-1.5 text-right tabular-nums text-xs text-gray-600">
+                                {invCounts ? (groupCount(g) ?? 0).toLocaleString() : invCounting ? '…' : '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-xs text-gray-500">
+                                {g.readinessDate ? fmtReadiness(g.readinessDate) : ''}
+                              </td>
+                              <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                                {g.plotIds.length === 1 ? (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      const plot = plots.find((p) => p.id === g.plotIds[0])
+                                      if (plot) startEdit(plot)
+                                    }}
+                                    className="inline-flex items-center gap-1 text-green-700 hover:text-green-900 text-xs font-medium"
+                                    title="Edit this plot"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                    Edit
+                                  </button>
+                                ) : (
+                                  <span
+                                    className="text-xs text-gray-400 tabular-nums"
+                                    title={`${g.plotIds.length} plots — edit individually on the map`}
+                                  >
+                                    {g.plotIds.length} plots
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                      </Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             )}
