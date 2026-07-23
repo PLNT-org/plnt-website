@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Table2, Download } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
 
@@ -315,6 +315,8 @@ export default function SharedPropertyMap({
   const [saveError, setSaveError] = useState('')
 
   const plotsLayerRef = useRef<L.LayerGroup | null>(null)
+  // Overlay that lights up the plots of an expanded inventory line.
+  const highlightLayerRef = useRef<L.LayerGroup | null>(null)
   const drawPointsRef = useRef<L.LatLng[]>([])
   const drawMarkersRef = useRef<L.CircleMarker[]>([])
   const drawPolygonRef = useRef<L.Polygon | null>(null)
@@ -360,6 +362,8 @@ export default function SharedPropertyMap({
 
     // Layer group that holds all saved viewer-drawn plots (redrawn by an effect).
     plotsLayerRef.current = L.layerGroup().addTo(map)
+    // Highlight overlay sits on top of the plots (added last).
+    highlightLayerRef.current = L.layerGroup().addTo(map)
 
     for (const layer of data.layers) {
       if (layer.tilesUrl) {
@@ -390,6 +394,7 @@ export default function SharedPropertyMap({
       pointsLayerRef.current = null
       pointsCanvasRef.current = null
       plotsLayerRef.current = null
+      highlightLayerRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -1322,6 +1327,60 @@ export default function SharedPropertyMap({
     URL.revokeObjectURL(url)
   }
 
+  // ---- Inventory → map: light up an expanded line's plots, and frame them on
+  // demand (the "locate" button), padded so they clear the inventory drawer. ----
+  const highlightPlotIds: string[] = []
+  for (const ss of speciesSizeGroups) {
+    if (invExpanded.has(ss.key)) for (const b of ss.blocks) for (const id of b.plotIds) highlightPlotIds.push(id)
+  }
+  const highlightKey = highlightPlotIds.slice().sort().join(',')
+
+  const locatePlots = (plotIds: string[]) => {
+    const map = mapRef.current
+    if (!map) return
+    const idset = new Set(plotIds)
+    const pts: [number, number][] = []
+    for (const plot of plots) {
+      if (!idset.has(plot.id)) continue
+      const ring = plot.boundary?.coordinates?.[0]
+      if (ring) for (const [lng, lat] of ring) pts.push([lat, lng])
+    }
+    if (!pts.length) return
+    const h = rootRef.current?.clientHeight ?? 0
+    const drawerPx = invOpen ? Math.round(invFrac * h) : 0
+    map.fitBounds(L.latLngBounds(pts), {
+      paddingTopLeft: [28, 28],
+      paddingBottomRight: [28, drawerPx + 28],
+      maxZoom: 21,
+    })
+  }
+
+  // Draw the highlight for whatever inventory lines are expanded.
+  useEffect(() => {
+    const layer = highlightLayerRef.current
+    if (!layer) return
+    layer.clearLayers()
+    const idset = new Set(highlightPlotIds)
+    if (idset.size === 0) return
+    for (const plot of plots) {
+      if (!idset.has(plot.id)) continue
+      const ring = plot.boundary?.coordinates?.[0]
+      if (!ring) continue
+      const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
+      // White halo under a green line + soft fill, so it reads on any imagery.
+      L.polygon(coords, { color: '#ffffff', weight: 6, opacity: 0.9, fill: false, interactive: false }).addTo(layer)
+      L.polygon(coords, {
+        color: '#15803d',
+        weight: 2.5,
+        opacity: 1,
+        fillColor: '#22c55e',
+        fillOpacity: 0.25,
+        interactive: false,
+      }).addTo(layer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightKey, plots])
+
   const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
 
   return (
@@ -1846,8 +1905,18 @@ export default function SharedPropertyMap({
                           <td className="px-3 py-2 text-gray-700">
                             {ss.readinessDate ? fmtReadiness(ss.readinessDate) : <span className="text-gray-300">—</span>}
                           </td>
-                          <td className="px-3 py-2 text-right text-gray-400 text-xs tabular-nums whitespace-nowrap">
-                            {ss.blocks.length > 1 ? `${ss.blocks.length} blocks` : ''}
+                          <td className="px-3 py-2 text-right whitespace-nowrap">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                locatePlots(ss.blocks.flatMap((b) => b.plotIds))
+                              }}
+                              className="inline-flex items-center text-gray-400 hover:text-green-700 p-0.5"
+                              title={`Show on map${ss.blocks.length > 1 ? ` · ${ss.blocks.length} blocks` : ''}`}
+                              aria-label="Show on map"
+                            >
+                              <Crosshair className="h-3.5 w-3.5" />
+                            </button>
                           </td>
                         </tr>
 
@@ -1855,8 +1924,15 @@ export default function SharedPropertyMap({
                         {expanded &&
                           ss.blocks.map((g) => (
                             <tr key={g.key} className="bg-gray-50/60">
-                              <td className="px-3 py-1.5 pl-9 text-xs text-gray-500">
-                                {g.block != null ? `Block ${g.block}` : 'No block'}
+                              <td className="px-3 py-1.5 pl-9 text-xs">
+                                <button
+                                  onClick={() => locatePlots(g.plotIds)}
+                                  className="inline-flex items-center gap-1 text-gray-500 hover:text-green-700"
+                                  title="Show this block on the map"
+                                >
+                                  <Crosshair className="h-3 w-3 shrink-0" />
+                                  {g.block != null ? `Block ${g.block}` : 'No block'}
+                                </button>
                               </td>
                               <td className="px-3 py-1.5" />
                               <td className="px-3 py-1.5 text-right tabular-nums text-xs text-gray-600">
