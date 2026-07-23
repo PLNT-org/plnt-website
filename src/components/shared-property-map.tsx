@@ -1817,7 +1817,7 @@ export default function SharedPropertyMap({
                       <Fragment key={ss.key}>
                         {/* Species + size rollup — the day-to-day line. Click to drill into blocks. */}
                         <tr
-                          className="hover:bg-gray-50 cursor-pointer"
+                          className="group hover:bg-gray-50 cursor-pointer"
                           onClick={() =>
                             setInvExpanded((prev) => {
                               const next = new Set(prev)
@@ -1830,7 +1830,9 @@ export default function SharedPropertyMap({
                           <td className="px-3 py-2 text-gray-900">
                             <span className="inline-flex items-center gap-1.5">
                               <ChevronRight
-                                className={`h-3.5 w-3.5 text-gray-400 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`}
+                                className={`h-3.5 w-3.5 shrink-0 transition ${
+                                  expanded ? 'text-green-700 rotate-90' : 'text-gray-400 group-hover:text-green-700'
+                                }`}
                               />
                               {ss.species || <span className="text-gray-300">—</span>}
                             </span>
