@@ -1218,19 +1218,62 @@ export default function SharedPropertyMap({
       }
     })
 
+  // Group the species plots by (block, size, species) so every unique combination
+  // is a single line — the count is summed across all of that combination's plots.
+  // Sorted species -> size -> block (matching the column order) instead of one
+  // line per drawn plot.
+  type InvGroup = {
+    key: string
+    species: string | null
+    size: number | null
+    block: number | null
+    plotIds: string[]
+    readiness: string[]
+  }
+  const inventoryGroups = Object.values(
+    inventoryRows.reduce((acc: Record<string, InvGroup>, r) => {
+      const key = `${r.block ?? ''}|${r.size ?? ''}|${(r.species ?? '').trim().toLowerCase()}`
+      if (!acc[key]) {
+        acc[key] = { key, species: r.species, size: r.size, block: r.block, plotIds: [], readiness: [] }
+      }
+      acc[key].plotIds.push(r.id)
+      if (r.readinessDate) acc[key].readiness.push(r.readinessDate)
+      return acc
+    }, {})
+  )
+    .map((g) => ({
+      key: g.key,
+      species: g.species,
+      size: g.size,
+      block: g.block,
+      plotIds: g.plotIds,
+      // Earliest readiness across the group (ISO dates sort chronologically).
+      readinessDate: g.readiness.length ? g.readiness.slice().sort()[0] : null,
+    }))
+    .sort(
+      (a, b) =>
+        (a.species ?? '').localeCompare(b.species ?? '') ||
+        (a.size ?? Infinity) - (b.size ?? Infinity) ||
+        (a.block ?? Infinity) - (b.block ?? Infinity)
+    )
+
+  // Total plant count for a grouped row = sum of its plots' individual counts.
+  const groupCount = (g: { plotIds: string[] }) =>
+    invCounts ? g.plotIds.reduce((sum, id) => sum + (invCounts[id] ?? 0), 0) : null
+
   // Export the current location's species inventory as CSV (matches the drawer's columns).
   const exportInventoryCSV = () => {
     const cell = (v: unknown) => {
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
     }
-    const headers = ['Species', 'Size (gal)', 'Count', 'Readiness', 'Block']
-    const rows = inventoryRows.map((r) => [
-      r.species || '',
-      r.size != null ? r.size : '',
-      invCounts ? invCounts[r.id] ?? 0 : '',
-      r.readinessDate ? fmtReadiness(r.readinessDate) : '',
-      r.block != null ? r.block : '',
+    const headers = ['Species', 'Size (gal)', 'Count', 'Block', 'Readiness Date']
+    const rows = inventoryGroups.map((g) => [
+      g.species || '',
+      g.size != null ? g.size : '',
+      invCounts ? groupCount(g) ?? 0 : '',
+      g.block != null ? g.block : '',
+      g.readinessDate ? fmtReadiness(g.readinessDate) : '',
     ])
     const csv = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\n')
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
@@ -1664,7 +1707,7 @@ export default function SharedPropertyMap({
         >
           <Table2 className="h-4 w-4" />
           Inventory
-          <span className="text-green-300 tabular-nums">({inventoryRows.length})</span>
+          <span className="text-green-300 tabular-nums">({inventoryGroups.length})</span>
           <ChevronUp className="h-4 w-4" />
         </button>
       )}
@@ -1683,11 +1726,11 @@ export default function SharedPropertyMap({
             <div className="absolute left-1/2 -translate-x-1/2 top-1.5 h-1 w-10 rounded-full bg-gray-300" />
             <Table2 className="h-4 w-4 text-[#0f2e1d] shrink-0" />
             <span className="text-sm font-semibold text-gray-900">Inventory</span>
-            <span className="text-xs text-gray-400 tabular-nums">{inventoryRows.length} species</span>
+            <span className="text-xs text-gray-400 tabular-nums">{inventoryGroups.length} lines</span>
             <div className="ml-auto flex items-center gap-1">
               <button
                 onClick={exportInventoryCSV}
-                disabled={inventoryRows.length === 0}
+                disabled={inventoryGroups.length === 0}
                 className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
                 title="Download CSV"
                 aria-label="Download inventory as CSV"
@@ -1715,7 +1758,7 @@ export default function SharedPropertyMap({
 
           {/* Table */}
           <div className="flex-1 overflow-auto">
-            {inventoryRows.length === 0 ? (
+            {inventoryGroups.length === 0 ? (
               <div className="h-full flex items-center justify-center text-sm text-gray-400 p-6 text-center">
                 No species plots yet. Turn on Species and use its “Draw” button to add one.
               </div>
@@ -1726,39 +1769,48 @@ export default function SharedPropertyMap({
                     <th className="text-left font-medium px-3 py-2">Species</th>
                     <th className="text-left font-medium px-3 py-2">Size</th>
                     <th className="text-right font-medium px-3 py-2">Count</th>
-                    <th className="text-left font-medium px-3 py-2">Readiness</th>
                     <th className="text-left font-medium px-3 py-2">Block</th>
+                    <th className="text-left font-medium px-3 py-2">Readiness Date</th>
                     <th className="px-3 py-2 w-10"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {inventoryRows.map((r) => (
-                    <tr key={r.id} className="hover:bg-gray-50">
-                      <td className="px-3 py-2 text-gray-900">{r.species || <span className="text-gray-300">—</span>}</td>
+                  {inventoryGroups.map((g) => (
+                    <tr key={g.key} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 text-gray-900">{g.species || <span className="text-gray-300">—</span>}</td>
                       <td className="px-3 py-2 text-gray-700">
-                        {r.size != null ? `${r.size}-Gallon` : <span className="text-gray-300">—</span>}
+                        {g.size != null ? `${g.size}-Gallon` : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums font-medium text-gray-900">
-                        {invCounts ? (invCounts[r.id] ?? 0).toLocaleString() : invCounting ? '…' : '—'}
+                        {invCounts ? (groupCount(g) ?? 0).toLocaleString() : invCounting ? '…' : '—'}
                       </td>
                       <td className="px-3 py-2 text-gray-700">
-                        {r.readinessDate ? fmtReadiness(r.readinessDate) : <span className="text-gray-300">—</span>}
+                        {g.block != null ? g.block : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2 text-gray-700">
-                        {r.block != null ? r.block : <span className="text-gray-300">—</span>}
+                        {g.readinessDate ? fmtReadiness(g.readinessDate) : <span className="text-gray-300">—</span>}
                       </td>
-                      <td className="px-3 py-2 text-right">
-                        <button
-                          onClick={() => {
-                            const plot = plots.find((p) => p.id === r.id)
-                            if (plot) startEdit(plot)
-                          }}
-                          className="inline-flex items-center gap-1 text-green-700 hover:text-green-900 text-xs font-medium"
-                          title="Edit this species"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                          Edit
-                        </button>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        {g.plotIds.length === 1 ? (
+                          <button
+                            onClick={() => {
+                              const plot = plots.find((p) => p.id === g.plotIds[0])
+                              if (plot) startEdit(plot)
+                            }}
+                            className="inline-flex items-center gap-1 text-green-700 hover:text-green-900 text-xs font-medium"
+                            title="Edit this species"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            Edit
+                          </button>
+                        ) : (
+                          <span
+                            className="text-xs text-gray-400 tabular-nums"
+                            title={`${g.plotIds.length} plots grouped — edit them individually on the map`}
+                          >
+                            {g.plotIds.length} plots
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}
