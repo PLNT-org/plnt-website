@@ -33,15 +33,25 @@ export async function GET(request: NextRequest) {
   if (!shareId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const flightKey = request.nextUrl.searchParams.get('flight') ?? ''
-  const { data, error } = await supabaseAdmin
-    .from('share_point_edits')
-    .select('id, kind, lat, lng')
-    .eq('share_id', shareId)
-    .eq('flight_key', flightKey)
-    .order('created_at', { ascending: true })
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ edits: (data || []).map(toClientEdit) })
+  // Page past PostgREST's default 1000-row cap: a heavily-corrected flight can
+  // have thousands of edits, and truncating at 1000 would silently revert the
+  // viewer's corrected count on reload.
+  const PAGE = 1000
+  const rows: any[] = []
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabaseAdmin
+      .from('share_point_edits')
+      .select('id, kind, lat, lng')
+      .eq('share_id', shareId)
+      .eq('flight_key', flightKey)
+      .order('created_at', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    if (!data || data.length === 0) break
+    rows.push(...data)
+    if (data.length < PAGE) break
+  }
+  return NextResponse.json({ edits: rows.map(toClientEdit) })
 }
 
 // POST — record one correction. Body: { flightKey, kind: 'add'|'remove', lat, lng, email? }
