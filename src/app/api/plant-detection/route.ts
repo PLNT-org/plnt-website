@@ -297,7 +297,9 @@ export async function GET(request: NextRequest) {
         hasMore = false
       }
 
-      if (allLabels.length >= 100000) {
+      // Runaway guard only (loop ends on a short batch); high enough to never
+      // truncate a real ortho's labels.
+      if (allLabels.length >= 5_000_000) {
         hasMore = false
       }
     }
