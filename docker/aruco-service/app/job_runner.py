@@ -24,7 +24,7 @@ import os
 
 from ultralytics import YOLO
 
-from .main import app, run_async_detection, WEIGHTS_PATH
+from .main import app, run_async_detection, MODELS, DEFAULT_MODEL
 from .models import AsyncPlantDetectionRequest
 
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +43,7 @@ def _build_request() -> AsyncPlantDetectionRequest:
         confidence_threshold=float(os.environ.get("CONF", "0.25")),
         include_classes=json.loads(os.environ.get("INCLUDE_CLASSES", '["plant","plants"]')),
         engine=os.environ.get("ENGINE", "yolo"),
+        model=os.environ.get("MODEL") or None,
         sam3_prompt=os.environ.get("SAM3_PROMPT", "plant"),
     )
     # Optional numeric tiling overrides (otherwise the service defaults + GSD
@@ -61,10 +62,14 @@ def _build_request() -> AsyncPlantDetectionRequest:
 
 def main():
     request = _build_request()
-    logger.info(f"[Job] loading model {WEIGHTS_PATH} for job {request.job_id} / ortho {request.orthomosaic_id}")
-    # The service loads the model in its ASGI lifespan, which a Job never runs —
-    # so populate app.state.model here, then reuse the shared pipeline verbatim.
-    app.state.model = YOLO(WEIGHTS_PATH)
+    # The service loads models in its ASGI lifespan, which a Job never runs — so
+    # populate app.state.models here (the handler's resolve_model reads it), then
+    # reuse the shared pipeline verbatim. Load only the requested model to keep
+    # the Job's startup fast; fall back to the default when unset/unknown.
+    want = request.model if request.model in MODELS else DEFAULT_MODEL
+    logger.info(f"[Job] loading model '{want}' ({MODELS[want]['path']}) for job {request.job_id} / ortho {request.orthomosaic_id}")
+    app.state.models = {want: YOLO(MODELS[want]["path"])}
+    app.state.model = app.state.models[want]
     asyncio.run(run_async_detection(request))
     logger.info(f"[Job] finished job {request.job_id}")
 

@@ -10,7 +10,8 @@
 #   gcloud billing projects link <PROJECT_ID> --billing-account=<BILLING_ID>
 #   gcloud config set project <PROJECT_ID>
 #
-# Also: drop the model at  docker/aruco-service/weights/plnt_v3.pt  before building.
+# Also: drop the model weights in  docker/aruco-service/weights/  before building
+# (plnt_v6.pt + plnt_1cm_v3.pt — see MODELS in app/main.py).
 #
 # Usage:  ./deploy.sh            (uses current gcloud project)
 #         PROJECT_ID=my-proj REGION=us-central1 ./deploy.sh
@@ -30,10 +31,12 @@ fi
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/aruco-service:${TAG}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ ! -f "${HERE}/weights/plnt_v3.pt" ]]; then
-  echo "ERROR: ${HERE}/weights/plnt_v3.pt is missing. Download best.pt and place it there first." >&2
-  exit 1
-fi
+for w in plnt_v6.pt plnt_1cm_v3.pt; do
+  if [[ ! -f "${HERE}/weights/${w}" ]]; then
+    echo "ERROR: ${HERE}/weights/${w} is missing. Place all model weights there first." >&2
+    exit 1
+  fi
+done
 
 echo ">> Project: ${PROJECT_ID}   Region: ${REGION}   Image: ${IMAGE}"
 

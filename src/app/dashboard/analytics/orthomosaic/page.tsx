@@ -183,6 +183,13 @@ export default function OrthomosaicViewerPage() {
   } | null>(null)
   // 0.25 is the validated plnt_v3 operating point; users can still adjust the slider.
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.25)
+  // Which plant-detection model to run. plnt_v6 is the 2 cm/px general model;
+  // plnt_1cm_v3 is validated at 1 cm/px (the service scales tiling per model).
+  const PLANT_MODELS = [
+    { value: 'plnt_v6', label: 'plnt_v6 — general (2 cm/px)' },
+    { value: 'plnt_1cm_v3', label: 'plnt_1cm_v3 — high-res (1 cm/px)' },
+  ]
+  const [plantModel, setPlantModel] = useState('plnt_v6')
   const [detectionProgress, setDetectionProgress] = useState<{
     processedTiles: number
     totalTiles: number
@@ -777,6 +784,7 @@ export default function OrthomosaicViewerPage() {
         body: JSON.stringify({
           orthomosaicId: selectedOrthomosaic.id,
           confidence_threshold: confidenceThreshold,
+          model: plantModel,
         }),
       })
 
@@ -2300,6 +2308,26 @@ export default function OrthomosaicViewerPage() {
                 <div className="mt-4 p-4 bg-gray-50 rounded-lg border">
                   <h4 className="font-medium mb-3">Detection Settings</h4>
                   <div className="space-y-3">
+                    <div>
+                      <label className="text-sm text-gray-600 block mb-1" htmlFor="plant-model">
+                        Model
+                      </label>
+                      <select
+                        id="plant-model"
+                        value={plantModel}
+                        onChange={(e) => setPlantModel(e.target.value)}
+                        className="w-full max-w-xs text-sm bg-white border rounded px-2 py-1.5"
+                      >
+                        {PLANT_MODELS.map((m) => (
+                          <option key={m.value} value={m.value}>
+                            {m.label}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Tiling auto-scales to each model’s resolution.
+                      </p>
+                    </div>
                     <div>
                       <label className="text-sm text-gray-600 block mb-1">
                         Confidence Threshold: {(confidenceThreshold * 100).toFixed(0)}%

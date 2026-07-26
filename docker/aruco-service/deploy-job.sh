@@ -29,6 +29,9 @@ SUPABASE_URL="${SUPABASE_URL:-${NEXT_PUBLIC_SUPABASE_URL:-}}"
 SUPABASE_SERVICE_KEY="${SUPABASE_SERVICE_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}"
 : "${SUPABASE_URL:?set NEXT_PUBLIC_SUPABASE_URL}"
 : "${SUPABASE_SERVICE_KEY:?set SUPABASE_SERVICE_ROLE_KEY}"
+# Optional — enables the SAM 3 engine (Roboflow hosted PCS) in the Job.
+ROBOFLOW_ENV=""
+[ -n "${ROBOFLOW_API_KEY:-}" ] && ROBOFLOW_ENV=",ROBOFLOW_API_KEY=${ROBOFLOW_API_KEY}"
 
 # `create` is not idempotent — update in place if the job already exists.
 CMD=create
@@ -43,7 +46,7 @@ gcloud run jobs ${CMD} "${JOB}" \
   --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \
   --max-retries 0 --task-timeout 3600 --parallelism 1 --tasks 1 \
   --command python --args="-m,app.job_runner" \
-  --set-env-vars "WEIGHTS_PATH=/app/weights/plnt_v3.pt,SUPABASE_URL=${SUPABASE_URL},SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}"
+  --set-env-vars "SUPABASE_URL=${SUPABASE_URL},SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}${ROBOFLOW_ENV}"
 
 echo ">> Done. Execute per-ortho with (^@^ delimiter keeps commas in BOUNDS intact):"
 echo "   gcloud run jobs execute ${JOB} --region ${REGION} --async \\"
