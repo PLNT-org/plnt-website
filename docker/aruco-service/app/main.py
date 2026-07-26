@@ -41,8 +41,28 @@ from .plant_detection import detect_plants_local, scale_for_gsd
 
 from ultralytics import YOLO
 
-# Path to the bundled plnt_v3 weights (override with WEIGHTS_PATH env var)
-WEIGHTS_PATH = os.environ.get("WEIGHTS_PATH", "/app/weights/plnt_v3.pt")
+# Selectable plant-detection models. Each has its own validated operating point
+# (ref_gsd_cm) — the GSD detection scales every ortho to before tiling — so a
+# model trained at 1 cm/px isn't fed 2 cm-downscaled tiles. All are bundled in
+# the image and loaded once at boot; the request's `model` field picks one.
+MODELS = {
+    "plnt_v6": {"path": "/app/weights/plnt_v6.pt", "ref_gsd_cm": 2.0},
+    "plnt_1cm_v3": {"path": "/app/weights/plnt_1cm_v3.pt", "ref_gsd_cm": 1.0},
+}
+DEFAULT_MODEL = "plnt_v6"
+
+# Back-compat: WEIGHTS_PATH still overrides the default model's weights path (the
+# Cloud Run Job's job_runner passes it), so an override keeps working.
+_env_weights = os.environ.get("WEIGHTS_PATH")
+if _env_weights:
+    MODELS[DEFAULT_MODEL] = {**MODELS[DEFAULT_MODEL], "path": _env_weights}
+
+
+def resolve_model(name):
+    """Return (model_name, YOLO model, ref_gsd_cm) for a requested model name,
+    falling back to the default when name is missing/unknown."""
+    key = name if name in MODELS else DEFAULT_MODEL
+    return key, app.state.models[key], MODELS[key]["ref_gsd_cm"]
 
 
 # Configure logging
@@ -59,10 +79,14 @@ async def lifespan(app: FastAPI):
     logger.info("ArUco Detection Service starting up")
     logger.info(f"OpenCV version: {cv2.__version__}")
     logger.info(f"Rasterio version: {rasterio.__version__}")
-    # Load the plant-detection model once at boot (not per request).
-    logger.info(f"Loading plant detection model: {WEIGHTS_PATH}")
-    app.state.model = YOLO(WEIGHTS_PATH)
-    logger.info("Plant detection model loaded")
+    # Load every selectable model once at boot (not per request), keyed by name.
+    app.state.models = {}
+    for name, cfg in MODELS.items():
+        logger.info(f"Loading plant detection model '{name}': {cfg['path']}")
+        app.state.models[name] = YOLO(cfg["path"])
+    # Back-compat alias for anything still reading app.state.model.
+    app.state.model = app.state.models[DEFAULT_MODEL]
+    logger.info(f"Loaded {len(app.state.models)} model(s): {', '.join(app.state.models)}")
     yield
     logger.info("ArUco Detection Service shutting down")
 
@@ -268,20 +292,22 @@ async def detect_plants_endpoint(request: PlantDetectionRequest):
             yield json.dumps({"type": "status", "message": "Opening orthomosaic..."}) + "\n"
             with rasterio.open(temp_file) as src:
                 reader, width, height, transform, crs = make_tile_reader(src)
-                # Scale the tiling to the source resolution so plnt_v3 runs at its
-                # validated ~2 cm/px operating point regardless of ortho GSD.
+                # Pick the model and scale the tiling to its validated operating
+                # point (each model has its own ref GSD) regardless of ortho GSD.
+                model_name, model, ref_gsd = resolve_model(getattr(request, "model", None))
                 gsd_cm = geotiff_gsd_cm(src)
-                sc = scale_for_gsd(gsd_cm)
+                sc = scale_for_gsd(gsd_cm, ref_gsd)
                 tw, th = round(request.tile_width * sc), round(request.tile_height * sc)
                 ox, oy = round(request.overlap_x * sc), round(request.overlap_y * sc)
                 rd = max(1, round(request.r_dedup * sc))
                 logger.info(f"Image: {width}x{height}, CRS: {crs}, dtype={src.dtypes[0]}, "
+                            f"model={model_name} (ref {ref_gsd} cm/px), "
                             f"GSD={gsd_cm and round(gsd_cm, 2)} cm/px, scale={round(sc, 2)} "
                             f"-> tile={tw}, overlap={ox}, r_dedup={rd}")
 
                 # Shared tiling -> inference -> dedup -> georeference pipeline
                 async for event in detect_plants_local(
-                    app.state.model,
+                    model,
                     reader,
                     width,
                     height,
@@ -359,21 +385,23 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
         progress_stride = max(1, request.concurrent_tiles * 5)
         with rasterio.open(temp_file) as src:
             reader, width, height, transform, crs = make_tile_reader(src)
-            # Scale the tiling to the source resolution so plnt_v3 runs at its
-            # validated ~2 cm/px operating point regardless of ortho GSD.
+            # Pick the model and scale the tiling to its validated operating point
+            # (each model has its own ref GSD) regardless of ortho GSD.
+            model_name, model, ref_gsd = resolve_model(getattr(request, "model", None))
             gsd_cm = geotiff_gsd_cm(src)
-            sc = scale_for_gsd(gsd_cm)
+            sc = scale_for_gsd(gsd_cm, ref_gsd)
             tw, th = round(request.tile_width * sc), round(request.tile_height * sc)
             ox, oy = round(request.overlap_x * sc), round(request.overlap_y * sc)
             rd = max(1, round(request.r_dedup * sc))
             logger.info(f"[AsyncDetect] Image: {width}x{height}, CRS: {crs}, dtype={src.dtypes[0]}, "
+                        f"model={model_name} (ref {ref_gsd} cm/px), "
                         f"GSD={gsd_cm and round(gsd_cm, 2)} cm/px, scale={round(sc, 2)} "
                         f"-> tile={tw}, overlap={ox}, r_dedup={rd}")
 
             # Shared tiling -> inference -> dedup -> georeference pipeline.
             # Throttle Supabase progress writes so we don't hammer the DB.
             async for event in detect_plants_local(
-                app.state.model,
+                model,
                 reader,
                 width,
                 height,

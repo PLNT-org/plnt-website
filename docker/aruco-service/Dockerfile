@@ -1,5 +1,5 @@
 # ArUco + plant-detection service
-# CUDA-enabled PyTorch base so plnt_v3 (YOLOv11-seg) runs on GPU.
+# CUDA-enabled PyTorch base so plnt models (YOLOv11-seg) run on GPU.
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 # System dependencies:
@@ -30,8 +30,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app/ ./app/
 
-# Bundle the model into the image — fetching at runtime would slow cold starts.
-COPY weights/plnt_v3.pt /app/weights/plnt_v3.pt
+# Bundle the models into the image — fetching at runtime would slow cold starts.
+# Copies every .pt in weights/ (plnt_v6, plnt_1cm_v3); the service loads them by
+# name (see MODELS in app/main.py).
+COPY weights/ /app/weights/
 
 # Expose port (kept at 8001 to match ARUCO_SERVICE_URL across the app;
 # deploy to Cloud Run with `--port 8001`).

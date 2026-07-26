@@ -20,23 +20,24 @@ EMPTY_TILE_THRESHOLD = 0.9
 # recall depends on running at 1280 (the validated operating point for plnt_v3).
 INFER_IMGSZ = 1280
 
-# plnt_v3's tiling operating point (640 px tiles / 64 px overlap / R=22 dedup) was
-# validated at ~2 cm/px. On a finer ortho, plants span more pixels and a fixed
-# 640 tile covers less ground, so both the tile geometry AND the dedup radius must
-# grow with resolution to keep the model seeing plants at the same effective size.
-# scale = REF_GSD_CM / gsd reproduces the operating point at any GSD (imgsz stays
-# 1280). We only scale UP (finer orthos); at >= 2 cm/px scale is 1.0 so existing
-# orthos are byte-for-byte unchanged. Capped so an extremely fine ortho can't
-# explode tile sizes.
-REF_GSD_CM = 2.0
+# A model's tiling operating point (640 px tiles / 64 px overlap / R=22 dedup) is
+# validated at a specific GSD (ref_gsd_cm). On a finer ortho, plants span more
+# pixels and a fixed 640 tile covers less ground, so both the tile geometry AND
+# the dedup radius must grow with resolution to keep the model seeing plants at
+# the same effective size. scale = ref_gsd_cm / gsd reproduces the operating
+# point at any GSD (imgsz stays 1280). We only scale UP (finer orthos); at the
+# model's ref GSD or coarser, scale is 1.0. Capped so an extremely fine ortho
+# can't explode tile sizes. Each model carries its own ref (e.g. plnt_v6 -> 2 cm,
+# plnt_1cm_v3 -> 1 cm), so a 1 cm model isn't fed 2 cm-downscaled tiles.
+DEFAULT_REF_GSD_CM = 2.0
 MAX_TILING_SCALE = 4.0
 
 
-def scale_for_gsd(gsd_cm: float | None) -> float:
-    """Tiling scale factor for a source GSD (cm/px). 1.0 for >= 2 cm/px."""
+def scale_for_gsd(gsd_cm: float | None, ref_gsd_cm: float = DEFAULT_REF_GSD_CM) -> float:
+    """Tiling scale factor for a source GSD (cm/px) vs the model's ref GSD."""
     if not gsd_cm or gsd_cm <= 0:
         return 1.0
-    return max(1.0, min(MAX_TILING_SCALE, REF_GSD_CM / gsd_cm))
+    return max(1.0, min(MAX_TILING_SCALE, ref_gsd_cm / gsd_cm))
 
 
 def pixels_to_wgs84(transform, crs, pixel_xs, pixel_ys):

@@ -128,6 +128,7 @@ class PlantDetectionRequest(BaseModel):
     concurrent_tiles: int = Field(default=20, description="Tiles between streamed progress updates")
     nms_iou_threshold: Optional[float] = Field(default=None, description="DEPRECATED: ignored (centroid dedup replaced IoU-NMS)")
     bounds: dict = Field(..., description="Orthomosaic bounds {west, south, east, north}")
+    model: Optional[str] = Field(default=None, description="Model name (e.g. plnt_v6, plnt_1cm_v3); default model if unset/unknown")
 
 
 class AsyncPlantDetectionRequest(BaseModel):
@@ -153,6 +154,9 @@ class AsyncPlantDetectionRequest(BaseModel):
     # Roboflow hosted PCS). SAM 3 results store under source="sam3", leaving the
     # YOLO source="ai" labels untouched for side-by-side comparison.
     engine: str = Field(default="yolo")
+    # Which YOLO model to run (ignored when engine="sam3"): plnt_v6 (2 cm/px,
+    # default) or plnt_1cm_v3 (1 cm/px). Unknown/unset falls back to the default.
+    model: Optional[str] = Field(default=None)
     sam3_prompt: str = Field(default="plant", description="Concept prompt for SAM 3 PCS")
     region: Optional[list] = Field(
         default=None,

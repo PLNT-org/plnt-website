@@ -17,6 +17,12 @@ const GCP_PROJECT_NUMBER = process.env.GCP_PROJECT_NUMBER
 const GCP_REGION = process.env.GCP_REGION || 'us-central1'
 const DETECTION_JOB_NAME = process.env.DETECTION_JOB_NAME || 'plnt-detect-job'
 
+// Selectable YOLO models (must match MODELS in the detection service). The
+// service falls back to its default on an unknown name, but we validate here so
+// a typo surfaces as a clear 400 instead of silently running the wrong model.
+const YOLO_MODELS = ['plnt_v6', 'plnt_1cm_v3'] as const
+const DEFAULT_YOLO_MODEL = 'plnt_v6'
+
 async function runDetectionJob(params: {
   jobRowId: string
   geotiffUrl: string
@@ -25,6 +31,7 @@ async function runDetectionJob(params: {
   userId: string
   confidence_threshold: number
   include_classes: string[]
+  model: string
 }) {
   const accessToken = await getArucoAccessToken()
   if (!accessToken || !GCP_PROJECT_NUMBER) {
@@ -39,9 +46,9 @@ async function runDetectionJob(params: {
     { name: 'ORTHO_ID', value: params.orthomosaicId },
     { name: 'USER_ID', value: params.userId },
     { name: 'ENGINE', value: 'yolo' },
+    { name: 'MODEL', value: params.model },
     { name: 'CONF', value: String(params.confidence_threshold) },
     { name: 'INCLUDE_CLASSES', value: JSON.stringify(params.include_classes) },
-    { name: 'WEIGHTS_PATH', value: '/app/weights/plnt_v3.pt' },
     { name: 'SUPABASE_URL', value: process.env.NEXT_PUBLIC_SUPABASE_URL || '' },
     { name: 'SUPABASE_SERVICE_KEY', value: process.env.SUPABASE_SERVICE_ROLE_KEY || '' },
   ]
@@ -67,6 +74,7 @@ export async function POST(request: NextRequest) {
     confidence_threshold = 0.25,
     include_classes = ['plant', 'plants'],
     engine = 'yolo',
+    model = DEFAULT_YOLO_MODEL,
     sam3_prompt = 'plant',
     region = null,
   } = body
@@ -77,6 +85,13 @@ export async function POST(request: NextRequest) {
 
   if (engine !== 'yolo' && engine !== 'sam3') {
     return NextResponse.json({ error: "engine must be 'yolo' or 'sam3'" }, { status: 400 })
+  }
+
+  if (engine === 'yolo' && !YOLO_MODELS.includes(model)) {
+    return NextResponse.json(
+      { error: `model must be one of: ${YOLO_MODELS.join(', ')}` },
+      { status: 400 }
+    )
   }
 
   const ownershipError = await verifyOrthomosaicOwnership(supabase, orthomosaicId, user.id, isAdmin)
@@ -119,7 +134,7 @@ export async function POST(request: NextRequest) {
       user_id: user.id,
       method,
       status: 'pending',
-      config: { confidence_threshold, include_classes, engine },
+      config: { confidence_threshold, include_classes, engine, model: engine === 'yolo' ? model : undefined },
     })
     .select()
     .single()
@@ -149,6 +164,7 @@ export async function POST(request: NextRequest) {
       userId: user.id,
       confidence_threshold,
       include_classes,
+      model,
     }).catch(markFailed('Failed to start detection job'))
   } else {
     fetch(`${ARUCO_SERVICE_URL}/detect-plants-async`, {
@@ -165,6 +181,7 @@ export async function POST(request: NextRequest) {
         supabase_url: process.env.NEXT_PUBLIC_SUPABASE_URL,
         supabase_service_key: process.env.SUPABASE_SERVICE_ROLE_KEY,
         engine,
+        model,
         sam3_prompt,
         region,
       }),
