@@ -111,8 +111,9 @@ export async function POST(request: NextRequest) {
         hasMore = false
       }
 
-      // Safety limit
-      if (labels.length >= 100000) {
+      // Runaway guard only (loop ends on a short batch); high enough to never
+      // truncate a real ortho's labels.
+      if (labels.length >= 5_000_000) {
         hasMore = false
       }
     }

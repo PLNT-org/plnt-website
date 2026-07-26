@@ -151,6 +151,10 @@ export default function OrthomosaicMap({
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const orthophotoLayerRef = useRef<L.TileLayer | null>(null)
   const markersLayerRef = useRef<L.LayerGroup | null>(null)
+  // Shared canvas renderer for plant-label dots. Drawing 100k+ labels on one
+  // canvas (rather than an SVG/DOM element each) keeps the viewer responsive at
+  // full detection scale — the same approach the gated share uses.
+  const markersCanvasRef = useRef<L.Canvas | null>(null)
   const arucoLayerRef = useRef<L.LayerGroup | null>(null)
   const plotsLayerRef = useRef<L.LayerGroup | null>(null)
   const boundaryLayerRef = useRef<L.LayerGroup | null>(null)
@@ -276,9 +280,10 @@ export default function OrthomosaicMap({
     const plotsLayer = L.layerGroup().addTo(map)
     plotsLayerRef.current = plotsLayer
 
-    // Markers layer
+    // Markers layer + a dedicated canvas renderer for the label dots.
     const markersLayer = L.layerGroup().addTo(map)
     markersLayerRef.current = markersLayer
+    markersCanvasRef.current = L.canvas({ padding: 0.5 })
 
     // ArUco markers layer
     const arucoLayer = L.layerGroup().addTo(map)
@@ -301,6 +306,7 @@ export default function OrthomosaicMap({
       mapRef.current = null
       orthophotoLayerRef.current = null
       markersLayerRef.current = null
+      markersCanvasRef.current = null
       arucoLayerRef.current = null
       plotsLayerRef.current = null
     }
@@ -349,20 +355,9 @@ export default function OrthomosaicMap({
 
     if (!showLabels) return
 
-    labels.forEach((label) => {
-      // Color by detection source so YOLO and SAM 3 counts are distinguishable:
-      // SAM 3 (Roboflow) = amber, YOLO/manual = green. White perimeter throughout.
-      const fillColor = label.source === 'sam3' ? '#f59e0b' : '#22c55e'
-      const marker = L.circleMarker([label.latitude, label.longitude], {
-        radius: 4,
-        fillColor,
-        fillOpacity: 1,
-        color: '#ffffff',
-        weight: 1,
-        opacity: 1,
-      })
-
-      const popupContent = `
+    // Build the popup HTML only when a dot is actually clicked (lazy), so we
+    // don't eagerly assemble 100k+ HTML strings just to render the dots.
+    const buildPopup = (label: PlantLabel) => `
         <div style="min-width: 150px;">
           <div style="font-weight: bold; margin-bottom: 4px;">
             ${label.label.charAt(0).toUpperCase() + label.label.slice(1)}
@@ -397,7 +392,22 @@ export default function OrthomosaicMap({
         </div>
       `
 
-      marker.bindPopup(popupContent)
+    const renderer = markersCanvasRef.current ?? undefined
+    labels.forEach((label) => {
+      // Color by detection source so YOLO and SAM 3 counts are distinguishable:
+      // SAM 3 (Roboflow) = amber, YOLO/manual = green. White perimeter throughout.
+      const fillColor = label.source === 'sam3' ? '#f59e0b' : '#22c55e'
+      const marker = L.circleMarker([label.latitude, label.longitude], {
+        renderer, // draw on the shared canvas, not a DOM element per dot
+        radius: 4,
+        fillColor,
+        fillOpacity: 1,
+        color: '#ffffff',
+        weight: 1,
+        opacity: 1,
+      })
+
+      marker.bindPopup(() => buildPopup(label))
       markersLayerRef.current?.addLayer(marker)
     })
   }, [labels, showLabels])

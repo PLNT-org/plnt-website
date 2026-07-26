@@ -70,8 +70,11 @@ export async function GET(request: NextRequest) {
         hasMore = false
       }
 
-      // Safety limit to prevent infinite loops
-      if (allLabels.length >= 100000) {
+      // Runaway guard only (loop already ends when a short batch arrives). Set
+      // far above any real ortho so we never silently truncate the labels — a
+      // dense high-res ortho can exceed 160k detections.
+      if (allLabels.length >= 5_000_000) {
+        console.warn(`[plant-labels] hit 5M safety limit for ortho ${orthomosaicId}`)
         hasMore = false
       }
     }
