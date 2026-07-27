@@ -54,7 +54,30 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ edits: rows.map(toClientEdit) })
 }
 
-// POST — record one correction. Body: { flightKey, kind: 'add'|'remove', lat, lng, email? }
+// Every 'remove' edit already on this share+flight, keyed by rounded lat/lng.
+// Paged past PostgREST's 1000-row cap for the same reason GET is.
+async function existingRemoveKeys(shareId: string, flightKey: string): Promise<Set<string>> {
+  const PAGE = 1000
+  const keys = new Set<string>()
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabaseAdmin
+      .from('share_point_edits')
+      .select('lat, lng')
+      .eq('share_id', shareId)
+      .eq('flight_key', flightKey)
+      .eq('kind', 'remove')
+      .range(from, from + PAGE - 1)
+    if (error || !data || data.length === 0) break
+    for (const r of data) keys.add(`${round6(r.lat)},${round6(r.lng)}`)
+    if (data.length < PAGE) break
+  }
+  return keys
+}
+
+// POST — record corrections. Either one point:
+//   { flightKey, kind: 'add'|'remove', lat, lng, email? }
+// or a batch (area-erase on the viewer map):
+//   { flightKey, kind: 'remove', points: [{ lat, lng }, ...], email? }
 export async function POST(request: NextRequest) {
   const shareId = shareIdFromRequest(request)
   if (!shareId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -65,6 +88,8 @@ export async function POST(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
   }
+
+  if (Array.isArray(body?.points)) return bulkRemove(shareId, body)
 
   const kind = body?.kind
   if (kind !== 'add' && kind !== 'remove') {
@@ -104,13 +129,55 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ edit: toClientEdit(data) })
 }
 
-// DELETE — undo. Either one edit (?id=) or all edits for a flight (?all=1&flight=).
+// Record a 'remove' for every detected dot the viewer erased with the area tool.
+// Points already removed are skipped (a second 'remove' would double-decrement
+// the count), and the insert is chunked so a large area doesn't blow the request.
+async function bulkRemove(shareId: string, body: any) {
+  if (body.kind !== 'remove') {
+    return NextResponse.json({ error: "Batched edits must use kind 'remove'." }, { status: 400 })
+  }
+  const flightKey = typeof body.flightKey === 'string' ? body.flightKey : ''
+  const email =
+    typeof body.email === 'string' && body.email.includes('@') ? body.email.trim().toLowerCase() : null
+
+  const seen = await existingRemoveKeys(shareId, flightKey)
+  const rows: { share_id: string; flight_key: string; kind: string; lat: number; lng: number; created_by_email: string | null }[] = []
+  for (const p of body.points) {
+    if (typeof p?.lat !== 'number' || typeof p?.lng !== 'number') continue
+    const lat = round6(p.lat)
+    const lng = round6(p.lng)
+    const key = `${lat},${lng}`
+    if (seen.has(key)) continue // already removed (or a duplicate within this batch)
+    seen.add(key)
+    rows.push({ share_id: shareId, flight_key: flightKey, kind: 'remove', lat, lng, created_by_email: email })
+  }
+  if (rows.length === 0) return NextResponse.json({ edits: [] })
+
+  const CHUNK = 500
+  const edits: any[] = []
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const { data, error } = await supabaseAdmin
+      .from('share_point_edits')
+      .insert(rows.slice(i, i + CHUNK))
+      .select('id, kind, lat, lng')
+    if (error) {
+      // Report what did land so the client's state stays in sync with the DB.
+      return NextResponse.json({ error: error.message, edits: edits.map(toClientEdit) }, { status: 500 })
+    }
+    if (data) edits.push(...data)
+  }
+  return NextResponse.json({ edits: edits.map(toClientEdit) })
+}
+
+// DELETE — undo. One edit (?id=), a batch (?ids=a,b,c), or all edits for a
+// flight (?all=1&flight=).
 export async function DELETE(request: NextRequest) {
   const shareId = shareIdFromRequest(request)
   if (!shareId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const params = request.nextUrl.searchParams
   const id = params.get('id')
+  const ids = params.get('ids')
   const all = params.get('all')
 
   if (all === '1') {
@@ -124,7 +191,23 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ ok: true })
   }
 
-  if (!id) return NextResponse.json({ error: 'An edit id (or all=1) is required.' }, { status: 400 })
+  // Batched undo — the area tool erasing viewer-added plants.
+  if (ids) {
+    const list = ids.split(',').map((s) => s.trim()).filter(Boolean)
+    if (list.length === 0) return NextResponse.json({ error: 'No edit ids given.' }, { status: 400 })
+    const CHUNK = 200
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const { error } = await supabaseAdmin
+        .from('share_point_edits')
+        .delete()
+        .in('id', list.slice(i, i + CHUNK))
+        .eq('share_id', shareId) // never let one share delete another's edits
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+    return NextResponse.json({ ok: true })
+  }
+
+  if (!id) return NextResponse.json({ error: 'An edit id (or ids=/all=1) is required.' }, { status: 400 })
 
   const { error } = await supabaseAdmin
     .from('share_point_edits')
