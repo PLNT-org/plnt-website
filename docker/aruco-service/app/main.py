@@ -46,6 +46,7 @@ from ultralytics import YOLO
 # model trained at 1 cm/px isn't fed 2 cm-downscaled tiles. All are bundled in
 # the image and loaded once at boot; the request's `model` field picks one.
 MODELS = {
+    "plnt_v3": {"path": "/app/weights/plnt_v3.pt", "ref_gsd_cm": 2.0},
     "plnt_v6": {"path": "/app/weights/plnt_v6.pt", "ref_gsd_cm": 2.0},
     "plnt_1cm_v3": {"path": "/app/weights/plnt_1cm_v3.pt", "ref_gsd_cm": 1.0},
 }
@@ -59,10 +60,16 @@ if _env_weights:
 
 
 def resolve_model(name):
-    """Return (model_name, YOLO model, ref_gsd_cm) for a requested model name,
-    falling back to the default when name is missing/unknown."""
-    key = name if name in MODELS else DEFAULT_MODEL
-    return key, app.state.models[key], MODELS[key]["ref_gsd_cm"]
+    """Return (model_name, YOLO model, ref_gsd_cm) for a requested model name.
+
+    Falls back to the default when the name is missing/unknown, and again to any
+    loaded model if the default's weights weren't bundled in this image — boot
+    only loads the .pt files that are actually present (see lifespan)."""
+    loaded = app.state.models
+    key = name if name in loaded else DEFAULT_MODEL
+    if key not in loaded:
+        key = next(iter(loaded))
+    return key, loaded[key], MODELS[key]["ref_gsd_cm"]
 
 
 # Configure logging
@@ -80,12 +87,22 @@ async def lifespan(app: FastAPI):
     logger.info(f"OpenCV version: {cv2.__version__}")
     logger.info(f"Rasterio version: {rasterio.__version__}")
     # Load every selectable model once at boot (not per request), keyed by name.
+    # A model whose .pt wasn't bundled is skipped rather than fatal, so an image
+    # built without one weight still serves the others (resolve_model falls back).
     app.state.models = {}
     for name, cfg in MODELS.items():
+        if not os.path.exists(cfg["path"]):
+            logger.warning(f"Model '{name}' weights not found at {cfg['path']} — skipping")
+            continue
         logger.info(f"Loading plant detection model '{name}': {cfg['path']}")
         app.state.models[name] = YOLO(cfg["path"])
+    if not app.state.models:
+        raise RuntimeError(
+            f"No plant-detection weights found. Expected at least one of: "
+            f"{', '.join(c['path'] for c in MODELS.values())}"
+        )
     # Back-compat alias for anything still reading app.state.model.
-    app.state.model = app.state.models[DEFAULT_MODEL]
+    app.state.model = app.state.models.get(DEFAULT_MODEL) or next(iter(app.state.models.values()))
     logger.info(f"Loaded {len(app.state.models)} model(s): {', '.join(app.state.models)}")
     yield
     logger.info("ArUco Detection Service shutting down")
@@ -458,11 +475,13 @@ async def run_async_detection(request: AsyncPlantDetectionRequest):
             "updated_at": "now()",
         })
 
-        # Store under a source that reflects the engine, so SAM 3 results sit
-        # ALONGSIDE the YOLO ones ("ai") rather than replacing them. Each engine
-        # only clears its own prior labels for this ortho.
+        # Store under a source that reflects the engine, so the provenance of a
+        # count is visible — but clear EVERY machine source first, so an ortho
+        # only ever holds one engine's detections. Running SAM 3 after YOLO (or
+        # vice versa) replaces the count rather than stacking a second set on
+        # top of it, which is what produced double-counted plants downstream.
         label_source = "sam3" if request.engine == "sam3" else "ai"
-        await sb.delete_labels_by_source(request.orthomosaic_id, label_source)
+        await sb.delete_machine_labels(request.orthomosaic_id)
 
         # Insert new labels
         labels = [{

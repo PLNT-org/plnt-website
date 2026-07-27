@@ -32,14 +32,29 @@ class SupabaseClient:
                 logger.error(f"Failed to update job {job_id}: {res.status_code} {res.text[:200]}")
 
     async def delete_labels_by_source(self, orthomosaic_id: str, source: str):
-        """Delete existing labels for an orthomosaic from one source only.
-
-        Scoping by source lets a SAM 3 (source='sam3') run replace its own prior
-        results without touching the YOLO (source='ai') set, and vice versa.
-        """
+        """Delete existing labels for an orthomosaic from one source only."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.delete(
                 f"{self.base_url}/plant_labels?orthomosaic_id=eq.{orthomosaic_id}&source=eq.{source}",
+                headers=self.headers,
+            )
+            if res.status_code >= 400:
+                logger.error(f"Failed to delete labels: {res.status_code} {res.text[:200]}")
+
+    async def delete_machine_labels(self, orthomosaic_id: str):
+        """Delete every machine-generated label (YOLO 'ai' AND SAM 3 'sam3') for
+        an orthomosaic, leaving human 'manual' labels alone.
+
+        One engine's output at a time is the invariant: a detection run replaces
+        whatever the previous run left behind, whichever engine produced it. If
+        each engine only cleared its own source, an ortho counted by both would
+        carry two overlapping sets — and the viewer and the gated-share export
+        both read all sources, so every plant would be dotted and counted twice.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.delete(
+                f"{self.base_url}/plant_labels"
+                f"?orthomosaic_id=eq.{orthomosaic_id}&source=in.(ai,sam3)",
                 headers=self.headers,
             )
             if res.status_code >= 400:
