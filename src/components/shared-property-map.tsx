@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
 
@@ -76,6 +76,23 @@ const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales b
 type PointEdit = { id: string; kind: 'add' | 'remove'; lat: number; lng: number }
 // Round to 6 decimals to match points.json, so a 'remove' keys to the exact dot.
 const ptKey = (lat: number, lng: number) => `${lat.toFixed(6)},${lng.toFixed(6)}`
+
+// Multi-select erase: drag a box, or click out a free-form lasso. `null` is the
+// original one-click-per-plant tool.
+type EraseTool = 'rect' | 'lasso' | null
+// A finished erase shape, awaiting confirmation. `detected` are model dots that
+// get a 'remove' edit; `addIds` are viewer-added plants, undone by deleting them.
+type AreaSelection = {
+  ring: number[][] // [[lng, lat], ...] closed
+  detected: { lat: number; lng: number }[]
+  addIds: string[]
+}
+const ERASE_COLOR = '#ef4444'
+const ERASE_TOOLS: { key: EraseTool; label: string; title: string; Icon: typeof Square }[] = [
+  { key: null, label: 'Click', title: 'Add or remove one plant at a time', Icon: MousePointerClick },
+  { key: 'rect', label: 'Box', title: 'Drag a rectangle to remove every plant inside', Icon: Square },
+  { key: 'lasso', label: 'Lasso', title: 'Draw a polygon to remove every plant inside', Icon: Lasso },
+]
 
 // ColorBrewer RdYlGn (red = low/stressed, green = high/healthy) for NDVI.
 const RDYLGN: number[][] = [
@@ -294,6 +311,25 @@ export default function SharedPropertyMap({
   const skipNextMapClickRef = useRef(false)
   const addPointRef = useRef<(latlng: L.LatLng) => void>(() => {})
   const deletePointRef = useRef<(pt: { lat: number; lng: number; addId?: string }) => void>(() => {})
+
+  // ---- Area erase (drag a rectangle / draw a lasso to remove many at once) ----
+  // null = the one-at-a-time click tool, which stays the default.
+  const [eraseTool, setEraseTool] = useState<EraseTool>(null)
+  const eraseToolRef = useRef<EraseTool>(null)
+  // The finished shape, held for confirmation before anything is deleted.
+  const [areaSel, setAreaSel] = useState<AreaSelection | null>(null)
+  const [erasing, setErasing] = useState(false)
+  const [eraseError, setEraseError] = useState('')
+  // Temporary geometry drawn while selecting (rubber-band box / lasso vertices).
+  const eraseLayerRef = useRef<L.LayerGroup | null>(null)
+  const eraseVertsRef = useRef<L.LatLng[]>([])
+  // The confirmed-pending shape lives outside the scratch group so rebuilding
+  // the draw handlers can't wipe it while the confirmation is open.
+  const areaShapeRef = useRef<L.Polygon | null>(null)
+  const finishLassoRef = useRef<() => void>(() => {})
+  // Vertex count of the in-progress lasso — drives the Finish button (the only
+  // way to close a shape on touch, where there's no double/right click).
+  const [lassoVerts, setLassoVerts] = useState(0)
   const [panelOpen, setPanelOpen] = useState(() =>
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 640px)').matches
   )
@@ -395,6 +431,8 @@ export default function SharedPropertyMap({
       pointsCanvasRef.current = null
       plotsLayerRef.current = null
       highlightLayerRef.current = null
+      eraseLayerRef.current = null
+      areaShapeRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -547,7 +585,9 @@ export default function SharedPropertyMap({
         // In edit mode a dot is a click target (removes it); the handler reads
         // refs so we never rebuild the group just to toggle edit mode on/off.
         const onDotClick = (pt: { lat: number; lng: number; addId?: string }) => () => {
-          if (!editingCountRef.current) return
+          // An area tool owns the clicks while it's picked — one-at-a-time
+          // removal is the click tool's job.
+          if (!editingCountRef.current || eraseToolRef.current) return
           // Leaflet fires this marker click before the map click; flag it so the
           // same click doesn't also drop a new point (see the map-click handler).
           skipNextMapClickRef.current = true
@@ -665,10 +705,323 @@ export default function SharedPropertyMap({
     }
   }, [data.accessToken, token, flightKey, pointEdits.length])
 
+  // ---- Area erase: select many plants at once, then remove them in one go ----
+
+  // Wipe the temporary selection geometry (rubber-band box / lasso vertices).
+  const clearEraseGeometry = useCallback(() => {
+    eraseLayerRef.current?.clearLayers()
+    eraseVertsRef.current = []
+    setLassoVerts(0)
+  }, [])
+
+  // Turn a finished shape into a pending selection: which dots fall inside it.
+  // Nothing is deleted until the viewer confirms.
+  const selectArea = useCallback(
+    async (ring: number[][]) => {
+      setEraseError('')
+      let base = pointsDataRef.current
+      if (!base && rgbLayer?.pointsUrl) {
+        try {
+          const res = await fetch(rgbLayer.pointsUrl)
+          base = await res.json()
+          pointsDataRef.current = base
+        } catch {
+          /* fall through to the empty-selection message */
+        }
+      }
+      const removedKeys = new Set(
+        pointEdits.filter((e) => e.kind === 'remove').map((e) => ptKey(e.lat, e.lng))
+      )
+      const detected = (base ?? [])
+        .filter(([lat, lng]) => !removedKeys.has(ptKey(lat, lng)) && pointInRing(lng, lat, ring))
+        .map(([lat, lng]) => ({ lat, lng }))
+      const addIds = pointEdits
+        .filter((e) => e.kind === 'add' && pointInRing(e.lng, e.lat, ring))
+        .map((e) => e.id)
+
+      if (detected.length === 0 && addIds.length === 0) {
+        clearEraseGeometry()
+        setEraseError('No plants inside that area.')
+        return
+      }
+      // Keep the shape on screen while the confirmation is open.
+      clearEraseGeometry()
+      const map = mapRef.current
+      areaShapeRef.current?.remove()
+      areaShapeRef.current = null
+      if (map) {
+        areaShapeRef.current = L.polygon(
+          ring.map(([lng, lat]) => [lat, lng] as [number, number]),
+          { color: ERASE_COLOR, weight: 2, fillColor: ERASE_COLOR, fillOpacity: 0.15 }
+        ).addTo(map)
+      }
+      setAreaSel({ ring, detected, addIds })
+    },
+    [rgbLayer, pointEdits, clearEraseGeometry]
+  )
+
+  const cancelAreaSel = useCallback(() => {
+    clearEraseGeometry()
+    areaShapeRef.current?.remove()
+    areaShapeRef.current = null
+    setAreaSel(null)
+    setEraseError('')
+  }, [clearEraseGeometry])
+
+  // Apply the pending selection: undo viewer-added plants by id, and record a
+  // 'remove' for every detected dot inside the shape. Both are chunked so a
+  // big area stays within one sane request each.
+  const confirmAreaErase = useCallback(async () => {
+    if (!areaSel || !data.accessToken) return
+    const k = encodeURIComponent(data.accessToken)
+    setErasing(true)
+    setEraseError('')
+    try {
+      if (areaSel.addIds.length > 0) {
+        const CHUNK = 200
+        const done: string[] = []
+        for (let i = 0; i < areaSel.addIds.length; i += CHUNK) {
+          const slice = areaSel.addIds.slice(i, i + CHUNK)
+          const res = await fetch(
+            `/api/share/${token}/points?k=${k}&ids=${encodeURIComponent(slice.join(','))}`,
+            { method: 'DELETE' }
+          )
+          if (!res.ok) throw new Error('delete failed')
+          done.push(...slice)
+        }
+        const gone = new Set(done)
+        setPointEdits((p) => p.filter((e) => !gone.has(e.id)))
+      }
+
+      if (areaSel.detected.length > 0) {
+        const CHUNK = 2000
+        for (let i = 0; i < areaSel.detected.length; i += CHUNK) {
+          const res = await fetch(`/api/share/${token}/points?k=${k}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              flightKey: flightKey ?? '',
+              kind: 'remove',
+              points: areaSel.detected.slice(i, i + CHUNK),
+              email: viewerEmail,
+            }),
+          })
+          const body = await res.json().catch(() => null)
+          // Merge whatever landed, even on a partial failure, so the on-screen
+          // count matches what's actually saved.
+          if (body && Array.isArray(body.edits) && body.edits.length > 0) {
+            setPointEdits((p) => {
+              const have = new Set(p.map((e) => e.id))
+              return [...p, ...body.edits.filter((e: PointEdit) => !have.has(e.id))]
+            })
+          }
+          if (!res.ok) throw new Error('bulk remove failed')
+        }
+      }
+
+      clearEraseGeometry()
+      areaShapeRef.current?.remove()
+      areaShapeRef.current = null
+      setAreaSel(null)
+    } catch {
+      setEraseError('Could not remove all of those plants. Please try again.')
+    } finally {
+      setErasing(false)
+    }
+  }, [areaSel, data.accessToken, token, flightKey, viewerEmail, clearEraseGeometry])
+
+  // Drag a box / click out a lasso while an area tool is picked. Skipped while a
+  // selection is awaiting confirmation, so the shape on screen can't drift.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !editingCount || !eraseTool || areaSel) return
+    if (!eraseLayerRef.current) eraseLayerRef.current = L.layerGroup().addTo(map)
+    const group = eraseLayerRef.current
+    const el = map.getContainer()
+    el.style.cursor = 'crosshair'
+
+    const cleanups: (() => void)[] = []
+
+    if (eraseTool === 'rect') {
+      // Pointer events (not Leaflet's mouse events) so a finger drag works the
+      // same as a mouse drag. Panning is off for the mode — a drag draws the box.
+      map.dragging.disable()
+      const prevTouchAction = el.style.touchAction
+      el.style.touchAction = 'none'
+      let origin: L.LatLng | null = null
+      let last: L.LatLng | null = null
+      let box: L.Rectangle | null = null
+
+      const onDown = (ev: PointerEvent) => {
+        if (ev.button !== 0) return // left / primary only
+        origin = map.mouseEventToLatLng(ev)
+        last = origin
+        box?.remove()
+        box = null
+      }
+      const onMove = (ev: PointerEvent) => {
+        if (!origin) return
+        ev.preventDefault()
+        last = map.mouseEventToLatLng(ev)
+        box?.remove()
+        box = L.rectangle(L.latLngBounds(origin, last), {
+          color: ERASE_COLOR,
+          weight: 2,
+          dashArray: '5, 5',
+          fillColor: ERASE_COLOR,
+          fillOpacity: 0.12,
+        }).addTo(group)
+      }
+      // Bound to the window so releasing off the map still ends the drag.
+      const onUp = () => {
+        if (!origin || !last) return
+        const b = L.latLngBounds(origin, last)
+        origin = null
+        box?.remove()
+        box = null
+        // A plain click (no drag) isn't a selection — ignore it.
+        if (b.getNorthEast().distanceTo(b.getSouthWest()) < 2) return
+        const n = b.getNorth()
+        const s = b.getSouth()
+        const w = b.getWest()
+        const e = b.getEast()
+        void selectArea([[w, s], [e, s], [e, n], [w, n], [w, s]])
+      }
+      el.addEventListener('pointerdown', onDown)
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+      cleanups.push(() => {
+        el.removeEventListener('pointerdown', onDown)
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        window.removeEventListener('pointercancel', onUp)
+        el.style.touchAction = prevTouchAction
+        map.dragging.enable()
+        box?.remove()
+      })
+    } else {
+      // Lasso: click each corner, close it on the first vertex / double / right click.
+      let rubber: L.Polyline | null = null
+      let shape: L.Polygon | null = null
+
+      const redraw = () => {
+        shape?.remove()
+        shape = null
+        if (eraseVertsRef.current.length >= 2) {
+          shape = L.polygon(eraseVertsRef.current, {
+            color: ERASE_COLOR,
+            weight: 2,
+            dashArray: '5, 5',
+            fillColor: ERASE_COLOR,
+            fillOpacity: 0.12,
+          }).addTo(group)
+        }
+      }
+      const finish = () => {
+        const pts = eraseVertsRef.current.slice()
+        if (pts.length < 3) return
+        rubber?.remove()
+        rubber = null
+        const ring = pts.map((p) => [p.lng, p.lat])
+        ring.push(ring[0])
+        void selectArea(ring)
+      }
+      finishLassoRef.current = finish
+
+      const onClick = (e: L.LeafletMouseEvent) => {
+        const pts = eraseVertsRef.current
+        if (pts.length >= 3) {
+          const first = map.latLngToContainerPoint(pts[0])
+          if (first.distanceTo(map.latLngToContainerPoint(e.latlng)) <= 14) {
+            finish()
+            return
+          }
+        }
+        const isFirst = pts.length === 0
+        pts.push(e.latlng)
+        L.circleMarker(e.latlng, {
+          radius: isFirst ? 7 : 5,
+          fillColor: isFirst ? '#ffffff' : ERASE_COLOR,
+          color: isFirst ? ERASE_COLOR : '#fff',
+          weight: isFirst ? 3 : 2,
+          opacity: 1,
+          fillOpacity: 1,
+        }).addTo(group)
+        setLassoVerts(pts.length)
+        redraw()
+      }
+      const onMove = (e: L.LeafletMouseEvent) => {
+        const pts = eraseVertsRef.current
+        if (pts.length === 0) return
+        rubber?.remove()
+        rubber = L.polyline([pts[pts.length - 1], e.latlng], {
+          color: ERASE_COLOR,
+          weight: 2,
+          dashArray: '5, 10',
+          opacity: 0.7,
+        }).addTo(group)
+      }
+      const onDbl = (e: L.LeafletMouseEvent) => {
+        L.DomEvent.stopPropagation(e.originalEvent)
+        finish()
+      }
+      const onCtx = (e: L.LeafletMouseEvent) => {
+        L.DomEvent.preventDefault(e.originalEvent)
+        finish()
+      }
+      map.on('click', onClick)
+      map.on('mousemove', onMove)
+      map.on('dblclick', onDbl)
+      map.on('contextmenu', onCtx)
+      map.doubleClickZoom.disable()
+      cleanups.push(() => {
+        map.off('click', onClick)
+        map.off('mousemove', onMove)
+        map.off('dblclick', onDbl)
+        map.off('contextmenu', onCtx)
+        map.doubleClickZoom.enable()
+        finishLassoRef.current = () => {}
+      })
+    }
+
+    // Esc backs out of a half-drawn shape.
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') clearEraseGeometry()
+    }
+    document.addEventListener('keydown', onKey)
+
+    return () => {
+      cleanups.forEach((fn) => fn())
+      document.removeEventListener('keydown', onKey)
+      el.style.cursor = ''
+      clearEraseGeometry()
+    }
+  }, [editingCount, eraseTool, areaSel, selectArea, clearEraseGeometry])
+
+  // A pending selection belongs to one flight's dots — drop it if the flight changes.
+  useEffect(() => {
+    cancelAreaSel()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flightKey])
+
+  // Esc also backs out of a selection waiting to be confirmed.
+  useEffect(() => {
+    if (!areaSel) return
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape' && !erasing) cancelAreaSel()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [areaSel, erasing, cancelAreaSel])
+
   // Keep the handler refs + mode flag current for the map/marker listeners.
   useEffect(() => {
     addPointRef.current = addPoint
   }, [addPoint])
+  useEffect(() => {
+    eraseToolRef.current = eraseTool
+  }, [eraseTool])
   useEffect(() => {
     deletePointRef.current = deletePoint
   }, [deletePoint])
@@ -700,10 +1053,11 @@ export default function SharedPropertyMap({
     }
   }, [data.accessToken, token, flightKey])
 
-  // While editing, a map click (not on a dot) adds a plant there.
+  // While editing with the click tool, a map click (not on a dot) adds a plant
+  // there. The area tools take over the map's clicks when one is picked.
   useEffect(() => {
     const map = mapRef.current
-    if (!map || !editingCount) return
+    if (!map || !editingCount || eraseTool) return
     const onClick = (e: L.LeafletMouseEvent) => {
       if (skipNextMapClickRef.current) {
         skipNextMapClickRef.current = false
@@ -718,7 +1072,7 @@ export default function SharedPropertyMap({
       map.off('click', onClick)
       el.style.cursor = ''
     }
-  }, [editingCount])
+  }, [editingCount, eraseTool])
 
   // Load any previously-saved plots for this share once we have an access token.
   useEffect(() => {
@@ -788,16 +1142,24 @@ export default function SharedPropertyMap({
     if (isDrawing) cancelDrawing() // count editing and plot drawing are mutually exclusive
     setVisible((p) => ({ ...p, rgb: true }))
     setShowPoints(true) // you need the dots visible to remove them
+    setEraseTool(null) // always open on the one-at-a-time tool
     setEditingCount(true)
   }, [isDrawing, cancelDrawing])
-  const stopEditCount = useCallback(() => setEditingCount(false), [])
+  const stopEditCount = useCallback(() => {
+    cancelAreaSel()
+    setEraseTool(null)
+    setEditingCount(false)
+  }, [cancelAreaSel])
 
   // Begin click-to-add-points drawing in a given layer's mode. The mode decides
   // which fields the tag form collects (block+size vs species+readiness).
   const startDrawing = useCallback((mode: 'block' | 'species') => {
     const map = mapRef.current
     if (!map) return
-    setEditingCount(false) // count editing and plot drawing are mutually exclusive
+    // Count editing and plot drawing are mutually exclusive.
+    setEditingCount(false)
+    setEraseTool(null)
+    cancelAreaSel()
     setDrawMode(mode)
     setDraft(null)
     setSaveError('')
@@ -874,7 +1236,7 @@ export default function SharedPropertyMap({
     map.on('mousemove', handleMove)
     map.doubleClickZoom.disable()
     ;(map as any)._sharePlotDraw = { handleClick, handleDbl, handleCtx, handleMove }
-  }, [finishDrawing])
+  }, [finishDrawing, cancelAreaSel])
 
   const discardDraft = () => {
     setDraft(null)
@@ -1532,6 +1894,43 @@ export default function SharedPropertyMap({
         </div>
       )}
 
+      {/* Area erase — confirm before a shape's worth of plants disappears. */}
+      {areaSel && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1200] w-[min(20rem,calc(100%-1.5rem))] rounded-lg bg-white shadow-xl border border-gray-200 px-4 py-3">
+          <p className="text-sm font-semibold text-gray-900">
+            Remove {(areaSel.detected.length + areaSel.addIds.length).toLocaleString()} plant
+            {areaSel.detected.length + areaSel.addIds.length === 1 ? '' : 's'}?
+          </p>
+          <p className="mt-0.5 text-xs text-gray-500">
+            Everything inside the selected area. You can undo with Reset in the Layers panel.
+          </p>
+          {eraseError && <p className="mt-1 text-xs text-red-600">{eraseError}</p>}
+          <div className="mt-2.5 flex gap-2">
+            <button
+              onClick={cancelAreaSel}
+              disabled={erasing}
+              className="flex-1 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmAreaErase}
+              disabled={erasing}
+              className="flex-1 rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60 flex items-center justify-center gap-1.5"
+            >
+              {erasing ? (
+                'Removing…'
+              ) : (
+                <>
+                  <Trash2 className="h-4 w-4" />
+                  Remove
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
       {allLoading && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] bg-white/90 rounded-full px-4 py-1.5 text-sm text-gray-700 shadow">
           Loading layers…
@@ -1601,11 +2000,71 @@ export default function SharedPropertyMap({
                           {editingCount ? 'Done' : 'Add / remove plants'}
                         </button>
                         {editingCount && (
-                          <p className="mt-1 text-[10px] leading-snug text-gray-500">
-                            Click the map to <span className="font-medium text-amber-600">add</span> a plant; click a
-                            dot to <span className="font-medium text-red-600">remove</span> it.
-                            {savingPoint && <span className="text-gray-400"> · saving…</span>}
-                          </p>
+                          <>
+                            {/* Tool picker: one plant at a time, or many inside a shape. */}
+                            <div className="mt-1.5 grid grid-cols-3 gap-1">
+                              {ERASE_TOOLS.map((t) => {
+                                const active = eraseTool === t.key
+                                return (
+                                  <button
+                                    key={t.label}
+                                    onClick={() => {
+                                      cancelAreaSel()
+                                      setEraseTool(t.key)
+                                    }}
+                                    title={t.title}
+                                    className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1 text-[10px] font-medium transition-colors ${
+                                      active
+                                        ? 'border-amber-500 bg-amber-50 text-amber-700'
+                                        : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                                    }`}
+                                  >
+                                    <t.Icon className="h-3.5 w-3.5" />
+                                    {t.label}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                            <p className="mt-1 text-[10px] leading-snug text-gray-500">
+                              {eraseTool === null && (
+                                <>
+                                  Click the map to <span className="font-medium text-amber-600">add</span> a plant;
+                                  click a dot to <span className="font-medium text-red-600">remove</span> it.
+                                </>
+                              )}
+                              {eraseTool === 'rect' && (
+                                <>
+                                  Drag a box over the plants to{' '}
+                                  <span className="font-medium text-red-600">remove</span> them all at once.
+                                </>
+                              )}
+                              {eraseTool === 'lasso' && (
+                                <>
+                                  Click around the area, then click the first point (or double-click) to close it and{' '}
+                                  <span className="font-medium text-red-600">remove</span> everything inside.
+                                </>
+                              )}
+                              {savingPoint && <span className="text-gray-400"> · saving…</span>}
+                            </p>
+                            {eraseTool === 'lasso' && lassoVerts > 0 && (
+                              <div className="mt-1 flex gap-1">
+                                <button
+                                  onClick={() => finishLassoRef.current()}
+                                  disabled={lassoVerts < 3}
+                                  className="flex-1 rounded-md bg-gray-900 px-2 py-1 text-[10px] font-medium text-white hover:bg-black disabled:opacity-40"
+                                >
+                                  Finish shape
+                                </button>
+                                <button
+                                  onClick={clearEraseGeometry}
+                                  className="flex-1 rounded-md border border-gray-300 px-2 py-1 text-[10px] text-gray-600 hover:bg-gray-50"
+                                >
+                                  Clear
+                                </button>
+                              </div>
+                            )}
+                            {eraseError && <p className="mt-1 text-[10px] text-red-600">{eraseError}</p>}
+                          </>
                         )}
                         {hasEdits && (
                           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-gray-500">
