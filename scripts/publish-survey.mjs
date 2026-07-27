@@ -149,16 +149,60 @@ async function withRetry(fn, label, tries = 5) {
   throw new Error(`${label}: ${lastErr?.message || lastErr}`)
 }
 
-// Pull every AI/manual plant point for an ortho (paged past the 1000-row cap)
-// as compact [lat, lng] pairs (6 decimals ≈ 0.1 m) for the client map to dot.
-async function fetchPlantPoints(supabase, orthoId) {
+// Machine-generated label sources. An ortho should only ever hold one of these
+// at a time (the detection service clears both before saving a run), but older
+// orthos counted by YOLO *and* SAM 3 back when each engine only cleared its own
+// labels still carry two overlapping sets — publishing those would dot and count
+// every plant twice on the client's map.
+const MACHINE_SOURCES = ['ai', 'sam3']
+
+// Which machine source to export for an ortho. Returns null when the ortho has
+// no machine labels at all (a hand-labelled ortho still publishes its 'manual'
+// points). Throws rather than guessing when both sets are present, since a
+// silent wrong pick ships a doubled count to a client.
+async function resolveLabelSource(supabase, orthoId, requested) {
+  const present = []
+  for (const src of MACHINE_SOURCES) {
+    const { count, error } = await supabase
+      .from('plant_labels')
+      .select('id', { count: 'exact', head: true })
+      .eq('orthomosaic_id', orthoId)
+      .eq('source', src)
+    if (error) throw new Error(`count ${src} labels: ${error.message}`)
+    if (count > 0) present.push({ source: src, count })
+  }
+
+  if (requested) {
+    if (!MACHINE_SOURCES.includes(requested)) {
+      throw new Error(`plant_points.source must be one of: ${MACHINE_SOURCES.join(', ')}`)
+    }
+    return requested
+  }
+  if (present.length === 0) return null
+  if (present.length === 1) return present[0].source
+  throw new Error(
+    `Ortho ${orthoId} has labels from BOTH detection engines — ` +
+      present.map((p) => `${p.source}=${p.count.toLocaleString()}`).join(', ') + '.\n' +
+      `   Publishing both would double every plant. Either re-run detection in the\n` +
+      `   dashboard (a run now clears the other engine's labels), or pin one set with\n` +
+      `   "plant_points": { "orthomosaic_id": "...", "source": "ai" } in the config.`
+  )
+}
+
+// Pull an ortho's plant points (paged past the 1000-row cap) as compact
+// [lat, lng] pairs (6 decimals ≈ 0.1 m) for the client map to dot. Exports one
+// machine source plus every 'manual' label (human corrections made in the
+// dashboard), never two machine sources at once.
+async function fetchPlantPoints(supabase, orthoId, source) {
+  const keep = new Set(['manual', ...(source ? [source] : [])])
   const pts = []
   const PAGE = 1000
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await supabase
       .from('plant_labels')
-      .select('latitude, longitude')
+      .select('latitude, longitude, source')
       .eq('orthomosaic_id', orthoId)
+      .in('source', [...keep])
       .range(from, from + PAGE - 1)
     if (error) throw new Error(`fetch plant points: ${error.message}`)
     if (!data?.length) break
@@ -535,7 +579,9 @@ async function main() {
       const orthoId = cfg.plant_points?.orthomosaic_id
       if (orthoId) {
         console.log('    fetching plant points...')
-        const pts = await fetchPlantPoints(supabase, orthoId)
+        const src = await resolveLabelSource(supabase, orthoId, cfg.plant_points?.source)
+        console.log(`    source: ${src ? `${src} + manual` : 'manual only (no machine labels)'}`)
+        const pts = await fetchPlantPoints(supabase, orthoId, src)
         const ptsPath = `${flightPrefix}/points.json`
         const body = Buffer.from(JSON.stringify(pts))
         await withRetry(() => supabase.storage.from(SHARE_BUCKET).upload(ptsPath, body, { contentType: 'application/json', upsert: true }), 'points.json upload')

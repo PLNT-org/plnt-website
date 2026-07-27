@@ -11,7 +11,11 @@
 #   gcloud config set project <PROJECT_ID>
 #
 # Also: drop the model weights in  docker/aruco-service/weights/  before building
-# (plnt_v6.pt + plnt_1cm_v3.pt — see MODELS in app/main.py).
+# (plnt_v3.pt + plnt_v6.pt + plnt_1cm_v3.pt — see MODELS in app/main.py).
+#
+# NOTE: TAG below is the IMAGE tag and has nothing to do with the plnt_v3 model —
+# it's a fixed label that each build overwrites, which is what makes a redeploy
+# pick up new weights and code.
 #
 # Usage:  ./deploy.sh            (uses current gcloud project)
 #         PROJECT_ID=my-proj REGION=us-central1 ./deploy.sh
@@ -31,7 +35,7 @@ fi
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/aruco-service:${TAG}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for w in plnt_v6.pt plnt_1cm_v3.pt; do
+for w in plnt_v3.pt plnt_v6.pt plnt_1cm_v3.pt; do
   if [[ ! -f "${HERE}/weights/${w}" ]]; then
     echo "ERROR: ${HERE}/weights/${w} is missing. Place all model weights there first." >&2
     exit 1

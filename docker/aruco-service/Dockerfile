@@ -31,8 +31,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 
 # Bundle the models into the image — fetching at runtime would slow cold starts.
-# Copies every .pt in weights/ (plnt_v6, plnt_1cm_v3); the service loads them by
-# name (see MODELS in app/main.py).
+# Copies every .pt in weights/ (plnt_v3, plnt_v6, plnt_1cm_v3); the service
+# loads them by name (see MODELS in app/main.py).
 COPY weights/ /app/weights/
 
 # Expose port (kept at 8001 to match ARUCO_SERVICE_URL across the app;

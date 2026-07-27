@@ -183,13 +183,20 @@ export default function OrthomosaicViewerPage() {
   } | null>(null)
   // 0.25 is the validated plnt_v3 operating point; users can still adjust the slider.
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.25)
-  // Which plant-detection model to run. plnt_v6 is the 2 cm/px general model;
-  // plnt_1cm_v3 is validated at 1 cm/px (the service scales tiling per model).
+  // Which plant-detection model to run. plnt_v3 and plnt_v6 are both validated
+  // at 2 cm/px (v6 supersedes v3); plnt_1cm_v3 is validated at 1 cm/px. The
+  // service scales tiling to each model's own reference resolution.
   const PLANT_MODELS = [
     { value: 'plnt_v6', label: 'plnt_v6 — general (2 cm/px)' },
+    { value: 'plnt_v3', label: 'plnt_v3 — original (2 cm/px)' },
     { value: 'plnt_1cm_v3', label: 'plnt_1cm_v3 — high-res (1 cm/px)' },
   ]
   const [plantModel, setPlantModel] = useState('plnt_v6')
+  // Detection engine: local YOLO (source='ai') or Meta SAM 3 via Roboflow
+  // (source='sam3'). Exactly one engine runs per detection, and a run clears
+  // whatever the previous engine left behind — otherwise an ortho counted by
+  // both carries two overlapping label sets and every plant is counted twice.
+  const [detectionEngine, setDetectionEngine] = useState<'yolo' | 'sam3'>('yolo')
   const [detectionProgress, setDetectionProgress] = useState<{
     processedTiles: number
     totalTiles: number
@@ -765,6 +772,33 @@ export default function OrthomosaicViewerPage() {
       alert('Crop failed — check console for details.')
       setCropping(false)
     }
+  }
+
+  // Run whichever engine is selected. Kept as one entry point so there's no way
+  // to fire both and end up with two label sets on the same orthomosaic — the
+  // service clears every machine source before it saves, so the last run wins.
+  const handleCountPlants = async () => {
+    if (!selectedOrthomosaic || isDemo) return
+    // SAM 3 is region-bounded (cost); check that before asking to confirm a
+    // replacement, so we never prompt for a run that can't start anyway.
+    if (detectionEngine === 'sam3' && boundaryPoints.length < 3) {
+      alert(
+        'SAM 3 runs on a drawn region. Click "Crop to Boundary" to start tracing, ' +
+          'drop ≥3 points on the map, then run the count.'
+      )
+      return
+    }
+    const existing = labels.filter((l) => l.source !== 'manual').length
+    if (existing > 0) {
+      const engineName = detectionEngine === 'sam3' ? 'SAM 3' : plantModel
+      const ok = confirm(
+        `This orthomosaic already has ${existing.toLocaleString()} detected plants.\n\n` +
+          `Running ${engineName} will REPLACE them (manual labels are kept). ` +
+          `Only one engine's counts are stored at a time, so the totals can't double up.\n\nContinue?`
+      )
+      if (!ok) return
+    }
+    return detectionEngine === 'sam3' ? handlePlantDetectionSam3() : handlePlantDetection()
   }
 
   // Handle plant detection with YOLOv11 (reads streaming NDJSON progress)
@@ -2040,16 +2074,29 @@ export default function OrthomosaicViewerPage() {
                     <span className="font-medium">AI Plant Detection</span>
                   </div>
 
+                  {/* One button, one engine — whichever is picked in Detection
+                      Settings. Running either replaces the ortho's existing
+                      machine counts, so the two can never stack. */}
                   <Button
                     variant="default"
                     className="bg-green-600 hover:bg-green-700"
-                    onClick={handlePlantDetection}
-                    disabled={plantDetecting}
+                    onClick={handleCountPlants}
+                    disabled={plantDetecting || sam3Detecting}
+                    title={
+                      detectionEngine === 'sam3'
+                        ? 'Run Meta SAM 3 (via Roboflow) on the drawn region. Replaces this orthomosaic’s existing plant counts.'
+                        : `Run ${plantModel} over the whole orthomosaic. Replaces its existing plant counts.`
+                    }
                   >
-                    {plantDetecting ? (
+                    {plantDetecting || sam3Detecting ? (
                       <>
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                         Detecting Plants...
+                      </>
+                    ) : detectionEngine === 'sam3' ? (
+                      <>
+                        <Scan className="h-4 w-4 mr-2" />
+                        Count with SAM 3 (region)
                       </>
                     ) : (
                       <>
@@ -2058,26 +2105,9 @@ export default function OrthomosaicViewerPage() {
                       </>
                     )}
                   </Button>
-
-                  {/* SAM 3 (Roboflow) trial — runs on the drawn region only */}
-                  <Button
-                    variant="outline"
-                    onClick={handlePlantDetectionSam3}
-                    disabled={sam3Detecting || plantDetecting || boundaryPoints.length < 3}
-                    title="Trial: run Meta SAM 3 (via Roboflow) on the drawn region and compare its count with YOLO. Draw a boundary first."
-                  >
-                    {sam3Detecting ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        SAM 3…
-                      </>
-                    ) : (
-                      <>
-                        <Scan className="h-4 w-4 mr-2" />
-                        Count with SAM 3 (region)
-                      </>
-                    )}
-                  </Button>
+                  <span className="text-sm text-gray-500 self-center">
+                    {detectionEngine === 'sam3' ? 'SAM 3' : plantModel}
+                  </span>
                   {sam3Result && (
                     <span className="text-sm text-gray-600 self-center">
                       SAM 3 (region): <b>{sam3Result.count.toLocaleString()}</b> plants
@@ -2309,25 +2339,53 @@ export default function OrthomosaicViewerPage() {
                   <h4 className="font-medium mb-3">Detection Settings</h4>
                   <div className="space-y-3">
                     <div>
-                      <label className="text-sm text-gray-600 block mb-1" htmlFor="plant-model">
-                        Model
+                      <label className="text-sm text-gray-600 block mb-1" htmlFor="detection-engine">
+                        Engine
                       </label>
                       <select
-                        id="plant-model"
-                        value={plantModel}
-                        onChange={(e) => setPlantModel(e.target.value)}
+                        id="detection-engine"
+                        value={detectionEngine}
+                        onChange={(e) => {
+                          setDetectionEngine(e.target.value as 'yolo' | 'sam3')
+                          setSam3Result(null)
+                        }}
                         className="w-full max-w-xs text-sm bg-white border rounded px-2 py-1.5"
                       >
-                        {PLANT_MODELS.map((m) => (
-                          <option key={m.value} value={m.value}>
-                            {m.label}
-                          </option>
-                        ))}
+                        <option value="yolo">YOLO — local plnt model (whole ortho)</option>
+                        <option value="sam3">SAM 3 — Meta via Roboflow (drawn region)</option>
                       </select>
                       <p className="text-xs text-gray-500 mt-1">
-                        Tiling auto-scales to each model’s resolution.
+                        One engine at a time. Running a detection replaces the previous
+                        engine’s counts, so YOLO and SAM 3 results never double up.
                       </p>
                     </div>
+                    {detectionEngine === 'yolo' ? (
+                      <div>
+                        <label className="text-sm text-gray-600 block mb-1" htmlFor="plant-model">
+                          Model
+                        </label>
+                        <select
+                          id="plant-model"
+                          value={plantModel}
+                          onChange={(e) => setPlantModel(e.target.value)}
+                          className="w-full max-w-xs text-sm bg-white border rounded px-2 py-1.5"
+                        >
+                          {PLANT_MODELS.map((m) => (
+                            <option key={m.value} value={m.value}>
+                              {m.label}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-xs text-gray-500 mt-1">
+                          Tiling auto-scales to each model’s resolution.
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-gray-500">
+                        SAM 3 runs only inside a drawn region to bound cost. Click “Crop to
+                        Boundary” to start tracing, drop ≥3 points, then run the count.
+                      </p>
+                    )}
                     <div>
                       <label className="text-sm text-gray-600 block mb-1">
                         Confidence Threshold: {(confidenceThreshold * 100).toFixed(0)}%
@@ -2348,10 +2406,12 @@ export default function OrthomosaicViewerPage() {
                     <div>
                       <label className="text-sm text-gray-600 block mb-1">Detection Prompt:</label>
                       <p className="text-sm font-mono bg-white px-2 py-1 rounded border inline-block">
-                        individual plant
+                        {detectionEngine === 'sam3' ? 'plant' : 'individual plant'}
                       </p>
                       <p className="text-xs text-gray-500 mt-1">
-                        YOLOv11 object detection — custom-trained plant model
+                        {detectionEngine === 'sam3'
+                          ? 'SAM 3 promptable concept segmentation (Roboflow hosted)'
+                          : 'YOLOv11 object detection — custom-trained plant model'}
                       </p>
                     </div>
                   </div>
