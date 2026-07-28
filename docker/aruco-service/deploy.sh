@@ -35,7 +35,7 @@ fi
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/aruco-service:${TAG}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for w in plnt_v3.pt plnt_v6.pt plnt_1cm_v3.pt; do
+for w in plnt_v7.pt plnt_v6.pt plnt_1cm_v3.pt; do
   if [[ ! -f "${HERE}/weights/${w}" ]]; then
     echo "ERROR: ${HERE}/weights/${w} is missing. Place all model weights there first." >&2
     exit 1

@@ -128,7 +128,7 @@ class PlantDetectionRequest(BaseModel):
     concurrent_tiles: int = Field(default=20, description="Tiles between streamed progress updates")
     nms_iou_threshold: Optional[float] = Field(default=None, description="DEPRECATED: ignored (centroid dedup replaced IoU-NMS)")
     bounds: dict = Field(..., description="Orthomosaic bounds {west, south, east, north}")
-    model: Optional[str] = Field(default=None, description="Model name (plnt_v3, plnt_v6, plnt_1cm_v3); default model if unset/unknown")
+    model: Optional[str] = Field(default=None, description="Model name (plnt_v6, plnt_v7, plnt_1cm_v3); default model if unset/unknown")
 
 
 class AsyncPlantDetectionRequest(BaseModel):
@@ -155,9 +155,9 @@ class AsyncPlantDetectionRequest(BaseModel):
     # respectively, and a run clears BOTH machine sources first — an ortho holds
     # one engine's detections at a time, so counts never stack.
     engine: str = Field(default="yolo")
-    # Which YOLO model to run (ignored when engine="sam3"): plnt_v3 (2 cm/px),
-    # plnt_v6 (2 cm/px, default) or plnt_1cm_v3 (1 cm/px). Unknown/unset falls
-    # back to the default.
+    # Which YOLO model to run (ignored when engine="sam3"): plnt_v6 (2 cm/px,
+    # default), plnt_v7 (2 cm/px) or plnt_1cm_v3 (1 cm/px). Unknown/unset falls
+    # back to the default. See MODELS in main.py for the authoritative list.
     model: Optional[str] = Field(default=None)
     sam3_prompt: str = Field(default="plant", description="Concept prompt for SAM 3 PCS")
     region: Optional[list] = Field(
