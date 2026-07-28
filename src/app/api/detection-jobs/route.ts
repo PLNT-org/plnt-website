@@ -20,7 +20,7 @@ const DETECTION_JOB_NAME = process.env.DETECTION_JOB_NAME || 'plnt-detect-job'
 // Selectable YOLO models (must match MODELS in the detection service). The
 // service falls back to its default on an unknown name, but we validate here so
 // a typo surfaces as a clear 400 instead of silently running the wrong model.
-const YOLO_MODELS = ['plnt_v3', 'plnt_v6', 'plnt_1cm_v3'] as const
+const YOLO_MODELS = ['plnt_v7', 'plnt_v6', 'plnt_1cm_v3'] as const
 const DEFAULT_YOLO_MODEL = 'plnt_v6'
 
 async function runDetectionJob(params: {

@@ -754,7 +754,9 @@ export default function OrthomosaicMap({
           <hr className="my-2" />
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 rounded-full bg-green-500 ring-1 ring-white" />
-            <span>YOLO (plnt_v3)</span>
+            {/* Which plnt_* model produced these is chosen per run, so don't
+                name one here — a hardcoded name silently goes stale. */}
+            <span>YOLO</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 rounded-full bg-amber-500 ring-1 ring-white" />

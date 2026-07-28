@@ -46,7 +46,12 @@ from ultralytics import YOLO
 # model trained at 1 cm/px isn't fed 2 cm-downscaled tiles. All are bundled in
 # the image and loaded once at boot; the request's `model` field picks one.
 MODELS = {
-    "plnt_v3": {"path": "/app/weights/plnt_v3.pt", "ref_gsd_cm": 2.0},
+    # plnt_v7 shipped for weeks under the FILENAME plnt_v3.pt (weights are
+    # gitignored, so swapping the file left no trace) — it, not plnt_v3, is what
+    # produced the counts on orthos detected between 2026-07-06 and 2026-07-26.
+    # ref 2.0 is not a guess: it ran in production under the old single-model
+    # code when REF_GSD_CM was 2.0, so this reproduces those counts exactly.
+    "plnt_v7": {"path": "/app/weights/plnt_v7.pt", "ref_gsd_cm": 2.0},
     "plnt_v6": {"path": "/app/weights/plnt_v6.pt", "ref_gsd_cm": 2.0},
     "plnt_1cm_v3": {"path": "/app/weights/plnt_1cm_v3.pt", "ref_gsd_cm": 1.0},
 }

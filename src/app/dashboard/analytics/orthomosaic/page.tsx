@@ -183,12 +183,14 @@ export default function OrthomosaicViewerPage() {
   } | null>(null)
   // 0.25 is the validated plnt_v3 operating point; users can still adjust the slider.
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.25)
-  // Which plant-detection model to run. plnt_v3 and plnt_v6 are both validated
-  // at 2 cm/px (v6 supersedes v3); plnt_1cm_v3 is validated at 1 cm/px. The
-  // service scales tiling to each model's own reference resolution.
+  // Which plant-detection model to run. plnt_v6 and plnt_v7 are both validated
+  // at 2 cm/px; plnt_1cm_v3 is validated at 1 cm/px. The service scales tiling
+  // to each model's own reference resolution. plnt_v7 is the model that ran in
+  // production as "plnt_v3.pt" through most of July — pick it to reproduce
+  // counts on orthos detected in that window.
   const PLANT_MODELS = [
     { value: 'plnt_v6', label: 'plnt_v6 — general (2 cm/px)' },
-    { value: 'plnt_v3', label: 'plnt_v3 — original (2 cm/px)' },
+    { value: 'plnt_v7', label: 'plnt_v7 — Jul 2026 (2 cm/px)' },
     { value: 'plnt_1cm_v3', label: 'plnt_1cm_v3 — high-res (1 cm/px)' },
   ]
   const [plantModel, setPlantModel] = useState('plnt_v6')
