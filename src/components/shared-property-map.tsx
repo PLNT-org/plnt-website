@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation } from 'lucide-react'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
 
@@ -33,6 +33,94 @@ const ANNOT_META: Record<AnnotKey, { label: string; hint: string }> = {
   species: { label: 'Species', hint: 'Species name + readiness date' },
 }
 
+// ---- Field mode -----------------------------------------------------------
+// A handful of identified specimens someone will physically walk to (ground
+// truth for a verification pass), as opposed to the thousands of anonymous
+// detection dots. Published per-flight by scripts/publish-field-targets.mjs.
+export interface FieldTarget {
+  id: string // plant id, e.g. MR-B03-0905
+  code: string // short field name, e.g. HIGH-01
+  lat: number
+  lng: number
+  color?: string
+  group?: string | null
+  block?: number | null
+  species?: string | null
+  heightM?: number | null
+  heightFt?: number | null
+  confidence?: number | null
+  status?: string | null
+}
+
+// What was actually found standing at the plant. `heightM` is canonical metres
+// however it was typed; `pending` means it's on this device but not yet saved
+// to the share.
+export interface Measurement {
+  heightM: number | null
+  notes: string | null
+  measuredAt?: string
+  pending?: boolean
+}
+
+type HeightUnit = 'ft' | 'm'
+
+const M_TO_FT = 3.28084
+const toMeters = (v: number, unit: HeightUnit) => (unit === 'ft' ? v / M_TO_FT : v)
+const fromMeters = (m: number, unit: HeightUnit) => (unit === 'ft' ? m * M_TO_FT : m)
+// Heights are read to the nearest inch at best, so one decimal in feet and two
+// in metres is the honest precision.
+const fmtInUnit = (m: number, unit: HeightUnit) =>
+  unit === 'ft' ? `${(m * M_TO_FT).toFixed(1)} ft` : `${m.toFixed(2)} m`
+const fmtDelta = (m: number, unit: HeightUnit) => {
+  const v = unit === 'ft' ? m * M_TO_FT : m
+  const s = unit === 'ft' ? Math.abs(v).toFixed(1) : Math.abs(v).toFixed(2)
+  return `${v >= 0 ? '+' : '−'}${s} ${unit}`
+}
+
+const DEFAULT_TARGET_COLOR = '#2E7D32'
+// Below this the GPS fix is good enough to stand over the right plant; above it
+// the dot is a neighbourhood, not a position, and we say so.
+const GOOD_FIX_M = 8
+
+function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const R = 6371000
+  const toRad = (d: number) => (d * Math.PI) / 180
+  const dLat = toRad(b.lat - a.lat)
+  const dLng = toRad(b.lng - a.lng)
+  const la1 = toRad(a.lat)
+  const la2 = toRad(b.lat)
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(h))
+}
+
+// Initial great-circle bearing a→b, degrees clockwise from true north. The map
+// is always north-up, so this doubles as the on-screen arrow rotation.
+function bearingDegrees(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const toRad = (d: number) => (d * Math.PI) / 180
+  const la1 = toRad(a.lat)
+  const la2 = toRad(b.lat)
+  const dLng = toRad(b.lng - a.lng)
+  const y = Math.sin(dLng) * Math.cos(la2)
+  const x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLng)
+  return (Math.atan2(y, x) * 180) / Math.PI
+}
+
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+const compassPoint = (deg: number) => COMPASS[Math.round((((deg % 360) + 360) % 360) / 45) % 8]
+
+// Feet under a mile — the unit someone pacing a nursery block actually thinks in.
+function fmtDistance(m: number): string {
+  const ft = m * M_TO_FT
+  if (ft < 1000) return `${Math.round(ft)} ft`
+  return `${(ft / 5280).toFixed(2)} mi`
+}
+
+function fmtHeight(t: FieldTarget): string {
+  if (t.heightM == null) return '—'
+  const ft = t.heightFt ?? t.heightM * M_TO_FT
+  return `${t.heightM.toFixed(2)} m · ${ft.toFixed(1)} ft`
+}
+
 export interface ShareLayer {
   type: LayerType
   url?: string // signed COG URL (used for client-side rendering when the user adjusts the legend range)
@@ -43,6 +131,8 @@ export interface ShareLayer {
   plant_count?: number // in-boundary plant count (RGB layer only); shown when RGB is active
   pointsUrl?: string // signed URL to points.json ([[lat,lng],...]); per-plant dots, RGB only
   maxNativeZoom?: number // deepest zoom this layer has tiles for (default 22)
+  fieldTargetsUrl?: string // signed URL to field-targets.json; only sent to viewers cleared for it
+  fieldTargetsLabel?: string // panel/drawer title, e.g. "Height check (20)"
 }
 
 export interface ShareLocation {
@@ -359,6 +449,45 @@ export default function SharedPropertyMap({
   const rubberBandRef = useRef<L.Polyline | null>(null)
   const closingLineRef = useRef<L.Polyline | null>(null)
 
+  // ---- Field mode (walk to named specimens and verify them) ----
+  const fieldLayer = data.layers.find((l) => l.type === 'rgb' && l.fieldTargetsUrl)
+  const [targets, setTargets] = useState<FieldTarget[]>([])
+  const [showTargets, setShowTargets] = useState(true)
+  const [fieldOpen, setFieldOpen] = useState(false)
+  const [fieldFull, setFieldFull] = useState(false)
+  const [activeTargetId, setActiveTargetId] = useState<string | null>(null)
+  // What was actually measured, keyed by target id. Saved to the share and
+  // mirrored to localStorage, so a dead cell signal mid-row loses nothing.
+  const [measurements, setMeasurements] = useState<Record<string, Measurement>>({})
+  const [unit, setUnit] = useState<HeightUnit>('ft')
+  const [savingMeasurement, setSavingMeasurement] = useState(false)
+  // Bad input for the target in hand — clears when you move to the next plant.
+  const [measureError, setMeasureError] = useState('')
+  // Why readings aren't reaching the share. Persists across targets, because
+  // the cause (no signal, missing table) outlives any one entry.
+  const [syncError, setSyncError] = useState('')
+  // Draft entry for the active target — kept out of `measurements` so a
+  // half-typed number never reads as a saved reading.
+  const [draftHeight, setDraftHeight] = useState('')
+  const [draftNotes, setDraftNotes] = useState('')
+  // Live position from the browser's GPS: null until "Locate me" is pressed.
+  const [gps, setGps] = useState<{ lat: number; lng: number; accuracy: number } | null>(null)
+  const [gpsError, setGpsError] = useState('')
+  const [tracking, setTracking] = useState(false)
+  // Keep the map centred on you as you walk, until you pan it yourself.
+  const [following, setFollowing] = useState(true)
+  const followingRef = useRef(true)
+  const watchIdRef = useRef<number | null>(null)
+  const targetsLayerRef = useRef<L.LayerGroup | null>(null)
+  const gpsLayerRef = useRef<L.LayerGroup | null>(null)
+  // Target codes are only legible once the pins stop overlapping, so they fade
+  // in past this zoom; below it the numbered pin carries the identity.
+  const CODE_LABEL_ZOOM = 19
+  const [zoom, setZoom] = useState(18)
+
+  const measureKey = `plnt-field-measurements:${token}:${flightKey ?? ''}`
+  const unitKey = 'plnt-field-unit'
+
   // ---- Inventory drawer (bottom sheet over the map) ----
   const rootRef = useRef<HTMLDivElement>(null)
   const [invOpen, setInvOpen] = useState(false)
@@ -429,6 +558,8 @@ export default function SharedPropertyMap({
       cogRangeRef.current = {}
       pointsLayerRef.current = null
       pointsCanvasRef.current = null
+      targetsLayerRef.current = null
+      gpsLayerRef.current = null
       plotsLayerRef.current = null
       highlightLayerRef.current = null
       eraseLayerRef.current = null
@@ -627,6 +758,508 @@ export default function SharedPropertyMap({
       cancelled = true
     }
   }, [visible, showPoints, rgbLayer, pointEdits])
+
+  // ---- Field mode ----------------------------------------------------------
+
+  // Mirror of the measurements, so a reload (or a dropped signal) never loses a
+  // reading that hasn't reached the server yet.
+  const cacheMeasurements = useCallback(
+    (next: Record<string, Measurement>) => {
+      try {
+        window.localStorage.setItem(measureKey, JSON.stringify(next))
+      } catch {
+        /* private mode — the server copy is still the real one */
+      }
+    },
+    [measureKey]
+  )
+
+  // Load: local cache first (instant, works offline), then the server's copy
+  // merged over it. Anything still `pending` locally outranks the server — it's
+  // a reading the server hasn't been told about yet.
+  useEffect(() => {
+    let cancelled = false
+    let cached: Record<string, Measurement> = {}
+    try {
+      cached = JSON.parse(window.localStorage.getItem(measureKey) || '{}')
+      setMeasurements(cached)
+    } catch {
+      /* bad JSON — start from the server */
+    }
+    try {
+      const savedUnit = window.localStorage.getItem(unitKey)
+      if (savedUnit === 'ft' || savedUnit === 'm') setUnit(savedUnit)
+    } catch {
+      /* keep the default */
+    }
+    const accessToken = data.accessToken
+    if (!accessToken) return
+    ;(async () => {
+      try {
+        const res = await fetch(
+          `/api/share/${token}/measurements?k=${encodeURIComponent(accessToken)}&flight=${encodeURIComponent(
+            flightKey ?? ''
+          )}`
+        )
+        const body = await res.json()
+        if (cancelled || !res.ok) return
+        // No store on the server side (migration not run): its empty list says
+        // nothing about what's on this device, so leave the cache alone.
+        if (body.unavailable) return
+        const merged: Record<string, Measurement> = {}
+        for (const m of body.measurements || []) {
+          merged[m.targetId] = { heightM: m.heightM, notes: m.notes, measuredAt: m.measuredAt }
+        }
+        for (const [id, m] of Object.entries(cached)) if (m.pending) merged[id] = m
+        setMeasurements(merged)
+        cacheMeasurements(merged)
+      } catch {
+        /* offline — the cache stands */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [measureKey, token, flightKey, data.accessToken])
+
+  // Push one reading to the share. The local copy updates first and survives a
+  // failed request — being out of signal at the far end of a block must not
+  // cost you the number you just read off the pole.
+  const saveMeasurement = useCallback(
+    async (targetId: string, heightM: number | null, notes: string | null) => {
+      setMeasureError('')
+      setSavingMeasurement(true)
+      setMeasurements((prev) => {
+        const next = {
+          ...prev,
+          [targetId]: { heightM, notes, measuredAt: new Date().toISOString(), pending: true },
+        }
+        cacheMeasurements(next)
+        return next
+      })
+      try {
+        if (!data.accessToken) throw new Error('This link is read-only.')
+        const res = await fetch(`/api/share/${token}/measurements?k=${encodeURIComponent(data.accessToken)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ flightKey: flightKey ?? '', targetId, heightM, notes, email: viewerEmail }),
+        })
+        const body = await res.json()
+        if (!res.ok) throw new Error(body.error || 'Could not save.')
+        setMeasurements((prev) => {
+          const next = { ...prev, [targetId]: { heightM, notes, measuredAt: body.measurement?.measuredAt } }
+          cacheMeasurements(next)
+          return next
+        })
+        setSyncError('')
+      } catch (err) {
+        // Keep the value, flag it, and let the retry sweep pick it up. Only a
+        // server-supplied reason is worth showing; a bare network failure gets
+        // the banner's default copy.
+        setSyncError(err instanceof Error && err.message !== 'Failed to fetch' ? err.message : '')
+      } finally {
+        setSavingMeasurement(false)
+      }
+    },
+    [cacheMeasurements, data.accessToken, flightKey, token, viewerEmail]
+  )
+
+  const clearMeasurement = useCallback(
+    async (targetId: string) => {
+      setMeasureError('')
+      setMeasurements((prev) => {
+        const next = { ...prev }
+        delete next[targetId]
+        cacheMeasurements(next)
+        return next
+      })
+      if (!data.accessToken) return
+      try {
+        await fetch(
+          `/api/share/${token}/measurements?k=${encodeURIComponent(data.accessToken)}&flight=${encodeURIComponent(
+            flightKey ?? ''
+          )}&target=${encodeURIComponent(targetId)}`,
+          { method: 'DELETE' }
+        )
+      } catch {
+        /* the local copy is gone; a stale server row loses to the next save */
+      }
+    },
+    [cacheMeasurements, data.accessToken, flightKey, token]
+  )
+
+  // Flush anything that never reached the server, whenever the connection comes
+  // back (and once on mount, covering a reload that happened while offline).
+  const pendingKey = Object.entries(measurements)
+    .filter(([, m]) => m.pending)
+    .map(([id]) => id)
+    .join(',')
+
+  useEffect(() => {
+    const accessToken = data.accessToken
+    if (!pendingKey || !accessToken) return
+    let cancelled = false
+    const flush = async () => {
+      for (const id of pendingKey.split(',')) {
+        if (cancelled) return
+        const m = measurements[id]
+        if (!m?.pending) continue
+        try {
+          const res = await fetch(`/api/share/${token}/measurements?k=${encodeURIComponent(accessToken)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              flightKey: flightKey ?? '',
+              targetId: id,
+              heightM: m.heightM,
+              notes: m.notes,
+              email: viewerEmail,
+            }),
+          })
+          if (!res.ok || cancelled) continue
+          setMeasurements((prev) => {
+            if (!prev[id]?.pending) return prev
+            const next = { ...prev, [id]: { ...prev[id], pending: false } }
+            cacheMeasurements(next)
+            return next
+          })
+          setSyncError('')
+        } catch {
+          return // still offline; the next 'online' event tries again
+        }
+      }
+    }
+    void flush()
+    window.addEventListener('online', flush)
+    return () => {
+      cancelled = true
+      window.removeEventListener('online', flush)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingKey, data.accessToken, token, flightKey, viewerEmail])
+
+  // Fetch the target list once (a few dozen points at most).
+  useEffect(() => {
+    const url = fieldLayer?.fieldTargetsUrl
+    if (!url) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(url)
+        const body = await res.json()
+        const list: FieldTarget[] = Array.isArray(body) ? body : body?.targets || []
+        if (!cancelled) setTargets(list.filter((t) => typeof t.lat === 'number' && typeof t.lng === 'number'))
+      } catch (err) {
+        console.error('Failed to load field targets:', err)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [fieldLayer?.fieldTargetsUrl])
+
+  // Follow mode ends the moment you pan the map yourself — otherwise the next
+  // fix yanks the view back and you can't look ahead down the row.
+  useEffect(() => {
+    followingRef.current = following
+  }, [following])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const stop = () => setFollowing(false)
+    const onZoom = () => setZoom(map.getZoom())
+    map.on('dragstart', stop)
+    map.on('zoomend', onZoom)
+    onZoom()
+    return () => {
+      map.off('dragstart', stop)
+      map.off('zoomend', onZoom)
+    }
+  }, [ready])
+
+  const stopTracking = useCallback(() => {
+    if (watchIdRef.current != null) navigator.geolocation.clearWatch(watchIdRef.current)
+    watchIdRef.current = null
+    setTracking(false)
+  }, [])
+
+  const startTracking = useCallback(() => {
+    if (!('geolocation' in navigator)) {
+      setGpsError('This browser has no GPS. Use the coordinates on the field sheet instead.')
+      return
+    }
+    setGpsError('')
+    setTracking(true)
+    setFollowing(true)
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        setGpsError('')
+        setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy })
+      },
+      (err) => {
+        setGpsError(
+          err.code === err.PERMISSION_DENIED
+            ? 'Location is blocked. Allow it for plnt.net in your browser settings.'
+            : 'No GPS fix yet — step into the open and give it a few seconds.'
+        )
+      },
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
+    )
+  }, [])
+
+  // Stop the GPS watch when the map unmounts (switching flights remounts this).
+  useEffect(() => stopTracking, [stopTracking])
+
+  const activeTarget = targets.find((t) => t.id === activeTargetId) || null
+
+  // Targets ordered for walking: nearest first once we have a fix, and anything
+  // already measured sinks to the bottom. Without a fix, published order.
+  const orderedTargets = (() => {
+    const withDist = targets.map((t) => ({
+      t,
+      distance: gps ? distanceMeters(gps, t) : null,
+      bearing: gps ? bearingDegrees(gps, t) : null,
+      done: !!measurements[t.id],
+    }))
+    if (!gps) return withDist.sort((a, b) => Number(a.done) - Number(b.done))
+    return withDist.sort(
+      (a, b) => Number(a.done) - Number(b.done) || (a.distance as number) - (b.distance as number)
+    )
+  })()
+
+  const activeDistance = gps && activeTarget ? distanceMeters(gps, activeTarget) : null
+  const activeBearing = gps && activeTarget ? bearingDegrees(gps, activeTarget) : null
+  const doneCount = targets.reduce((n, t) => n + (measurements[t.id] ? 1 : 0), 0)
+  const activeMeasurement = activeTarget ? measurements[activeTarget.id] : undefined
+  const unsyncedCount = Object.values(measurements).reduce((n, m) => n + (m.pending ? 1 : 0), 0)
+
+  // Centre on a point in the map area still *visible* above the field drawer —
+  // centring the container would park your GPS dot behind the sheet.
+  const centerOn = (lat: number, lng: number, zoom?: number) => {
+    const map = mapRef.current
+    if (!map) return
+    const z = zoom ?? map.getZoom()
+    const h = rootRef.current?.clientHeight ?? 0
+    const drawerPx = fieldOpen ? (fieldFull ? h : Math.round(h * 0.52)) : 0
+    if (h - drawerPx < 80) return // map is effectively hidden; nothing to aim at
+    // Middle of the strip that's actually on screen — below the heads-up card,
+    // above the drawer.
+    const topPx = activeTarget ? 250 : 60
+    const desiredY = topPx + (h - drawerPx - topPx) / 2
+    const pt = map.project([lat, lng], z).add([0, h / 2 - desiredY])
+    map.setView(map.unproject(pt, z), z, { animate: true })
+  }
+
+  // Frame a target and make it the one being navigated to.
+  const focusTarget = (t: FieldTarget) => {
+    setActiveTargetId(t.id)
+    setFollowing(false)
+    centerOn(t.lat, t.lng, Math.max(mapRef.current?.getZoom() ?? 20, 21))
+  }
+
+  // Whichever target you're navigating to, load its saved reading into the
+  // entry fields (or clear them for a fresh one).
+  useEffect(() => {
+    setMeasureError('')
+    const m = activeTargetId ? measurements[activeTargetId] : undefined
+    setDraftHeight(m?.heightM != null ? String(Number(fromMeters(m.heightM, unit).toFixed(unit === 'ft' ? 1 : 2))) : '')
+    setDraftNotes(m?.notes ?? '')
+    // Only when the selection changes — retyping mustn't be overwritten by a save.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTargetId])
+
+  const advance = () => {
+    if (!activeTarget) return
+    const next = orderedTargets.find((o) => !o.done && o.t.id !== activeTarget.id)
+    if (next) focusTarget(next.t)
+    else setActiveTargetId(null)
+  }
+
+  // The field loop: type what you measured, save it against the plant, and get
+  // pointed at the next-nearest one you haven't done.
+  const saveAndAdvance = async () => {
+    if (!activeTarget) return
+    const raw = draftHeight.trim()
+    const notes = draftNotes.trim() || null
+    if (!raw && !notes) {
+      setMeasureError('Enter the height you measured, or a note about why you couldn’t.')
+      return
+    }
+    let heightM: number | null = null
+    if (raw) {
+      const n = Number(raw)
+      if (!Number.isFinite(n) || n <= 0) {
+        setMeasureError('That height doesn’t look like a number.')
+        return
+      }
+      // Round here to the millimetre, matching what the API stores — otherwise
+      // a foot reading lands locally as 1.097279964887041 and 1.097 on the
+      // server, and the two copies never look equal.
+      heightM = Math.round(toMeters(n, unit) * 1000) / 1000
+      // A 60 m nursery plant is a unit slip (metres typed as feet, or vice versa).
+      if (heightM > 60) {
+        setMeasureError(`${n} ${unit} is out of range — check the unit toggle.`)
+        return
+      }
+    }
+    await saveMeasurement(activeTarget.id, heightM, notes)
+    advance()
+  }
+
+  const changeUnit = (next: HeightUnit) => {
+    if (next === unit) return
+    // Convert whatever is half-typed so the number keeps meaning the same thing.
+    const n = Number(draftHeight.trim())
+    if (draftHeight.trim() && Number.isFinite(n)) {
+      const inMeters = toMeters(n, unit)
+      setDraftHeight(String(Number(fromMeters(inMeters, next).toFixed(next === 'ft' ? 1 : 2))))
+    }
+    setUnit(next)
+    try {
+      window.localStorage.setItem(unitKey, next)
+    } catch {
+      /* the toggle still works for this session */
+    }
+  }
+
+  // Everything you came for, as one file: estimate, measurement, and the gap.
+  const exportMeasurementsCSV = () => {
+    const cell = (v: unknown) => {
+      const s = v == null ? '' : String(v)
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    }
+    const headers = [
+      'stop', 'code', 'plant_id', 'block', 'group', 'latitude', 'longitude',
+      'estimated_height_m', 'measured_height_m', 'delta_m', 'measured_height_ft',
+      'notes', 'measured_at',
+    ]
+    const rows = targets.map((t, i) => {
+      const m = measurements[t.id]
+      const delta = m?.heightM != null && t.heightM != null ? m.heightM - t.heightM : null
+      return [
+        i + 1, t.code, t.id, t.block ?? '', t.group ?? '', t.lat, t.lng,
+        t.heightM ?? '',
+        m?.heightM ?? '',
+        delta != null ? delta.toFixed(3) : '',
+        m?.heightM != null ? (m.heightM * M_TO_FT).toFixed(2) : '',
+        m?.notes ?? '',
+        m?.measuredAt ?? '',
+      ]
+    })
+    const csv = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\n')
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+    const a = document.createElement('a')
+    a.href = url
+    const slug = (data.title || 'field').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase()
+    a.download = `${slug || 'field'}-${flightKey || 'flight'}-measurements.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Numbered pins for the targets. Rebuilt whenever the set, the selection, or
+  // the measured flags change — 20 markers, so cost is irrelevant.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    let group = targetsLayerRef.current
+    if (!group) {
+      group = L.layerGroup().addTo(map)
+      targetsLayerRef.current = group
+    }
+    group.clearLayers()
+    if (!showTargets || targets.length === 0) return
+
+    targets.forEach((t, i) => {
+      const m = measurements[t.id]
+      const done = !!m
+      const active = t.id === activeTargetId
+      const color = done ? '#6b7280' : t.color || DEFAULT_TARGET_COLOR
+      const size = active ? 34 : 26
+      const showCode = active || zoom >= CODE_LABEL_ZOOM
+      const icon = L.divIcon({
+        className: 'plnt-target',
+        html:
+          `<div class="plnt-target-pin${active ? ' is-active' : ''}${done ? ' is-done' : ''}" ` +
+          `style="--c:${escapeHtml(color)};width:${size}px;height:${size}px;font-size:${active ? 13 : 11}px">` +
+          `${done ? '✓' : String(i + 1)}</div>` +
+          (showCode ? `<div class="plnt-target-code">${escapeHtml(t.code)}</div>` : ''),
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+      })
+      const marker = L.marker([t.lat, t.lng], { icon, zIndexOffset: active ? 1000 : 0 })
+      marker.bindPopup(
+        `<div style="min-width:170px;font-size:12px;line-height:1.55;">` +
+          `<div style="font-weight:700;">${escapeHtml(t.code)}</div>` +
+          `<div style="font-family:ui-monospace,Menlo,monospace;color:#6b7280;">${escapeHtml(t.id)}</div>` +
+          `<div style="margin-top:4px;"><strong>Est. height:</strong> ${escapeHtml(fmtHeight(t))}</div>` +
+          (m?.heightM != null
+            ? `<div style="color:#15803d;"><strong>Measured:</strong> ${escapeHtml(fmtInUnit(m.heightM, unit))}` +
+              (t.heightM != null ? ` (${escapeHtml(fmtDelta(m.heightM - t.heightM, unit))})` : '') +
+              `</div>`
+            : '') +
+          (m?.notes ? `<div style="color:#b45309;">${escapeHtml(m.notes)}</div>` : '') +
+          (t.block != null ? `<div><strong>Block:</strong> ${escapeHtml(String(t.block))}</div>` : '') +
+          (t.species ? `<div><strong>Species:</strong> ${escapeHtml(t.species)}</div>` : '') +
+          (t.group ? `<div style="color:#6b7280;">${escapeHtml(t.group)}</div>` : '') +
+          `<div style="color:#9ca3af;font-size:11px;margin-top:3px;">${t.lat.toFixed(6)}, ${t.lng.toFixed(6)}</div>` +
+          `</div>`
+      )
+      marker.on('click', () => setActiveTargetId(t.id))
+      marker.addTo(group!)
+    })
+  }, [targets, showTargets, measurements, activeTargetId, zoom, unit])
+
+  // Your position, its accuracy halo, and a guide line to the active target.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    let group = gpsLayerRef.current
+    if (!group) {
+      group = L.layerGroup().addTo(map)
+      gpsLayerRef.current = group
+    }
+    group.clearLayers()
+    if (!gps) return
+
+    L.circle([gps.lat, gps.lng], {
+      radius: Math.max(gps.accuracy, 1),
+      color: '#2563eb',
+      weight: 1,
+      opacity: 0.5,
+      fillColor: '#3b82f6',
+      fillOpacity: 0.12,
+      interactive: false,
+    }).addTo(group)
+    L.circleMarker([gps.lat, gps.lng], {
+      radius: 7,
+      color: '#ffffff',
+      weight: 3,
+      fillColor: '#2563eb',
+      fillOpacity: 1,
+      interactive: false,
+    }).addTo(group)
+
+    if (activeTarget) {
+      // White casing under the dashed line so it reads over any imagery.
+      const line: [number, number][] = [
+        [gps.lat, gps.lng],
+        [activeTarget.lat, activeTarget.lng],
+      ]
+      L.polyline(line, { color: '#ffffff', weight: 5, opacity: 0.85, interactive: false }).addTo(group)
+      L.polyline(line, {
+        color: '#2563eb',
+        weight: 2.5,
+        opacity: 1,
+        dashArray: '7 6',
+        interactive: false,
+      }).addTo(group)
+    }
+
+    if (followingRef.current) centerOn(gps.lat, gps.lng)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gps, activeTarget, fieldOpen, fieldFull])
 
   // ---- Count-correction handlers ----
   // Add a plant the model missed at the clicked location.
@@ -1751,6 +2384,15 @@ export default function SharedPropertyMap({
         .plnt-plot-label { background: transparent; border: none; box-shadow: none; padding: 0; margin: 0; overflow: visible; pointer-events: none; }
         .plnt-plot-label::before { display: none; }
         .plnt-label-inner { display: inline-block; white-space: nowrap; transform-origin: center center; color: #fff; font-weight: 700; line-height: 1; text-shadow: 0 1px 2px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.85); pointer-events: none; }
+        .plnt-target { background: transparent; border: none; }
+        .plnt-target-pin { display: flex; align-items: center; justify-content: center; border-radius: 9999px;
+          background: var(--c); color: #fff; font-weight: 800; line-height: 1; cursor: pointer;
+          box-shadow: 0 0 0 3px #fff, 0 2px 6px rgba(0,0,0,0.45); transition: box-shadow .15s, opacity .15s; }
+        .plnt-target-pin.is-active { box-shadow: 0 0 0 3px #fff, 0 0 0 7px rgba(37,99,235,.85), 0 3px 10px rgba(0,0,0,.5); }
+        .plnt-target-pin.is-done { opacity: .55; }
+        .plnt-target-code { margin-top: 3px; text-align: center; white-space: nowrap; color: #fff;
+          font-size: 10px; font-weight: 700; letter-spacing: .02em; pointer-events: none;
+          text-shadow: 0 1px 2px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.9); }
       `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
 
@@ -2161,6 +2803,43 @@ export default function SharedPropertyMap({
                   <p className="px-1.5 pt-0.5 text-[11px] text-gray-400">Turn on Block or Species to draw.</p>
                 )}
               </div>
+
+              {/* Field check — the named specimens to walk to on this flight */}
+              {fieldLayer && targets.length > 0 && (
+                <div className="mt-1 pt-1.5 border-t border-gray-100">
+                  <p className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                    Field check
+                  </p>
+                  <label className="flex items-center gap-2 cursor-pointer rounded p-1.5 hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={showTargets}
+                      onChange={(e) => setShowTargets(e.target.checked)}
+                      className="rounded border-gray-300"
+                    />
+                    <Flag className="h-3 w-3 text-[#2E7D32] shrink-0" />
+                    <span className="text-sm text-gray-800 flex-1 truncate">
+                      {fieldLayer.fieldTargetsLabel || 'Field targets'}
+                    </span>
+                  </label>
+                  <div className="pl-6 pr-1.5 pb-1">
+                    <button
+                      onClick={() => {
+                        setShowTargets(true)
+                        setInvOpen(false)
+                        setFieldOpen(true)
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-md bg-[#0f2e1d] px-2 py-1 text-xs font-medium text-white hover:bg-[#143d27]"
+                    >
+                      <Navigation className="h-3 w-3" />
+                      Open field mode
+                    </button>
+                    <p className="pt-1 text-[10px] text-gray-500 tabular-nums">
+                      {doneCount} of {targets.length} measured
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         ) : (
@@ -2253,8 +2932,341 @@ export default function SharedPropertyMap({
         })}
       </div>
 
+      {/* Field mode heads-up — the one thing you look at while walking:
+          which plant, how far, which way. Sits below the count/Layers chrome. */}
+      {activeTarget && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-[1150] w-[min(23rem,calc(100%-1.5rem))] rounded-xl bg-[#0f2e1d]/95 text-white shadow-xl backdrop-blur-sm px-3 py-2.5">
+          <div className="flex items-center gap-3">
+            {activeBearing != null ? (
+              <Navigation
+                className="h-8 w-8 shrink-0 text-green-300"
+                style={{ transform: `rotate(${activeBearing}deg)` }}
+                aria-label={`Bearing ${Math.round(((activeBearing % 360) + 360) % 360)} degrees`}
+              />
+            ) : (
+              <Flag className="h-7 w-7 shrink-0 text-green-300" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline gap-2">
+                <span className="text-base font-bold leading-tight truncate">{activeTarget.code}</span>
+                <span className="text-[11px] text-green-200/70 font-mono truncate">{activeTarget.id}</span>
+              </div>
+              {activeDistance != null ? (
+                <div className="text-sm text-green-100">
+                  <span className="text-xl font-bold tabular-nums">{fmtDistance(activeDistance)}</span>
+                  <span className="text-green-200/80"> · head {compassPoint(activeBearing ?? 0)}</span>
+                </div>
+              ) : (
+                <div className="text-xs text-green-200/80">
+                  {tracking ? 'Waiting for a GPS fix…' : 'Turn on “Locate me” for live distance'}
+                </div>
+              )}
+              <div className="text-[11px] text-green-200/70">
+                Est. {fmtHeight(activeTarget)}
+                {activeTarget.block != null && ` · Block ${activeTarget.block}`}
+              </div>
+            </div>
+            <button
+              onClick={() => setActiveTargetId(null)}
+              className="shrink-0 text-green-200/60 hover:text-white p-1"
+              title="Stop navigating to this plant"
+              aria-label="Stop navigating"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          {gps && gps.accuracy > GOOD_FIX_M && (
+            <p className="mt-1.5 text-[10px] text-amber-300">
+              GPS accurate to about {fmtDistance(gps.accuracy)} — close in with the imagery for the last few steps.
+            </p>
+          )}
+
+          {/* What you actually measured. Big targets — this gets tapped with
+              one hand while the other holds a height pole. */}
+          <div className="mt-2 flex items-stretch gap-1.5">
+            <div className="flex-1 flex items-center rounded-lg bg-white/10 border border-white/20 focus-within:border-green-400 overflow-hidden">
+              <input
+                type="number"
+                inputMode="decimal"
+                step="0.1"
+                min="0"
+                value={draftHeight}
+                onChange={(e) => setDraftHeight(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void saveAndAdvance()}
+                placeholder="Actual height"
+                aria-label={`Measured height in ${unit === 'ft' ? 'feet' : 'metres'}`}
+                className="w-full bg-transparent px-3 py-2 text-lg font-semibold text-white placeholder:text-green-200/50 placeholder:text-sm placeholder:font-normal focus:outline-none"
+              />
+              <div className="flex shrink-0 pr-1">
+                {(['ft', 'm'] as HeightUnit[]).map((u) => (
+                  <button
+                    key={u}
+                    onClick={() => changeUnit(u)}
+                    className={`px-2 py-1 text-xs font-semibold rounded ${
+                      unit === u ? 'bg-green-500 text-[#0f2e1d]' : 'text-green-200/70 hover:text-white'
+                    }`}
+                  >
+                    {u}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button
+              onClick={() => void saveAndAdvance()}
+              disabled={savingMeasurement}
+              className="shrink-0 flex items-center justify-center gap-1.5 rounded-lg bg-green-500 px-3 text-sm font-semibold text-[#0f2e1d] hover:bg-green-400 disabled:opacity-60"
+            >
+              <Check className="h-4 w-4" />
+              {savingMeasurement ? 'Saving…' : 'Save · next'}
+            </button>
+          </div>
+          <input
+            type="text"
+            value={draftNotes}
+            onChange={(e) => setDraftNotes(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void saveAndAdvance()}
+            placeholder="Note (optional) — e.g. leader broken, wrong plant"
+            className="mt-1.5 w-full rounded-lg bg-white/10 border border-white/20 px-3 py-1.5 text-xs text-white placeholder:text-green-200/50 focus:outline-none focus:border-green-400"
+          />
+
+          {activeMeasurement && (
+            <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+              <span className="text-green-300">
+                Saved
+                {activeMeasurement.heightM != null && ` ${fmtInUnit(activeMeasurement.heightM, unit)}`}
+                {activeMeasurement.heightM != null &&
+                  activeTarget.heightM != null &&
+                  ` · ${fmtDelta(activeMeasurement.heightM - activeTarget.heightM, unit)} vs estimate`}
+                {activeMeasurement.pending && ' · not synced yet'}
+              </span>
+              <button
+                onClick={() => {
+                  void clearMeasurement(activeTarget.id)
+                  setDraftHeight('')
+                  setDraftNotes('')
+                }}
+                className="ml-auto text-green-200/60 underline hover:text-white"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+          {measureError && <p className="mt-1.5 text-[11px] text-amber-300">{measureError}</p>}
+          <button
+            onClick={advance}
+            className="mt-1.5 w-full text-[11px] text-green-200/60 hover:text-white"
+          >
+            Skip to next plant
+          </button>
+        </div>
+      )}
+
+      {/* Field mode — collapsed trigger (bottom-right) */}
+      {fieldLayer && targets.length > 0 && !fieldOpen && (
+        <button
+          onClick={() => {
+            setShowTargets(true)
+            setInvOpen(false)
+            setFieldOpen(true)
+          }}
+          className="absolute bottom-14 right-3 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"
+          title="Field mode — navigate to the check plants"
+        >
+          <Flag className="h-4 w-4" />
+          Field
+          <span className="text-green-300 tabular-nums">
+            ({doneCount}/{targets.length})
+          </span>
+          <ChevronUp className="h-4 w-4" />
+        </button>
+      )}
+
+      {/* Field mode — target list, nearest first, with live distances */}
+      {fieldLayer && fieldOpen && (
+        <div
+          className="absolute inset-x-0 bottom-0 z-[1150] flex flex-col bg-white shadow-[0_-4px_20px_rgba(0,0,0,0.15)] rounded-t-xl overflow-hidden"
+          style={{ height: fieldFull ? '100%' : '52%' }}
+        >
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100">
+            <Flag className="h-4 w-4 text-[#0f2e1d] shrink-0" />
+            <span className="text-sm font-semibold text-gray-900 truncate">
+              {fieldLayer.fieldTargetsLabel || 'Field targets'}
+            </span>
+            <span className="text-xs text-gray-400 tabular-nums shrink-0">
+              {doneCount}/{targets.length} done
+            </span>
+            {unsyncedCount > 0 && (
+              <span className="text-[10px] font-medium text-amber-600 shrink-0">{unsyncedCount} unsynced</span>
+            )}
+            <div className="ml-auto flex items-center gap-1 shrink-0">
+              <button
+                onClick={exportMeasurementsCSV}
+                disabled={doneCount === 0}
+                className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
+                title="Download measurements CSV"
+                aria-label="Download measurements as CSV"
+              >
+                <Download className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setFieldFull((f) => !f)}
+                className="text-gray-400 hover:text-gray-700 p-1"
+                title={fieldFull ? 'Split with map' : 'Full screen'}
+                aria-label={fieldFull ? 'Split with map' : 'Full screen'}
+              >
+                {fieldFull ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={() => setFieldOpen(false)}
+                className="text-gray-400 hover:text-gray-700 p-1"
+                title="Hide field list"
+                aria-label="Hide field list"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Readings that haven't reached the share, and why. Stays put until
+              they land — losing a morning's measurements to a quiet failure is
+              the worst thing this feature could do. */}
+          {unsyncedCount > 0 && (
+            <div className="px-3 py-2 bg-amber-50 border-b border-amber-100 text-[11px] leading-snug text-amber-800">
+              <span className="font-medium">
+                {unsyncedCount} reading{unsyncedCount === 1 ? '' : 's'} saved on this device only.
+              </span>{' '}
+              {syncError || 'They’ll sync to the share automatically once you’re back in signal.'} Don’t clear this
+              browser’s data before they do — or download the CSV to get them off the phone now.
+            </div>
+          )}
+
+          {/* GPS control — the whole feature hinges on this being one tap */}
+          <div className="px-3 py-2 border-b border-gray-100 flex items-center gap-2">
+            <button
+              onClick={() => (tracking ? stopTracking() : startTracking())}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium border transition-colors ${
+                tracking
+                  ? 'bg-blue-600 text-white border-blue-600 hover:bg-blue-700'
+                  : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+              }`}
+            >
+              <LocateFixed className="h-3.5 w-3.5" />
+              {tracking ? 'Locating' : 'Locate me'}
+            </button>
+            {tracking && !following && gps && (
+              <button
+                onClick={() => {
+                  setFollowing(true)
+                  centerOn(gps.lat, gps.lng)
+                }}
+                className="rounded-md border border-gray-300 px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+              >
+                Recenter
+              </button>
+            )}
+            <span className="text-[11px] text-gray-500 truncate">
+              {gpsError ? (
+                <span className="text-red-600">{gpsError}</span>
+              ) : gps ? (
+                `±${fmtDistance(gps.accuracy)} · sorted nearest first`
+              ) : tracking ? (
+                'Waiting for a fix…'
+              ) : (
+                'Turn this on to sort by distance and get bearings'
+              )}
+            </span>
+          </div>
+
+          <div className="flex-1 overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+                <tr>
+                  <th className="text-left font-medium px-3 py-2">Target</th>
+                  <th className="text-left font-medium px-2 py-2">Est. height</th>
+                  <th className="text-left font-medium px-2 py-2">Measured</th>
+                  <th className="text-right font-medium px-2 py-2">Distance</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {orderedTargets.map(({ t, distance, bearing, done }) => {
+                  const active = t.id === activeTargetId
+                  const m = measurements[t.id]
+                  const delta = m?.heightM != null && t.heightM != null ? m.heightM - t.heightM : null
+                  return (
+                    <tr
+                      key={t.id}
+                      onClick={() => focusTarget(t)}
+                      className={`cursor-pointer ${active ? 'bg-green-50' : 'hover:bg-gray-50'} ${
+                        done ? 'text-gray-400' : ''
+                      }`}
+                    >
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="inline-block rounded px-1.5 py-0.5 text-[10px] font-bold text-white shrink-0"
+                            style={{ background: done ? '#9ca3af' : t.color || DEFAULT_TARGET_COLOR }}
+                          >
+                            {t.code}
+                          </span>
+                          <span className={`font-mono text-xs truncate ${done ? 'line-through' : 'text-gray-600'}`}>
+                            {t.id}
+                          </span>
+                        </div>
+                        {t.group && <div className="text-[10px] text-gray-400 pl-0.5">{t.group}</div>}
+                      </td>
+                      <td className="px-2 py-2 text-xs tabular-nums whitespace-nowrap">{fmtHeight(t)}</td>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        {m ? (
+                          <div className="text-xs tabular-nums">
+                            <span className="font-semibold text-gray-900">
+                              {m.heightM != null ? fmtInUnit(m.heightM, unit) : '—'}
+                            </span>
+                            {delta != null && (
+                              <span
+                                className={`ml-1.5 ${Math.abs(delta) > 0.3 ? 'text-amber-600' : 'text-gray-400'}`}
+                              >
+                                {fmtDelta(delta, unit)}
+                              </span>
+                            )}
+                            {m.pending && <span className="ml-1.5 text-amber-600">·unsynced</span>}
+                            {m.notes && (
+                              <div className="text-[10px] text-gray-500 max-w-[14rem] truncate" title={m.notes}>
+                                {m.notes}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-300">not measured</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 text-right whitespace-nowrap">
+                        {distance != null ? (
+                          <span className="inline-flex items-center gap-1 tabular-nums font-medium">
+                            <Navigation
+                              className="h-3.5 w-3.5 text-green-700 shrink-0"
+                              style={{ transform: `rotate(${bearing ?? 0}deg)` }}
+                            />
+                            {fmtDistance(distance)}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+            <p className="px-3 py-3 text-[11px] leading-snug text-gray-400">
+              Tap a row to navigate to it, then enter the height you measured in the card at the top. Readings save to
+              the share (and to this device first, so a dead signal loses nothing).
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Inventory drawer — collapsed trigger (bottom-right) */}
-      {!invOpen && (
+      {!invOpen && !fieldOpen && (
         <button
           onClick={() => setInvOpen(true)}
           className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"

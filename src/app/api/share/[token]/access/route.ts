@@ -20,6 +20,12 @@ interface StoredLayer {
   plant_count?: number
   points_path?: string
   max_zoom?: number // deepest zoom level tiles were generated for (default 22)
+  // A handful of identified specimens to walk to and verify in the field.
+  field_targets_path?: string
+  field_targets_label?: string
+  // When present, only these addresses get the targets — the rest of the
+  // allowlist never learns the layer exists (internal QA points, ground truth).
+  field_targets_emails?: string[]
 }
 
 interface StoredFlight {
@@ -75,6 +81,12 @@ export async function POST(
 
     const accessToken = signAccessToken(share.id)
 
+    // Field targets can be scoped to a subset of the allowlist; an absent list
+    // means "everyone who can open this share".
+    const canSeeFieldTargets = (layer: StoredLayer) =>
+      !layer.field_targets_emails?.length ||
+      layer.field_targets_emails.map((e) => e.trim().toLowerCase()).includes(normalizedEmail)
+
     // Resolve a stored layer into client-ready URLs for a given flight.
     const resolveLayer = async (flightKey: string, layer: StoredLayer) => {
       const base = {
@@ -99,6 +111,18 @@ export async function POST(
             out.pointsUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.points_path, SIGNED_URL_TTL)
           } catch {
             // No points file — map just won't draw per-plant dots.
+          }
+        }
+        if (layer.field_targets_path && canSeeFieldTargets(layer)) {
+          try {
+            out.fieldTargetsUrl = await getSignedUrl(
+              BUCKETS.PROPERTY_SHARES,
+              layer.field_targets_path,
+              SIGNED_URL_TTL
+            )
+            out.fieldTargetsLabel = layer.field_targets_label || 'Field targets'
+          } catch {
+            // No targets file — Field mode just won't be offered.
           }
         }
         return out
