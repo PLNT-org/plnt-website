@@ -1,4 +1,4 @@
-// run-detection.mjs — kick off a plnt_v3 detection job on an orthomosaic by
+// run-detection.mjs — kick off a plant detection job on an orthomosaic by
 // calling the aruco service directly (so tile/dedup params can be overridden,
 // which the /api/detection-jobs Next.js route does not forward).
 //
@@ -16,6 +16,9 @@
 //   R_DEDUP        centroid dedup radius px          (default 22)
 //   CONF           confidence threshold              (default 0.25)
 //   ENGINE         yolo | sam3                       (default yolo)
+//   MODEL          plnt_v7 | plnt_v6 | plnt_1cm_v3   (default plnt_v6 — the
+//                  service's own default. MUST be set explicitly to run v7;
+//                  an unknown name silently falls back to the default.)
 
 import { createClient } from '@supabase/supabase-js'
 
@@ -25,11 +28,19 @@ const OVERLAP = Number(process.env.OVERLAP || 64)
 const R_DEDUP = Number(process.env.R_DEDUP || 22)
 const CONF = Number(process.env.CONF || 0.25)
 const ENGINE = process.env.ENGINE || 'yolo'
+// Must match MODELS in docker/aruco-service/app/main.py. Validated here so a
+// typo surfaces now rather than as a silent fallback to the service default —
+// which is exactly how a run gets attributed to the wrong model.
+const YOLO_MODELS = ['plnt_v7', 'plnt_v6', 'plnt_1cm_v3']
+const MODEL = process.env.MODEL || null
 const INCLUDE_CLASSES = ['plant', 'plants']
 
 async function main() {
   const orthoId = process.argv[2]
   if (!orthoId) throw new Error('Usage: node scripts/run-detection.mjs <orthomosaic_id>')
+  if (ENGINE === 'yolo' && MODEL && !YOLO_MODELS.includes(MODEL)) {
+    throw new Error(`MODEL must be one of ${YOLO_MODELS.join(', ')} (got "${MODEL}")`)
+  }
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -52,8 +63,11 @@ async function main() {
     .eq('orthomosaic_id', orthoId).in('status', ['pending', 'downloading', 'detecting', 'saving'])
   if (active && active.length) throw new Error(`A job is already active for this ortho: ${active[0].id} (${active[0].status})`)
 
+  // `model` is recorded on the job row too, so which model produced a count is
+  // recoverable from the DB later (the pre-registry service logged only a path).
   const config = { confidence_threshold: CONF, include_classes: INCLUDE_CLASSES, engine: ENGINE,
-    tile_width: TILE, tile_height: TILE, overlap_x: OVERLAP, overlap_y: OVERLAP, r_dedup: R_DEDUP }
+    tile_width: TILE, tile_height: TILE, overlap_x: OVERLAP, overlap_y: OVERLAP, r_dedup: R_DEDUP,
+    ...(MODEL ? { model: MODEL } : {}) }
   const { data: job, error: jErr } = await supabase
     .from('detection_jobs')
     .insert({ orthomosaic_id: orthoId, user_id: ortho.user_id, method: 'orthomosaic', status: 'pending', config })
@@ -62,7 +76,7 @@ async function main() {
 
   console.log(`Ortho "${ortho.name}" (${orthoId})`)
   console.log(`  job_id: ${job.id}`)
-  console.log(`  params: tile=${TILE} overlap=${OVERLAP} R=${R_DEDUP} conf=${CONF} engine=${ENGINE}`)
+  console.log(`  params: tile=${TILE} overlap=${OVERLAP} R=${R_DEDUP} conf=${CONF} engine=${ENGINE} model=${MODEL || '(service default)'}`)
   console.log(`  posting to ${ARUCO_BASE}/detect-plants-async …`)
 
   const payload = {
@@ -79,6 +93,7 @@ async function main() {
     supabase_url: url,
     supabase_service_key: key,
     engine: ENGINE,
+    ...(MODEL ? { model: MODEL } : {}),
   }
   const res = await fetch(`${ARUCO_BASE}/detect-plants-async`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
