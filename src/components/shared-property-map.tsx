@@ -23,6 +23,11 @@ export interface SharePlot {
   size?: number | null // container size (gallons)
   species?: string | null
   readinessDate?: string | null // yyyy-mm-dd
+  // Operator-entered count. When set, it OVERRIDES the point-in-polygon count
+  // for this plot everywhere the inventory totals it — for sections the imagery
+  // can't count (uncovered strip, under shade cloth, staged after the flight).
+  // null/undefined = derive the count from the detections, the default.
+  manualCount?: number | null
 }
 
 // The three annotation layers the viewer can toggle on to draw + tag plots.
@@ -30,7 +35,7 @@ type AnnotKey = 'block' | 'size' | 'species'
 const ANNOT_META: Record<AnnotKey, { label: string; hint: string }> = {
   block: { label: 'Block', hint: 'Block / bed / plot number' },
   size: { label: 'Size', hint: 'Container size (gallons)' },
-  species: { label: 'Species', hint: 'Species name + readiness date' },
+  species: { label: 'Species', hint: 'Species name, readiness date + count' },
 }
 
 // ---- Field mode -----------------------------------------------------------
@@ -345,6 +350,12 @@ function plotPopupHtml(plot: SharePlot, annot: Record<AnnotKey, boolean>): strin
   if (annot.species && plot.species) {
     rows.push(`<div><strong>Species:</strong> ${plot.species}</div>`)
     if (plot.readinessDate) rows.push(`<div><strong>Ready:</strong> ${fmtReadiness(plot.readinessDate)}</div>`)
+    // Labelled "entered" so nobody mistakes a typed number for a detected one.
+    if (plot.manualCount != null) {
+      rows.push(
+        `<div><strong>Count:</strong> ${plot.manualCount.toLocaleString()} <span style="color:#6b7280;">(entered)</span></div>`
+      )
+    }
   }
   if (plot.areaAcres != null) rows.push(`<div style="color:#6b7280;">${plot.areaAcres.toFixed(2)} acres</div>`)
   return `<div style="min-width:120px;font-size:12px;line-height:1.5;">${rows.join('') || '<em>Plot</em>'}</div>`
@@ -436,7 +447,7 @@ export default function SharedPropertyMap({
   const [draft, setDraft] = useState<{ boundary: GeoJSONPolygon; areaAcres: number } | null>(null)
   // The saved plot currently being edited (fields only — boundary untouched).
   const [editing, setEditing] = useState<SharePlot | null>(null)
-  const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '' })
+  const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '', manualCount: '' })
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
@@ -1758,7 +1769,7 @@ export default function SharedPropertyMap({
     if (points.length < 3) return
     const ring = points.map((p) => [p.lng, p.lat])
     ring.push(ring[0]) // close the polygon
-    setForm({ block: '', size: '', species: '', readinessDate: '' })
+    setForm({ block: '', size: '', species: '', readinessDate: '', manualCount: '' })
     setSaveError('')
     setDraft({ boundary: { type: 'Polygon', coordinates: [ring] }, areaAcres: plotAreaAcres(points) })
   }, [teardownDraw])
@@ -1885,6 +1896,7 @@ export default function SharedPropertyMap({
       size: plot.size != null ? String(plot.size) : '',
       species: plot.species || '',
       readinessDate: plot.readinessDate || '',
+      manualCount: plot.manualCount != null ? String(plot.manualCount) : '',
     })
     setSaveError('')
     setDraft(null)
@@ -1916,6 +1928,7 @@ export default function SharedPropertyMap({
           size: drawMode === 'block' ? form.size : undefined,
           species: drawMode === 'species' ? form.species : undefined,
           readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
+          manualCount: drawMode === 'species' ? form.manualCount : undefined,
           email: viewerEmail,
         }),
       })
@@ -1956,6 +1969,7 @@ export default function SharedPropertyMap({
           size: drawMode === 'block' ? form.size : undefined,
           species: drawMode === 'species' ? form.species : undefined,
           readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
+          manualCount: drawMode === 'species' ? form.manualCount : undefined,
         }),
       })
       const body = await res.json()
@@ -2259,9 +2273,23 @@ export default function SharedPropertyMap({
         (a.block ?? Infinity) - (b.block ?? Infinity)
     )
 
+  // A plot's count: an operator-entered number wins over the point-in-polygon
+  // result. Entered counts don't need points.json, so a group containing one
+  // still totals even when the imagery counts aren't available (or haven't
+  // loaded) — otherwise a hand-counted block would read as "—" forever.
+  const manualById: Record<string, number> = {}
+  for (const p of plots) if (p.manualCount != null) manualById[p.id] = p.manualCount
+  const anyManual = (ids: string[]) => ids.some((id) => manualById[id] != null)
+  const allManual = (ids: string[]) => ids.length > 0 && ids.every((id) => manualById[id] != null)
+  const plotCount = (id: string) => manualById[id] ?? invCounts?.[id] ?? 0
+
   // Total plant count for a grouped row = sum of its plots' individual counts.
   const groupCount = (g: { plotIds: string[] }) =>
-    invCounts ? g.plotIds.reduce((sum, id) => sum + (invCounts[id] ?? 0), 0) : null
+    invCounts || anyManual(g.plotIds) ? g.plotIds.reduce((sum, id) => sum + plotCount(id), 0) : null
+
+  // How a row's number was arrived at, for the CSV and the drawer's marker.
+  const countSource = (ids: string[]): 'entered' | 'mixed' | 'detected' =>
+    allManual(ids) ? 'entered' : anyManual(ids) ? 'mixed' : 'detected'
 
   // Roll the block-level groups up to one line per (species, size) — the day-to-day
   // view. Each keeps its per-block breakdown for the expandable drill-down. Sorted
@@ -2295,8 +2323,11 @@ export default function SharedPropertyMap({
     )
 
   // Total count for a species+size rollup = sum across its per-block groups.
+  const sizeGroupIds = (ss: { blocks: { plotIds: string[] }[] }) => ss.blocks.flatMap((b) => b.plotIds)
   const sizeGroupCount = (ss: { blocks: { plotIds: string[] }[] }) =>
-    invCounts ? ss.blocks.reduce((sum, b) => sum + (groupCount(b) ?? 0), 0) : null
+    invCounts || anyManual(sizeGroupIds(ss))
+      ? ss.blocks.reduce((sum, b) => sum + (groupCount(b) ?? 0), 0)
+      : null
 
   // Export the current location's species inventory as CSV (matches the drawer's columns).
   const exportInventoryCSV = () => {
@@ -2304,11 +2335,14 @@ export default function SharedPropertyMap({
       const s = v == null ? '' : String(v)
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
     }
-    const headers = ['Species', 'Size (gal)', 'Count', 'Block', 'Readiness Date']
+    // "Count Source" travels with the number so a hand-entered figure is never
+    // mistaken for one the survey measured once this leaves the app.
+    const headers = ['Species', 'Size (gal)', 'Count', 'Count Source', 'Block', 'Readiness Date']
     const rows = inventoryGroups.map((g) => [
       g.species || '',
       g.size != null ? g.size : '',
-      invCounts ? groupCount(g) ?? 0 : '',
+      groupCount(g) ?? '',
+      groupCount(g) == null ? '' : countSource(g.plotIds),
       g.block != null ? g.block : '',
       g.readinessDate ? fmtReadiness(g.readinessDate) : '',
     ])
@@ -2489,6 +2523,25 @@ export default function SharedPropertyMap({
                       onChange={(e) => setForm((f) => ({ ...f, readinessDate: e.target.value }))}
                       className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
                     />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Count <span className="font-normal text-gray-400">(optional)</span>
+                    </label>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      step={1}
+                      value={form.manualCount}
+                      onChange={(e) => setForm((f) => ({ ...f, manualCount: e.target.value }))}
+                      placeholder="Counted from imagery"
+                      className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                    <p className="mt-1 text-[11px] leading-snug text-gray-500">
+                      Leave blank to count this plot from the imagery. Enter a number to override it —
+                      for sections the flight can&apos;t count.
+                    </p>
                   </div>
                 </>
               )}
@@ -3371,7 +3424,28 @@ export default function SharedPropertyMap({
                             {ss.size != null ? `${ss.size}-Gallon` : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums font-semibold text-gray-900">
-                            {invCounts ? (sizeGroupCount(ss) ?? 0).toLocaleString() : invCounting ? '…' : '—'}
+                            {(() => {
+                              const n = sizeGroupCount(ss)
+                              if (n == null) return invCounting ? '…' : '—'
+                              const src = countSource(sizeGroupIds(ss))
+                              return (
+                                <span className="inline-flex items-center gap-1">
+                                  {n.toLocaleString()}
+                                  {src !== 'detected' && (
+                                    <span
+                                      className="text-[10px] font-normal text-gray-400"
+                                      title={
+                                        src === 'entered'
+                                          ? 'Entered by hand, not counted from the imagery'
+                                          : 'Mix of entered and imagery-counted plots'
+                                      }
+                                    >
+                                      {src === 'entered' ? 'entered' : 'mixed'}
+                                    </span>
+                                  )}
+                                </span>
+                              )
+                            })()}
                           </td>
                           <td className="px-3 py-2 text-gray-700">
                             {ss.readinessDate ? fmtReadiness(ss.readinessDate) : <span className="text-gray-300">—</span>}
@@ -3407,7 +3481,21 @@ export default function SharedPropertyMap({
                               </td>
                               <td className="px-3 py-1.5" />
                               <td className="px-3 py-1.5 text-right tabular-nums text-xs text-gray-600">
-                                {invCounts ? (groupCount(g) ?? 0).toLocaleString() : invCounting ? '…' : '—'}
+                                {(() => {
+                                  const n = groupCount(g)
+                                  if (n == null) return invCounting ? '…' : '—'
+                                  const src = countSource(g.plotIds)
+                                  return (
+                                    <span className="inline-flex items-center gap-1">
+                                      {n.toLocaleString()}
+                                      {src !== 'detected' && (
+                                        <span className="text-[10px] text-gray-400">
+                                          {src === 'entered' ? 'entered' : 'mixed'}
+                                        </span>
+                                      )}
+                                    </span>
+                                  )
+                                })()}
                               </td>
                               <td className="px-3 py-1.5 text-xs text-gray-500">
                                 {g.readinessDate ? fmtReadiness(g.readinessDate) : ''}

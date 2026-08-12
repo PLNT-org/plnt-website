@@ -37,6 +37,10 @@ function isValidPolygon(b: any): b is GeoJSONPolygon {
   )
 }
 
+// Columns every handler returns — kept in one place so a new field can't be
+// added to some responses and forgotten in others.
+const PLOT_COLUMNS = 'id, boundary, area_acres, block, container_size, species, readiness_date, manual_count'
+
 // Map a DB row to the shape the client renders.
 function toClientPlot(row: any) {
   return {
@@ -47,7 +51,17 @@ function toClientPlot(row: any) {
     size: row.container_size,
     species: row.species,
     readinessDate: row.readiness_date,
+    manualCount: row.manual_count,
   }
+}
+
+// An operator-entered plant count: a non-negative integer, or null to go back to
+// deriving the count from the imagery. Anything unparseable becomes null rather
+// than 0 — "I didn't enter a number" must not read as "there are zero plants".
+function parseManualCount(v: any): number | null {
+  if (v === null || v === undefined || v === '') return null
+  const n = Number.parseInt(String(v), 10)
+  return Number.isFinite(n) && n >= 0 ? n : null
 }
 
 // GET — list all plots for this share.
@@ -59,7 +73,7 @@ export async function GET(request: NextRequest) {
 
   const { data, error } = await supabaseAdmin
     .from('share_plots')
-    .select('id, boundary, area_acres, block, container_size, species, readiness_date')
+    .select(PLOT_COLUMNS)
     .eq('share_id', shareId)
     .order('created_at', { ascending: true })
 
@@ -70,7 +84,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ plots: (data || []).map(toClientPlot) })
 }
 
-// POST — create a plot. Body: { boundary, areaAcres?, block?, size?, species?, readinessDate?, email? }
+// POST — create a plot. Body: { boundary, areaAcres?, block?, size?, species?, readinessDate?, manualCount?, email? }
 export async function POST(request: NextRequest) {
   const shareId = shareIdFromRequest(request)
   if (!shareId) {
@@ -116,9 +130,10 @@ export async function POST(request: NextRequest) {
       container_size: Number.isFinite(size as number) ? size : null,
       species,
       readiness_date: readinessDate,
+      manual_count: parseManualCount(body.manualCount),
       created_by_email: email,
     })
-    .select('id, boundary, area_acres, block, container_size, species, readiness_date')
+    .select(PLOT_COLUMNS)
     .single()
 
   if (error) {
@@ -128,8 +143,9 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ plot: toClientPlot(data) })
 }
 
-// PATCH — update a plot's tagged fields (block/size/species/readinessDate) by
-// id, without touching its boundary. Only the keys present in the body change.
+// PATCH — update a plot's tagged fields (block/size/species/readinessDate/
+// manualCount) by id, without touching its boundary. Only the keys present in
+// the body change.
 export async function PATCH(request: NextRequest) {
   const shareId = shareIdFromRequest(request)
   if (!shareId) {
@@ -166,13 +182,17 @@ export async function PATCH(request: NextRequest) {
         ? body.readinessDate
         : null
   }
+  // Clearing the input sends '' -> null, which restores the derived count.
+  if ('manualCount' in body) {
+    update.manual_count = parseManualCount(body.manualCount)
+  }
 
   const { data, error } = await supabaseAdmin
     .from('share_plots')
     .update(update)
     .eq('id', id)
     .eq('share_id', shareId) // never let one share edit another's plots
-    .select('id, boundary, area_acres, block, container_size, species, readiness_date')
+    .select(PLOT_COLUMNS)
     .single()
 
   if (error) {
