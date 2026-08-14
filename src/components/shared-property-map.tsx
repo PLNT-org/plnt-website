@@ -494,6 +494,9 @@ export default function SharedPropertyMap({
   // Target codes are only legible once the pins stop overlapping, so they fade
   // in past this zoom; below it the numbered pin carries the identity.
   const CODE_LABEL_ZOOM = 19
+  // Measured heights are the thing worth reading, so their labels come in a
+  // zoom level earlier than the plain target codes.
+  const VALUE_LABEL_ZOOM = 18
   const [zoom, setZoom] = useState(18)
 
   const measureKey = `plnt-field-measurements:${token}:${flightKey ?? ''}`
@@ -1184,18 +1187,24 @@ export default function SharedPropertyMap({
 
     targets.forEach((t, i) => {
       const m = measurements[t.id]
-      const done = !!m
       const active = t.id === activeTargetId
-      const color = done ? '#6b7280' : t.color || DEFAULT_TARGET_COLOR
-      const size = active ? 34 : 26
-      const showCode = active || zoom >= CODE_LABEL_ZOOM
+      // A verified plant is the point of this layer, so it's the one that pops:
+      // solid marker carrying its measured height. Anything still unmeasured
+      // recedes to a hollow outline rather than the other way round.
+      const verified = m?.heightM != null
+      const color = verified ? '#15803d' : t.color || DEFAULT_TARGET_COLOR
+      const size = active ? 34 : verified ? 30 : 24
+      const showLabel = active || zoom >= (verified ? VALUE_LABEL_ZOOM : CODE_LABEL_ZOOM)
+      const label = verified
+        ? `<div class="plnt-target-value">${escapeHtml(fmtInUnit(m!.heightM!, unit))}</div>`
+        : `<div class="plnt-target-code">${escapeHtml(t.code)}</div>`
       const icon = L.divIcon({
         className: 'plnt-target',
         html:
-          `<div class="plnt-target-pin${active ? ' is-active' : ''}${done ? ' is-done' : ''}" ` +
+          `<div class="plnt-target-pin${active ? ' is-active' : ''}${verified ? ' is-verified' : ' is-todo'}" ` +
           `style="--c:${escapeHtml(color)};width:${size}px;height:${size}px;font-size:${active ? 13 : 11}px">` +
-          `${done ? '✓' : String(i + 1)}</div>` +
-          (showCode ? `<div class="plnt-target-code">${escapeHtml(t.code)}</div>` : ''),
+          `${String(i + 1)}</div>` +
+          (showLabel ? label : ''),
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
       })
@@ -1204,12 +1213,16 @@ export default function SharedPropertyMap({
         `<div style="min-width:170px;font-size:12px;line-height:1.55;">` +
           `<div style="font-weight:700;">${escapeHtml(t.code)}</div>` +
           `<div style="font-family:ui-monospace,Menlo,monospace;color:#6b7280;">${escapeHtml(t.id)}</div>` +
-          `<div style="margin-top:4px;"><strong>Est. height:</strong> ${escapeHtml(fmtHeight(t))}</div>` +
           (m?.heightM != null
-            ? `<div style="color:#15803d;"><strong>Measured:</strong> ${escapeHtml(fmtInUnit(m.heightM, unit))}` +
-              (t.heightM != null ? ` (${escapeHtml(fmtDelta(m.heightM - t.heightM, unit))})` : '') +
-              `</div>`
+            ? `<div style="margin-top:5px;color:#15803d;font-size:15px;font-weight:800;line-height:1.2;">` +
+              `${escapeHtml(fmtInUnit(m.heightM, unit))}` +
+              `<span style="font-size:11px;font-weight:600;"> measured</span></div>`
             : '') +
+          `<div style="margin-top:4px;"><strong>Est. height:</strong> ${escapeHtml(fmtHeight(t))}` +
+          (m?.heightM != null && t.heightM != null
+            ? ` <span style="color:#6b7280;">(${escapeHtml(fmtDelta(m.heightM - t.heightM, unit))})</span>`
+            : '') +
+          `</div>` +
           (m?.notes ? `<div style="color:#b45309;">${escapeHtml(m.notes)}</div>` : '') +
           (t.block != null ? `<div><strong>Block:</strong> ${escapeHtml(String(t.block))}</div>` : '') +
           (t.species ? `<div><strong>Species:</strong> ${escapeHtml(t.species)}</div>` : '') +
@@ -2423,10 +2436,19 @@ export default function SharedPropertyMap({
           background: var(--c); color: #fff; font-weight: 800; line-height: 1; cursor: pointer;
           box-shadow: 0 0 0 3px #fff, 0 2px 6px rgba(0,0,0,0.45); transition: box-shadow .15s, opacity .15s; }
         .plnt-target-pin.is-active { box-shadow: 0 0 0 3px #fff, 0 0 0 7px rgba(37,99,235,.85), 0 3px 10px rgba(0,0,0,.5); }
-        .plnt-target-pin.is-done { opacity: .55; }
+        /* Verified: solid and slightly lifted. Unmeasured: hollow, so a reviewer's
+           eye lands on the plants that actually carry a height. */
+        .plnt-target-pin.is-verified { box-shadow: 0 0 0 3px #fff, 0 2px 8px rgba(0,0,0,.5); }
+        .plnt-target-pin.is-todo { background: rgba(255,255,255,.9); color: #4b5563;
+          box-shadow: 0 0 0 2px var(--c), 0 1px 4px rgba(0,0,0,.35); font-weight: 700; }
         .plnt-target-code { margin-top: 3px; text-align: center; white-space: nowrap; color: #fff;
           font-size: 10px; font-weight: 700; letter-spacing: .02em; pointer-events: none;
           text-shadow: 0 1px 2px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.9); }
+        /* The measured height, read straight off the map. */
+        .plnt-target-value { margin: 4px auto 0; display: table; white-space: nowrap;
+          padding: 2px 6px; border-radius: 9999px; background: #15803d; color: #fff;
+          font-size: 11px; font-weight: 800; letter-spacing: .01em; pointer-events: none;
+          box-shadow: 0 0 0 1.5px #fff, 0 1px 4px rgba(0,0,0,.45); }
       `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
 
@@ -3250,18 +3272,22 @@ export default function SharedPropertyMap({
                       key={t.id}
                       onClick={() => focusTarget(t)}
                       className={`cursor-pointer ${active ? 'bg-green-50' : 'hover:bg-gray-50'} ${
-                        done ? 'text-gray-400' : ''
+                        done ? '' : 'text-gray-400'
                       }`}
                     >
                       <td className="px-3 py-2">
                         <div className="flex items-center gap-2">
                           <span
-                            className="inline-block rounded px-1.5 py-0.5 text-[10px] font-bold text-white shrink-0"
-                            style={{ background: done ? '#9ca3af' : t.color || DEFAULT_TARGET_COLOR }}
+                            className="inline-block rounded px-1.5 py-0.5 text-[10px] font-bold shrink-0"
+                            style={
+                              done
+                                ? { background: '#15803d', color: '#fff' }
+                                : { background: '#fff', color: '#4b5563', boxShadow: `inset 0 0 0 1.5px ${t.color || DEFAULT_TARGET_COLOR}` }
+                            }
                           >
                             {t.code}
                           </span>
-                          <span className={`font-mono text-xs truncate ${done ? 'line-through' : 'text-gray-600'}`}>
+                          <span className={`font-mono text-xs truncate ${done ? 'text-gray-600' : 'text-gray-400'}`}>
                             {t.id}
                           </span>
                         </div>
@@ -3271,7 +3297,7 @@ export default function SharedPropertyMap({
                       <td className="px-2 py-2 whitespace-nowrap">
                         {m ? (
                           <div className="text-xs tabular-nums">
-                            <span className="font-semibold text-gray-900">
+                            <span className="text-sm font-bold text-green-800">
                               {m.heightM != null ? fmtInUnit(m.heightM, unit) : '—'}
                             </span>
                             {delta != null && (
