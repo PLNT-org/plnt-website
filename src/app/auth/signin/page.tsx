@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@/lib/auth/auth-context'
+import { ACCESS_DENIED_MESSAGE } from '@/lib/auth/allowlist'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -19,6 +20,14 @@ export default function SignInPage() {
   const { signIn, signInWithGoogle, setIsDemo } = useAuth()
   const [googleLoading, setGoogleLoading] = useState(false)
   const router = useRouter()
+
+  // Surface the rejection when middleware bounced an unapproved session here.
+  // Read from window rather than useSearchParams so the page can stay static.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('error') === 'not_authorized') {
+      setError(ACCESS_DENIED_MESSAGE)
+    }
+  }, [])
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -173,9 +182,9 @@ export default function SignInPage() {
               </Button>
 
               <p className="text-center text-sm text-gray-600 mt-4">
-                Don't have an account?{' '}
-                <Link href="/auth/signup" className="text-green-700 hover:underline font-medium">
-                  Sign up
+                Need an account?{' '}
+                <Link href="/#contact" className="text-green-700 hover:underline font-medium">
+                  Get in touch
                 </Link>
               </p>
             </div>

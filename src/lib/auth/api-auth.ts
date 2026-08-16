@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { SupabaseClient } from '@supabase/supabase-js'
+import { isAllowedEmail } from './allowlist'
 
 /**
  * Authenticate an API request using the Bearer token pattern.
@@ -26,6 +27,15 @@ export async function authenticateRequest(
       user: null,
       isAdmin: false,
       errorResponse: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }),
+    }
+  }
+
+  // Allowlist: a valid token is not enough — the email must be approved.
+  if (!isAllowedEmail(user.email)) {
+    return {
+      user: null,
+      isAdmin: false,
+      errorResponse: NextResponse.json({ error: 'Forbidden' }, { status: 403 }),
     }
   }
 

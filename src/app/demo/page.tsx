@@ -146,12 +146,12 @@ function DemoPageContent() {
           <div className="flex items-center space-x-2">
             <Badge className="bg-yellow-600 text-white">DEMO MODE</Badge>
             <span className="text-sm text-yellow-800">
-              You're viewing sample data. Sign up for full access.
+              You're viewing sample data. Contact us for full access.
             </span>
           </div>
-          <Link href="/auth/signup">
+          <Link href="/#contact">
             <Button size="sm" className="bg-green-700 hover:bg-green-800 text-white">
-              Get Started
+              Get your inventory
             </Button>
           </Link>
         </div>
