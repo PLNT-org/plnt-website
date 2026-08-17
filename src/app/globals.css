@@ -82,6 +82,11 @@
   }
 }
 
+/* Smooth-scroll for in-page anchor navigation (homepage) */
+html {
+  scroll-behavior: smooth;
+}
+
 /* Preserve any animations from your existing components */
 @media (prefers-reduced-motion: reduce) {
   *,

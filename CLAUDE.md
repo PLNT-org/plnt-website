@@ -86,6 +86,11 @@ WEBODM_TOKEN                  # Local WebODM JWT token
 
 # Feature flags
 NEXT_PUBLIC_USE_LIGHTNING     # Set to 'false' to use local WebODM instead of Lightning
+
+# Contact form notifications (Resend)
+RESEND_API_KEY                # If unset, submissions still save — no email is sent
+CONTACT_NOTIFY_TO             # Recipient (default: porter@plnt.net)
+CONTACT_NOTIFY_FROM           # Sender (default: PLNT <onboarding@resend.dev>)
 ```
 
 ### Orthomosaic Processing

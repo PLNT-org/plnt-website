@@ -164,11 +164,6 @@ export default function AuthCallbackPage() {
                         Go to Sign In
                       </Button>
                     </Link>
-                    <Link href="/auth/signup">
-                      <Button variant="outline" className="w-full">
-                        Try Signing Up Again
-                      </Button>
-                    </Link>
                   </div>
                 </div>
               </>

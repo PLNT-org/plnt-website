@@ -3,6 +3,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase/client'
+import { isAllowedEmail, ACCESS_DENIED_MESSAGE } from '@/lib/auth/allowlist'
 import type { User, Session } from '@supabase/supabase-js'
 
 interface UserProfile {
@@ -70,6 +71,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // Reject any session whose email isn't on the allowlist (e.g. a Google
+  // sign-in, or an account created before the allowlist existed).
+  const rejectIfNotAllowed = async (currentSession: Session | null) => {
+    if (!currentSession?.user || isAllowedEmail(currentSession.user.email)) return false
+    await supabase.auth.signOut()
+    setUser(null)
+    setSession(null)
+    setUserProfile(null)
+    return true
+  }
+
   useEffect(() => {
     // If in demo mode, just set loading to false and return
     if (isDemo) {
@@ -96,18 +108,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUserProfile(null)
         }
       } else {
-        setUser(currentSession?.user ?? null)
-        setSession(currentSession ?? null)
-        // Fetch profile if user exists
-        if (currentSession?.user) {
-          fetchUserProfile(currentSession.user.id)
-        }
+        rejectIfNotAllowed(currentSession ?? null).then((rejected) => {
+          if (rejected) return
+          setUser(currentSession?.user ?? null)
+          setSession(currentSession ?? null)
+          // Fetch profile if user exists
+          if (currentSession?.user) {
+            fetchUserProfile(currentSession.user.id)
+          }
+        })
       }
       setLoading(false)
     })
 
     // Listen for changes on auth state (sign in, sign out, etc.)
     const { data } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+      if (currentSession?.user && !isAllowedEmail(currentSession.user.email)) {
+        rejectIfNotAllowed(currentSession)
+        return
+      }
       setUser(currentSession?.user ?? null)
       setSession(currentSession ?? null)
       if (currentSession?.user) {
@@ -127,19 +146,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [isDemo]) // Add isDemo as dependency
 
   const signIn = async (email: string, password: string) => {
+    if (!isAllowedEmail(email)) throw new Error(ACCESS_DENIED_MESSAGE)
+
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw error
+
+    // Belt and suspenders: the session's own email must also be approved.
+    const { data: { session: newSession } } = await supabase.auth.getSession()
+    if (!isAllowedEmail(newSession?.user?.email)) {
+      await supabase.auth.signOut()
+      throw new Error(ACCESS_DENIED_MESSAGE)
+    }
+
     localStorage.removeItem('isDemoMode')
     setIsDemo(false)
     router.push('/dashboard')
   }
 
-  const signUp = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signUp({ email, password })
-    if (error) throw error
-    localStorage.removeItem('isDemoMode')
-    setIsDemo(false)
-    router.push('/dashboard')
+  // Self-serve sign up is disabled — accounts are provisioned by PLNT.
+  const signUp = async (_email: string, _password: string) => {
+    throw new Error('Sign up is disabled. Contact porter@plnt.net for access.')
   }
 
   const signInWithGoogle = async () => {
