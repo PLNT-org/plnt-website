@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { BUCKETS, getSignedUrl } from '@/lib/supabase/storage'
 import { signAccessToken } from '@/lib/share/access-token'
+import { logShareAccess } from '@/lib/share/access-log'
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -54,6 +55,7 @@ export async function POST(
     const normalizedEmail = String(email || '').trim().toLowerCase()
 
     if (!normalizedEmail.includes('@')) {
+      await logShareAccess({ request, linkType: 'share', token: params.token, outcome: 'invalid_email' })
       return NextResponse.json({ error: 'Please enter a valid email address.' }, { status: 400 })
     }
 
@@ -64,20 +66,36 @@ export async function POST(
       .single()
 
     if (error || !share) {
+      await logShareAccess({
+        request, linkType: 'share', token: params.token, outcome: 'not_found', email: normalizedEmail,
+      })
       return NextResponse.json({ error: 'This share link is invalid.' }, { status: 404 })
     }
 
     if (share.expires_at && new Date(share.expires_at) < new Date()) {
+      await logShareAccess({
+        request, linkType: 'share', token: params.token, outcome: 'expired',
+        email: normalizedEmail, shareId: share.id,
+      })
       return NextResponse.json({ error: 'This share link has expired.' }, { status: 410 })
     }
 
     const allowed: string[] = share.allowed_emails || []
     if (!allowed.includes(normalizedEmail)) {
+      await logShareAccess({
+        request, linkType: 'share', token: params.token, outcome: 'denied_email',
+        email: normalizedEmail, shareId: share.id,
+      })
       return NextResponse.json(
         { error: 'This email is not authorized to view this survey.' },
         { status: 403 }
       )
     }
+
+    await logShareAccess({
+      request, linkType: 'share', token: params.token, outcome: 'granted',
+      email: normalizedEmail, shareId: share.id,
+    })
 
     const accessToken = signAccessToken(share.id)
 

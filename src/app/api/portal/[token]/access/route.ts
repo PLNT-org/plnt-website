@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { logShareAccess } from '@/lib/share/access-log'
 
 // Portal front door. Verifies the email against the portal's allowlist, then
 // returns every (non-expired) property_share that same email is authorized for.
@@ -17,24 +18,41 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
     const { email } = await request.json()
     const normalizedEmail = String(email || '').trim().toLowerCase()
     if (!normalizedEmail.includes('@')) {
+      await logShareAccess({ request, linkType: 'portal', token: params.token, outcome: 'invalid_email' })
       return NextResponse.json({ error: 'Please enter a valid email address.' }, { status: 400 })
     }
 
     const { data: portal, error } = await supabaseAdmin
       .from('client_portals')
-      .select('label, allowed_emails, expires_at')
+      .select('id, label, allowed_emails, expires_at')
       .eq('token', params.token)
       .single()
 
     if (error || !portal) {
+      await logShareAccess({
+        request, linkType: 'portal', token: params.token, outcome: 'not_found', email: normalizedEmail,
+      })
       return NextResponse.json({ error: 'This link is invalid.' }, { status: 404 })
     }
     if (portal.expires_at && new Date(portal.expires_at) < new Date()) {
+      await logShareAccess({
+        request, linkType: 'portal', token: params.token, outcome: 'expired',
+        email: normalizedEmail, portalId: portal.id,
+      })
       return NextResponse.json({ error: 'This link has expired.' }, { status: 410 })
     }
     if (!(portal.allowed_emails || []).includes(normalizedEmail)) {
+      await logShareAccess({
+        request, linkType: 'portal', token: params.token, outcome: 'denied_email',
+        email: normalizedEmail, portalId: portal.id,
+      })
       return NextResponse.json({ error: 'This email is not authorized for this portal.' }, { status: 403 })
     }
+
+    await logShareAccess({
+      request, linkType: 'portal', token: params.token, outcome: 'granted',
+      email: normalizedEmail, portalId: portal.id,
+    })
 
     const { data: locShares } = await supabaseAdmin
       .from('property_shares')
