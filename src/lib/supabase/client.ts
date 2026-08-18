@@ -1,11 +1,12 @@
 // lib/supabase/client.ts
-import { createClient } from '@supabase/supabase-js'
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
 
-// These should be in your .env.local file
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+// Cookie-backed on purpose. The plain supabase-js createClient() keeps the
+// session in localStorage, which the server never sees — so middleware.ts
+// (createMiddlewareClient, which reads cookies) found no session and bounced
+// every signed-in user straight back to /auth/signin. Both halves of auth have
+// to agree on where the session lives, and only cookies are readable by both.
+export const supabase = createClientComponentClient()
 
 // Database types (generate these from Supabase)
 export interface Database {
