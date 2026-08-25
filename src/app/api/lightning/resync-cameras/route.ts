@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { LightningClient } from '@/lib/webodm/lightning-client'
+import { authenticateRequest, verifyOrthomosaicOwnership } from '@/lib/auth/api-auth'
 
 // Allow up to 5 minutes — downloading all.zip can be slow for large tasks
 export const maxDuration = 300
@@ -17,11 +18,19 @@ const supabaseAdmin = createClient(
  */
 export async function POST(request: NextRequest) {
   try {
+    // This route holds the service role key and triggers a paid Lightning
+    // download, so it must never run unauthenticated.
+    const { user, isAdmin, errorResponse } = await authenticateRequest(request, supabaseAdmin)
+    if (errorResponse) return errorResponse
+
     const { orthomosaicId } = await request.json()
 
     if (!orthomosaicId) {
       return NextResponse.json({ error: 'orthomosaicId required' }, { status: 400 })
     }
+
+    const ownershipError = await verifyOrthomosaicOwnership(supabaseAdmin, orthomosaicId, user.id, isAdmin)
+    if (ownershipError) return ownershipError
 
     // Get orthomosaic record
     const { data: ortho, error: orthoError } = await supabaseAdmin
