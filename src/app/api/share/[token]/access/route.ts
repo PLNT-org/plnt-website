@@ -170,6 +170,13 @@ export async function POST(
     const latest = flights[0]
     const layers = latest?.layers ?? []
 
+    // Per-share view policy: confine the map to the surveyed parcel — the
+    // landing view is the zoom floor and panning is clamped to it. Stored on
+    // the layer JSON (same place the field-targets policy lives).
+    const lockToParcel =
+      (Array.isArray(share.layers) ? share.layers : []).some((l: any) => l?.lock_to_parcel) ||
+      storedFlights.some((f) => (f.layers || []).some((l: any) => (l as any)?.lock_to_parcel))
+
     // Locations for the switcher: other parcels this email can view, scoped to
     // the SAME client as this share so one client's link never lists another
     // client's parcels (e.g. the operator, who is on everything). Gated by having
@@ -208,6 +215,8 @@ export async function POST(
       locations,
       // Dated orthophoto sets; powers the flight-date dropdown.
       flights,
+      // When true the map won't zoom or pan beyond the surveyed parcel.
+      lockToParcel,
     })
   } catch (error) {
     return NextResponse.json(
