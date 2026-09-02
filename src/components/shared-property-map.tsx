@@ -163,6 +163,10 @@ export interface SharedPropertyData {
   accessToken?: string // gates the plots API (draw/save boundary plots)
   locations?: ShareLocation[] // other locations this viewer's email can open
   flights?: ShareFlight[] // dated orthophoto sets for this parcel (newest first)
+  // Confine the view to the surveyed parcel: the initial fitted view becomes
+  // the zoom floor, and panning is clamped to the parcel's bounds. Zooming in
+  // and panning within the parcel stay unrestricted. Set per share.
+  lockToParcel?: boolean
 }
 
 const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales beyond
@@ -536,6 +540,27 @@ export default function SharedPropertyMap({
     }).addTo(map)
 
     map.fitBounds([[south, west], [north, east]])
+
+    // On a parcel-locked share the landing view is the whole world the viewer
+    // gets: its zoom becomes the floor, and panning is clamped to the parcel.
+    // Zooming in and panning inside it stay unrestricted, and resetView's
+    // fitBounds lands right back on this view. Viscosity 1 makes the pan edge
+    // a hard stop rather than a rubber band.
+    // Deferred until the container has real dimensions — fitting against a
+    // zero-sized div yields a nonsense zoom, and we'd pin the floor to it.
+    if (data.lockToParcel) {
+      const parcel = L.latLngBounds([south, west], [north, east])
+      const confineToParcel = () => {
+        const size = map.getSize()
+        if (size.x < 50 || size.y < 50) return false
+        map.setMinZoom(map.getBoundsZoom(parcel))
+        map.options.maxBoundsViscosity = 1
+        map.setMaxBounds(parcel)
+        return true
+      }
+      if (!confineToParcel()) map.once('resize', confineToParcel)
+    }
+
     L.control.scale({ position: 'bottomleft' }).addTo(map)
     mapRef.current = map
 
