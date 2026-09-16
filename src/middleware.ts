@@ -18,7 +18,8 @@ export async function middleware(req: NextRequest) {
       '/dashboard/upload-images',
       '/dashboard/annotate',
       '/dashboard/verify',
-      '/dashboard/admin'
+      '/dashboard/admin',
+      '/sales'
     ]
     
     const isAdminPath = adminOnlyPaths.some(path => 
@@ -36,8 +37,10 @@ export async function middleware(req: NextRequest) {
   const supabase = createMiddlewareClient({ req, res })
   const { data: { session } } = await supabase.auth.getSession()
   
-  // If no session and trying to access dashboard (and not in demo mode)
-  if (!session && req.nextUrl.pathname.startsWith('/dashboard')) {
+  // If no session and trying to access a protected area (and not in demo mode)
+  const protectedArea =
+    req.nextUrl.pathname.startsWith('/dashboard') || req.nextUrl.pathname.startsWith('/sales')
+  if (!session && protectedArea) {
     return NextResponse.redirect(new URL('/auth/signin', req.url))
   }
 
@@ -57,7 +60,8 @@ export async function middleware(req: NextRequest) {
     '/dashboard/upload-images',
     '/dashboard/annotate', 
     '/dashboard/verify',
-    '/dashboard/admin'
+    '/dashboard/admin',
+    '/sales' // Sales Desk (src/app/sales) — admins only
   ]
   
   const isAdminPath = adminOnlyPaths.some(path => 
@@ -85,5 +89,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*']
+  matcher: ['/dashboard/:path*', '/sales/:path*']
 }
