@@ -10,7 +10,7 @@ import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import {
   LayoutDashboard, Map, Plane, Upload, BarChart3,
-  Settings, Lock, Database, Brain, Mail, Share2, LogOut, UserCircle, Eye
+  Settings, Lock, Database, Brain, Mail, Share2, LogOut, UserCircle, Eye, Phone
 } from 'lucide-react'
 
 export default function DashboardLayout({ 
@@ -202,6 +202,12 @@ function AdminLayout({ children }: { children: React.ReactNode }) {
                   <Button variant="ghost" className="w-full justify-start text-red-600 hover:bg-red-50">
                     <Eye className="w-4 h-4 mr-2" />
                     Link Access
+                  </Button>
+                </Link>
+                <Link href="/sales">
+                  <Button variant="ghost" className="w-full justify-start text-red-600 hover:bg-red-50">
+                    <Phone className="w-4 h-4 mr-2" />
+                    Sales Desk
                   </Button>
                 </Link>
               </nav>

@@ -10,6 +10,7 @@
 export const ALLOWED_EMAILS = [
   'pcomstock@colgate.edu',
   'porter@plnt.net',
+  'cristian@plnt.net',
 ]
 
 export const ACCESS_DENIED_MESSAGE =
