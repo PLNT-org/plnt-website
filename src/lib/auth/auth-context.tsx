@@ -160,7 +160,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     localStorage.removeItem('isDemoMode')
     setIsDemo(false)
-    router.push('/dashboard')
+    // Return to the protected page that sent us here (middleware sets ?next=);
+    // only same-site paths are honoured so the parameter can't redirect off-site.
+    const next = new URLSearchParams(window.location.search).get('next')
+    const safeNext = next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard'
+    router.push(safeNext)
   }
 
   // Self-serve sign up is disabled — accounts are provisioned by PLNT.

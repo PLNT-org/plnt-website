@@ -41,7 +41,10 @@ export async function middleware(req: NextRequest) {
   const protectedArea =
     req.nextUrl.pathname.startsWith('/dashboard') || req.nextUrl.pathname.startsWith('/sales')
   if (!session && protectedArea) {
-    return NextResponse.redirect(new URL('/auth/signin', req.url))
+    // Remember where they were headed so sign-in can send them back there.
+    const signin = new URL('/auth/signin', req.url)
+    signin.searchParams.set('next', req.nextUrl.pathname + req.nextUrl.search)
+    return NextResponse.redirect(signin)
   }
 
   // Allowlist: only approved emails get past this point. Any other session is
