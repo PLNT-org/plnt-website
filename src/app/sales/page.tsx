@@ -6,10 +6,16 @@
  * Admin-only (middleware enforces session + allowlist + admin role; this page
  * re-checks on the client so a stale tab degrades to a message, not a blank
  * screen). The desk itself is a vanilla-JS app (sales-desk.js) that renders
- * into the static markup in shell.ts; this component mounts it once with a
- * Supabase-backed store and the signed-in user's identity.
+ * into the static markup in shell.ts.
+ *
+ * The desk owns everything inside the wrapper div: the effect injects the
+ * shell markup itself and mounts the app. React renders the wrapper with no
+ * children and no innerHTML prop, so its re-renders (auth context updates,
+ * for instance) never touch the desk's DOM. An earlier version passed the
+ * shell through dangerouslySetInnerHTML, and React re-applied it on every
+ * re-render, wiping whatever the desk had drawn.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Bricolage_Grotesque, IBM_Plex_Sans } from 'next/font/google'
@@ -42,29 +48,31 @@ export default function SalesDeskPage() {
   const { user, userProfile, loading, isAdmin } = useAuth()
   const router = useRouter()
   const rootRef = useRef<HTMLDivElement>(null)
-  const [mounted, setMounted] = useState(false)
+  const unmountRef = useRef<null | (() => void)>(null)
 
   // Middleware already redirects anonymous visitors; this covers a session
   // that expired after the page loaded.
   useEffect(() => {
-    if (!loading && !user) router.replace('/auth/signin')
+    if (!loading && !user) router.replace('/auth/signin?next=/sales')
   }, [loading, user, router])
 
   // Mount the desk once we know who is signed in and that they are an admin.
   // The profile can arrive a beat after the user does, so wait for it.
   useEffect(() => {
-    if (loading || !user || !userProfile || !isAdmin || !rootRef.current || mounted) return
-    const unmount = mountSalesDesk({
-      root: rootRef.current,
+    const root = rootRef.current
+    if (loading || !user || !userProfile || !isAdmin || !root || unmountRef.current) return
+    root.innerHTML = SHELL
+    unmountRef.current = mountSalesDesk({
+      root,
       db: makeSupabaseDb(supabase),
       downloads: browserDownloads,
       me: displayName(userProfile, user.email),
       email: user.email || '',
     })
-    setMounted(true)
     return () => {
-      unmount()
-      setMounted(false)
+      unmountRef.current?.()
+      unmountRef.current = null
+      root.innerHTML = ''
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, user?.id, userProfile?.id, isAdmin])
@@ -95,11 +103,6 @@ export default function SalesDeskPage() {
     )
   }
 
-  return (
-    <div
-      ref={rootRef}
-      className={`sd ${display.variable} ${body.variable}`}
-      dangerouslySetInnerHTML={{ __html: SHELL }}
-    />
-  )
+  // No children and no innerHTML prop on purpose — see the note at the top.
+  return <div ref={rootRef} className={`sd ${display.variable} ${body.variable}`} />
 }
