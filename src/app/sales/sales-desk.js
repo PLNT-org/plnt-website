@@ -85,7 +85,8 @@ async function init(){
   render();
   if(db){
     S.online=true;setStatus(true,'Shared with your team · live');
-    unsubs.push(db.collection('orgs').onSnapshot(snap=>{S.orgs=new Map(snap.docs.map(d=>[d.id,d.data()]));render();},e=>{setStatus(false,'Connection problem: '+(e.message||e.code));}));
+    const LIVE='Shared with your team · live';
+    unsubs.push(db.collection('orgs').onSnapshot(snap=>{S.orgs=new Map(snap.docs.map(d=>[d.id,d.data()]));render();},e=>{const net=/fetch|network|offline/i.test(e.message||'');setStatus(false,net?'Offline · reconnecting…':'Connection problem: '+(e.message||e.code));},()=>{if(S.statusText!==LIVE)setStatus(true,LIVE);}));
     unsubs.push(db.collection('templates').onSnapshot(snap=>{S.templates=new Map(snap.docs.map(d=>[d.id,d.data()]));render();},e=>{}));
     unsubs.push(db.doc('settings/team').onSnapshot(snap=>{const d=snap.exists?snap.data():{};S.team=d.members||[];S.byEmail=d.byEmail||{};const nm=S.byEmail[S.email]||S.me;if(nm&&nm!==S.me){S.me=nm;}if(S.me&&!S.team.includes(S.me))saveTeam([...S.team,S.me].sort(),d);render();},e=>{}));
   }else{

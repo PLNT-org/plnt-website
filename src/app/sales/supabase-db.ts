@@ -7,8 +7,9 @@
  * so the app code did not have to change when it moved to plnt.net/sales.
  *
  * Each table holds one row per document: `id` plus a `doc` JSONB body.
- * Live updates ride Supabase Realtime (postgres_changes); a 60 s poll and a
- * refresh-on-focus cover the case where Realtime is unavailable.
+ * Live updates ride Supabase Realtime (postgres_changes); a 2-minute poll, a
+ * refresh-on-focus, and a retry with backoff cover the case where Realtime
+ * is unavailable or the network drops for a moment.
  */
 import type { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js'
 
@@ -67,16 +68,36 @@ export function makeSupabaseDb(sb: SupabaseClient) {
     return rows
   }
 
-  /** Subscribe to a table (optionally one row) and re-run `load` on every change. */
-  function watch(t: string, filter: string | null, load: () => Promise<void>, onErr?: ErrCb): Unsub {
+  /**
+   * Subscribe to a table (optionally one row) and re-run `load` on every change.
+   * A failed load (network blip, laptop waking from sleep) is reported through
+   * `onErr` and retried with a short backoff; the next successful load calls
+   * `onOk`, so the caller can clear any "connection problem" notice.
+   */
+  function watch(
+    t: string,
+    filter: string | null,
+    load: () => Promise<void>,
+    onErr?: ErrCb,
+    onOk?: () => void
+  ): Unsub {
     let stopped = false
     let debounce: ReturnType<typeof setTimeout> | undefined
+    let retry: ReturnType<typeof setTimeout> | undefined
+    let failures = 0
     const refresh = async () => {
       if (stopped) return
+      clearTimeout(retry)
       try {
         await load()
+        failures = 0
+        onOk?.()
       } catch (e: any) {
+        failures++
         onErr?.(e?.code ? e : { code: 'unavailable', message: e?.message || String(e) })
+        // 5 s, 15 s, 30 s, then every 30 s until it works again.
+        const delay = Math.min(30_000, 5_000 * Math.pow(3, Math.min(failures - 1, 2)))
+        retry = setTimeout(refresh, delay)
       }
     }
     refresh()
@@ -91,16 +112,22 @@ export function makeSupabaseDb(sb: SupabaseClient) {
         }
       )
       .subscribe()
-    const poll = setInterval(refresh, 60_000)
+    const poll = setInterval(() => {
+      if (document.visibilityState === 'visible') refresh()
+    }, 120_000)
     const onVisible = () => {
       if (document.visibilityState === 'visible') refresh()
     }
+    const onOnline = () => refresh()
     document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('online', onOnline)
     return () => {
       stopped = true
       clearTimeout(debounce)
+      clearTimeout(retry)
       clearInterval(poll)
       document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('online', onOnline)
       sb.removeChannel(channel)
     }
   }
@@ -133,8 +160,8 @@ export function makeSupabaseDb(sb: SupabaseClient) {
         const { error } = await sb.from(t).delete().eq('id', id)
         if (error) throw wrap(error)
       },
-      onSnapshot(next: (s: Snap) => void, onErr?: ErrCb): Unsub {
-        return watch(t, `id=eq.${id}`, async () => next(await ref.get()), onErr)
+      onSnapshot(next: (s: Snap) => void, onErr?: ErrCb, onOk?: () => void): Unsub {
+        return watch(t, `id=eq.${id}`, async () => next(await ref.get()), onErr, onOk)
       },
     }
     return ref
@@ -157,7 +184,7 @@ export function makeSupabaseDb(sb: SupabaseClient) {
         const docs = rows.map((r) => snap(r.id, r.doc))
         return { docs, size: docs.length, empty: !docs.length }
       },
-      onSnapshot(next: (q: QuerySnap) => void, onErr?: ErrCb): Unsub {
+      onSnapshot(next: (q: QuerySnap) => void, onErr?: ErrCb, onOk?: () => void): Unsub {
         return watch(
           t,
           null,
@@ -166,7 +193,8 @@ export function makeSupabaseDb(sb: SupabaseClient) {
             const docs = rows.map((r) => snap(r.id, r.doc))
             next({ docs, size: docs.length, empty: !docs.length })
           },
-          onErr
+          onErr,
+          onOk
         )
       },
     }
