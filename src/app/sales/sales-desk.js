@@ -35,7 +35,7 @@ function parseAcres(v){const s=String(v??'').trim();if(!s)return'';const m=s.mat
 function orgState(o){return o.state||stateFromAddress(o.address);}
 
 /* ---------- state ---------- */
-const S={email:'',byEmail:{},orgs:new Map(),templates:new Map(),team:[],me:'',view:'today',scope:'mine',q:'',stageF:'',ownerF:'',sort:'next',sortDir:1,online:null,drawerOrg:null,tplSel:null,imp:null,selDay:null,weekOff:0,stateF:'',acreMin:'',acreMax:'',pipeSort:'updated:desc'};
+const S={email:'',byEmail:{},statusLive:null,statusText:'Connecting…',orgs:new Map(),templates:new Map(),team:[],me:'',view:'today',scope:'mine',q:'',stageF:'',ownerF:'',sort:'next',sortDir:1,online:null,drawerOrg:null,tplSel:null,imp:null,selDay:null,weekOff:0,stateF:'',acreMin:'',acreMax:'',pipeSort:'updated:desc'};
 let db=null,downloads=null;const listeners=[];function on(ev,fn){document.addEventListener(ev,fn);listeners.push([ev,fn]);}
 
 /* ---------- utils ---------- */
@@ -76,7 +76,8 @@ async function saveTemplate(id,t){t.updatedAt=nowISO();S.templates.set(id,t);ren
 async function deleteTemplate(id){S.templates.delete(id);if(S.tplSel===id)S.tplSel=null;render();await persist(()=>db.doc('templates/'+id).delete(),'Delete');}
 async function saveTeam(members,extra){S.team=members;render();await persist(()=>db.doc('settings/team').set({...(extra||{}),byEmail:S.byEmail||{},members,updatedAt:nowISO()}),'Save');}
 
-function setStatus(live,text){const el=document.getElementById('status');el.className='status'+(live?' live':'');el.querySelector('span').textContent=text;}
+function setStatus(live,text){S.statusLive=live;S.statusText=text;applyStatus();}
+function applyStatus(){const el=document.getElementById('status');if(!el)return;el.className='status'+(S.statusLive?' live':'');const sp=el.querySelector('span');if(sp)sp.textContent=S.statusText||'Connecting…';}
 
 async function init(){
   const v=ls('view');if(v&&VIEWS.some(x=>x[0]===v))S.view=v;
@@ -93,7 +94,7 @@ async function init(){
 }
 let unsubs=[];
 /* ---------- render ---------- */
-function render(){renderNav();renderMe();renderView();if(S.drawerOrg)renderDrawer();}
+function render(){renderNav();renderMe();applyStatus();renderView();if(S.drawerOrg)renderDrawer();}
 function counts(){const t=todayStr();let due=0;for(const o of S.orgs.values()){if(!isMine(o))continue;for(const c of o.contacts||[]){if(c.next?.date&&c.next.type!=='none'&&c.next.date<=t)due++;}}return{today:due};}
 function renderNav(){
   const c=counts();
@@ -554,5 +555,6 @@ on('dragend',()=>{drag=null;document.querySelectorAll('.over').forEach(c=>c.clas
 
   S.me=opts.me||'';S.email=(opts.email||'').toLowerCase();db=opts.db||null;downloads=opts.downloads||null;
   init();
+  if(typeof window!=='undefined')window.__plntSalesDesk={get state(){return S;}};
   return function unmount(){listeners.forEach(([ev,fn])=>document.removeEventListener(ev,fn));unsubs.forEach(u=>{try{u&&u();}catch(e){}});unsubs=[];};
 }
