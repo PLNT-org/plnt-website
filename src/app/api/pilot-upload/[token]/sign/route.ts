@@ -32,19 +32,27 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
 
   const signed: { name: string; path: string; token: string }[] = []
   const rejected: { name: string; reason: string }[] = []
+  const toSign: string[] = []
   for (const f of files) {
     const name = safeFileName(String(f.name || ''))
     const size = Number(f.size || 0)
     if (!name || !isAcceptedName(name)) { rejected.push({ name, reason: 'Not a DJI image (.jpg/.tif/.dng)' }); continue }
     if (size <= 0 || size > MAX_FILE_BYTES) { rejected.push({ name, reason: 'File is empty or over 200 MB' }); continue }
     if (remaining <= 0) { rejected.push({ name, reason: `This link accepts at most ${link.max_files} files` }); continue }
-    const path = `${link.id}/${name}`
-    const { data, error } = await supabaseAdmin.storage
-      .from(PILOT_UPLOAD_BUCKET)
-      .createSignedUploadUrl(path, { upsert: true })
-    if (error || !data) { rejected.push({ name, reason: error?.message || 'Could not prepare upload' }); continue }
-    signed.push({ name, path, token: data.token })
+    toSign.push(name)
     remaining -= 1
+  }
+  // Signing is one round-trip to Storage per file (~150 ms); do 20 at a time so a
+  // 200-file batch takes ~2 s instead of ~30 s.
+  for (let i = 0; i < toSign.length; i += 20) {
+    const chunk = toSign.slice(i, i + 20)
+    const results = await Promise.all(chunk.map((name) =>
+      supabaseAdmin.storage.from(PILOT_UPLOAD_BUCKET).createSignedUploadUrl(`${link.id}/${name}`, { upsert: true })))
+    results.forEach(({ data, error }, k) => {
+      const name = chunk[k]
+      if (error || !data) rejected.push({ name, reason: error?.message || 'Could not prepare upload' })
+      else signed.push({ name, path: `${link.id}/${name}`, token: data.token })
+    })
   }
   return NextResponse.json({ signed, rejected })
 }
