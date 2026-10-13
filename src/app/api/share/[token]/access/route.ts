@@ -204,6 +204,21 @@ export async function POST(
         }
       })
 
+    // Optional guided walkthrough: `<shareId>/tour.json` in the share's folder
+    // (steps the viewer through hand-counted blocks, then the inventory). Most
+    // shares have none; the viewer only offers the walkthrough when this is set.
+    // SHARE_TOUR_URL_OVERRIDE points a dev server at a local copy instead.
+    let tourUrl: string | undefined
+    if (process.env.SHARE_TOUR_URL_OVERRIDE) {
+      tourUrl = process.env.SHARE_TOUR_URL_OVERRIDE
+    } else {
+      try {
+        tourUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, `${share.id}/tour.json`, SIGNED_URL_TTL)
+      } catch {
+        // No tour file — nothing to offer.
+      }
+    }
+
     return NextResponse.json({
       title: share.title,
       client_name: share.client_name,
@@ -217,6 +232,8 @@ export async function POST(
       flights,
       // When true the map won't zoom or pan beyond the surveyed parcel.
       lockToParcel,
+      // Signed URL of the walkthrough steps, when this share has one.
+      tourUrl,
     })
   } catch (error) {
     return NextResponse.json(
