@@ -120,12 +120,16 @@ export default function PilotUploadPage() {
             update(s.name, { state: 'uploading' })
             const meta = it.meta || (await readXmp(it.file))
             let ok = false
-            for (let attempt = 0; attempt < 3 && !ok; attempt++) {
-              const { error: upErr } = await supabase.storage
-                .from(PILOT_UPLOAD_BUCKET)
-                .uploadToSignedUrl(s.path, s.token, it.file, { contentType: contentTypeFor(s.name), upsert: true })
-              ok = !upErr
-              if (!ok) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)))
+            for (let attempt = 0; attempt < 4 && !ok; attempt++) {
+              try {
+                // A storage gateway hiccup (HTML 5xx) makes the client THROW rather than return an error;
+                // treat both the same way: wait, then try the same file again.
+                const { error: upErr } = await supabase.storage
+                  .from(PILOT_UPLOAD_BUCKET)
+                  .uploadToSignedUrl(s.path, s.token, it.file, { contentType: contentTypeFor(s.name), upsert: true })
+                ok = !upErr
+              } catch { ok = false }
+              if (!ok) await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)))
             }
             if (ok) { finished.push({ name: s.name, size: it.size, meta }); update(s.name, { state: 'done', meta }); setDoneBytes((b) => b + it.size) }
             else update(s.name, { state: 'failed', reason: 'upload failed, will retry' })
@@ -136,7 +140,9 @@ export default function PilotUploadPage() {
           const rec = await fetch(`/api/pilot-upload/${token}/files`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ files: finished }),
           })
-          const rd = await rec.json()
+          let rd: { missing?: string[] } = {}
+          try { rd = await rec.json() } catch { /* transient; the next GET will still show these files once recorded */ }
+          if (!rec.ok) { for (const f of finished) update(f.name, { state: 'failed', reason: 'could not record, will retry' }); continue }
           for (const m of (rd.missing || []) as string[]) update(m, { state: 'failed', reason: 'not found after upload, will retry' })
           setReceived((prev) => { const n = new Map(prev); finished.forEach((f) => n.set(f.name, f.size)); return n })
         }
@@ -144,9 +150,21 @@ export default function PilotUploadPage() {
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Upload stopped unexpectedly. Press Resume to continue.')
     } finally {
+      // Anything left mid-flight goes back in the queue so a Resume (or the auto-restart) picks it up.
+      setItems((prev) => prev.map((i) => (i.state === 'uploading' ? { ...i, state: 'failed', reason: 'interrupted, will retry' } : i)))
       setRunning(false)
     }
   }, [running, token])
+
+  // Auto-restart after an unexpected stop (network blip, storage hiccup): up to 5 times, 10 s apart.
+  const restartsRef = useRef(0)
+  useEffect(() => {
+    if (!error || running || paused || submitted) return
+    if (!items.some((i) => i.state === 'failed' || i.state === 'queued')) return
+    if (restartsRef.current >= 5) return
+    const t = setTimeout(() => { restartsRef.current += 1; setError(''); start() }, 10000)
+    return () => clearTimeout(t)
+  }, [error, running, paused, submitted, items, start])
 
   // Auto-start whenever new queued files appear and nothing is running.
   useEffect(() => {
