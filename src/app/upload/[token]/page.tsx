@@ -188,9 +188,10 @@ export default function PilotUploadPage() {
 
   const header = (
     <header className="bg-[#0f2e1d] text-white">
-      <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
+      <div className="mx-auto grid max-w-4xl grid-cols-[1fr_auto_1fr] items-center px-4 py-3">
+        <span />
         <Image src="/images/plnt-logo-darkbg.svg" alt="PLNT" width={120} height={40} className="h-9 w-auto" priority />
-        <span className="text-sm text-green-200/80">Pilot imagery upload</span>
+        <span className="justify-self-end text-sm text-green-200/80">Pilot imagery upload</span>
       </div>
     </header>
   )
@@ -238,8 +239,8 @@ export default function PilotUploadPage() {
             <p className="mt-3 text-lg font-medium text-[#0f2e1d]">Drag the flight folder here</p>
             <p className="mt-1 text-sm text-gray-500">DJI .JPG and .TIF files · everything else is ignored · nothing leaves this page except to PLNT&apos;s storage</p>
             <div className="mt-4 flex justify-center gap-2">
-              <Button onClick={open} className="bg-[#0f2e1d] hover:bg-[#143d27]">Choose files</Button>
-              <label className="inline-flex cursor-pointer items-center rounded-md border px-4 py-2 text-sm font-medium hover:bg-gray-50">
+              <Button onClick={open} className="bg-green-600 text-white hover:bg-green-700">Choose files</Button>
+              <label className="inline-flex cursor-pointer items-center rounded-md border border-green-600 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-50">
                 Choose a folder
                 {/* webkitdirectory lets Chrome/Edge/Safari pick a whole folder at once */}
                 <input type="file" multiple className="hidden" onChange={(e) => onDrop(Array.from(e.target.files || []))}
@@ -260,7 +261,7 @@ export default function PilotUploadPage() {
               </div>
               <div className="flex items-center gap-2">
                 {running && !paused && <Button size="sm" variant="outline" onClick={() => { pausedRef.current = true; setPaused(true) }}><Pause className="mr-1 h-4 w-4" />Pause</Button>}
-                {!running && (counts.queued + counts.failed > 0) && <Button size="sm" onClick={start} className="bg-[#0f2e1d] hover:bg-[#143d27]"><Play className="mr-1 h-4 w-4" />{paused ? 'Resume' : 'Retry'}</Button>}
+                {!running && (counts.queued + counts.failed > 0) && <Button size="sm" onClick={start} className="bg-green-600 text-white hover:bg-green-700"><Play className="mr-1 h-4 w-4" />{paused ? 'Resume' : 'Retry'}</Button>}
                 {running && <Loader2 className="h-4 w-4 animate-spin text-gray-400" />}
               </div>
             </div>
@@ -290,7 +291,7 @@ export default function PilotUploadPage() {
               <Input placeholder="Your email (for questions about the flight)" type="email" value={pilotEmail} onChange={(e) => setPilotEmail(e.target.value)} />
             </div>
             <textarea className="mt-3 w-full rounded-md border px-3 py-2 text-sm" rows={3} placeholder="Notes: flight altitude, overlap, anything that went wrong, areas you couldn't cover…" value={notes} onChange={(e) => setNotes(e.target.value)} />
-            <Button className="mt-3 bg-[#0f2e1d] hover:bg-[#143d27]" disabled={submitting || running || (!allLanded && items.length > 0)} onClick={submit}>
+            <Button className="mt-3 bg-green-600 text-white hover:bg-green-700" disabled={submitting || running || (!allLanded && items.length > 0)} onClick={submit}>
               {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}Mark upload complete
             </Button>
           </section>
