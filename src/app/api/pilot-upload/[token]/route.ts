@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic'
 // re-drops the same folder after a dropped connection skips what's done).
 export async function GET(_request: NextRequest, { params }: { params: { token: string } }) {
   const { link, errorResponse } = await loadLink(params.token)
-  if (errorResponse || !link) return errorResponse
+  if (!link) return errorResponse ?? NextResponse.json({ error: 'This upload link is invalid.' }, { status: 404 })
   const { data: files } = await supabaseAdmin
     .from('pilot_upload_files')
     .select('file_name, size_bytes')

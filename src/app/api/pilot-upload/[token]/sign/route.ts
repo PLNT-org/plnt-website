@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic'
 // Body: { files: [{ name, size }] } -> { signed: [{ name, path, token }], rejected: [{ name, reason }] }
 export async function POST(request: NextRequest, { params }: { params: { token: string } }) {
   const { link, errorResponse } = await loadLink(params.token)
-  if (errorResponse || !link) return errorResponse
+  if (!link) return errorResponse ?? NextResponse.json({ error: 'This upload link is invalid.' }, { status: 404 })
   const closed = linkIsOpen(link)
   if (closed) return NextResponse.json({ error: closed }, { status: 403 })
 

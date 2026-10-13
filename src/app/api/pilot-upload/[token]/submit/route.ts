@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic'
 // The link stays usable afterwards in case they find a missed folder.
 export async function POST(request: NextRequest, { params }: { params: { token: string } }) {
   const { link, errorResponse } = await loadLink(params.token)
-  if (errorResponse || !link) return errorResponse
+  if (!link) return errorResponse ?? NextResponse.json({ error: 'This upload link is invalid.' }, { status: 404 })
   const closed = linkIsOpen(link)
   if (closed) return NextResponse.json({ error: closed }, { status: 403 })
 
