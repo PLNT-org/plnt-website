@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { escapeHtml, loadLink, linkIsOpen, refreshLinkTotals, sendOperatorEmail, supabaseAdmin } from '@/lib/pilot-upload/server'
+import { allFiles, escapeHtml, loadLink, linkIsOpen, refreshLinkTotals, sendOperatorEmail, supabaseAdmin } from '@/lib/pilot-upload/server'
 
 export const dynamic = 'force-dynamic'
 
@@ -19,11 +19,8 @@ export async function POST(request: NextRequest, { params }: { params: { token: 
   const notes = String(body.notes || '').trim().slice(0, 4000)
 
   await refreshLinkTotals(link.id)
-  const { data: files } = await supabaseAdmin
-    .from('pilot_upload_files')
-    .select('size_bytes, lat, lon, rel_alt_m, gimbal_pitch_deg, captured_at, camera_model, gps_status')
-    .eq('link_id', link.id)
-  const all = files || []
+  const all = await allFiles<{ size_bytes: number; lat: number | null; lon: number | null; rel_alt_m: number | null; gimbal_pitch_deg: number | null; captured_at: string | null; camera_model: string | null; gps_status: string | null }>(
+    link.id, 'size_bytes, lat, lon, rel_alt_m, gimbal_pitch_deg, captured_at, camera_model, gps_status')
   if (!all.length) return NextResponse.json({ error: 'No files have been uploaded yet.' }, { status: 400 })
 
   const now = new Date().toISOString()

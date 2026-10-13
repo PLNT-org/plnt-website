@@ -23,7 +23,14 @@ const sb = createClient(url, key)
 const col = /^[0-9a-f-]{36}$/i.test(ref) ? 'id' : 'token'
 const { data: link, error } = await sb.from('pilot_upload_links').select('*').eq(col, ref).single()
 if (error || !link) throw new Error(`No upload link for ${ref}`)
-const { data: files } = await sb.from('pilot_upload_files').select('*').eq('link_id', link.id).order('file_name')
+// PostgREST returns at most 1,000 rows per query; page through for big flights.
+const files = []
+for (let from = 0; ; from += 1000) {
+  const { data } = await sb.from('pilot_upload_files').select('*').eq('link_id', link.id).order('file_name').range(from, from + 999)
+  if (!data?.length) break
+  files.push(...data)
+  if (data.length < 1000) break
+}
 console.log(`${link.client_name}${link.site_name ? ' / ' + link.site_name : ''} — ${files.length} files, ${(Number(link.total_bytes) / 1e9).toFixed(2)} GB, status ${link.status}`)
 mkdirSync(dest, { recursive: true })
 writeFileSync(join(dest, 'manifest.csv'), ['file_name,size_bytes,lat,lon,rel_alt_m,gimbal_pitch_deg,captured_at,camera_model,gps_status,uploaded_at',
