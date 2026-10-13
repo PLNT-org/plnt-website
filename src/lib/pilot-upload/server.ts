@@ -45,13 +45,26 @@ export function linkIsOpen(link: PilotLinkRow): string | null {
   return null
 }
 
-/** Recompute file_count / total_bytes from the files table (cheap, keeps the link row honest). */
+/** Every file row for a link. PostgREST caps a query at 1,000 rows, so page through — a flight is 2,000+ files. */
+export async function allFiles<T = Record<string, unknown>>(linkId: string, columns: string): Promise<T[]> {
+  const out: T[] = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabaseAdmin
+      .from('pilot_upload_files')
+      .select(columns)
+      .eq('link_id', linkId)
+      .order('file_name')
+      .range(from, from + 999)
+    if (error || !data?.length) break
+    out.push(...(data as T[]))
+    if (data.length < 1000) break
+  }
+  return out
+}
+
+/** Recompute file_count / total_bytes from the files table (keeps the link row honest). */
 export async function refreshLinkTotals(linkId: string) {
-  const { data } = await supabaseAdmin
-    .from('pilot_upload_files')
-    .select('size_bytes')
-    .eq('link_id', linkId)
-  const files = data || []
+  const files = await allFiles<{ size_bytes: number }>(linkId, 'size_bytes')
   await supabaseAdmin
     .from('pilot_upload_links')
     .update({

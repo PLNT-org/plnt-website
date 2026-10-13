@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { loadLink, supabaseAdmin } from '@/lib/pilot-upload/server'
+import { allFiles, loadLink } from '@/lib/pilot-upload/server'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,10 +9,7 @@ export const dynamic = 'force-dynamic'
 export async function GET(_request: NextRequest, { params }: { params: { token: string } }) {
   const { link, errorResponse } = await loadLink(params.token)
   if (!link) return errorResponse ?? NextResponse.json({ error: 'This upload link is invalid.' }, { status: 404 })
-  const { data: files } = await supabaseAdmin
-    .from('pilot_upload_files')
-    .select('file_name, size_bytes')
-    .eq('link_id', link.id)
+  const files = await allFiles<{ file_name: string; size_bytes: number }>(link.id, 'file_name, size_bytes')
   return NextResponse.json({
     link: {
       id: link.id,
@@ -26,6 +23,6 @@ export async function GET(_request: NextRequest, { params }: { params: { token: 
       file_count: link.file_count,
       total_bytes: link.total_bytes,
     },
-    uploaded: (files || []).map((f) => ({ name: f.file_name, size: Number(f.size_bytes) })),
+    uploaded: files.map((f) => ({ name: f.file_name, size: Number(f.size_bytes) })),
   })
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticateRequest } from '@/lib/auth/api-auth'
-import { supabaseAdmin } from '@/lib/pilot-upload/server'
+import { allFiles, supabaseAdmin } from '@/lib/pilot-upload/server'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,11 +10,7 @@ export async function GET(request: NextRequest) {
   if (errorResponse) return errorResponse
   if (!isAdmin) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   const id = request.nextUrl.searchParams.get('id') || ''
-  const { data, error } = await supabaseAdmin
-    .from('pilot_upload_files')
-    .select('file_name, size_bytes, lat, lon, rel_alt_m, gimbal_pitch_deg, captured_at, camera_model, gps_status, uploaded_at')
-    .eq('link_id', id)
-    .order('file_name')
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ files: data })
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return NextResponse.json({ error: 'Valid id is required' }, { status: 400 })
+  const files = await allFiles(id, 'file_name, size_bytes, lat, lon, rel_alt_m, gimbal_pitch_deg, captured_at, camera_model, gps_status, uploaded_at')
+  return NextResponse.json({ files })
 }
