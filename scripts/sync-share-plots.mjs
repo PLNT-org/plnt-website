@@ -29,9 +29,16 @@ const fc = JSON.parse(readFileSync(geojsonPath, 'utf8'))
 const feats = fc.features.filter((f) => f.geometry && f.properties?.bay)
 console.log(`${feats.length} bays in ${geojsonPath}`)
 
-const { data: existing, error: e0 } = await supabase.from('share_plots').select('id, bay_ref').eq('share_id', shareId).not('bay_ref', 'is', null)
-if (e0) throw new Error(e0.message)
-const byRef = new Map((existing || []).map((p) => [p.bay_ref, p.id]))
+// Existing bay plots, paged past Supabase's 1,000-row default so a re-run
+// updates every bay instead of trying to insert duplicates.
+const byRef = new Map()
+for (let from = 0; ; from += 1000) {
+  const { data, error: e0 } = await supabase.from('share_plots').select('id, bay_ref').eq('share_id', shareId).not('bay_ref', 'is', null).order('id').range(from, from + 999)
+  if (e0) throw new Error(e0.message)
+  for (const p of data || []) byRef.set(p.bay_ref, p.id)
+  if (!data || data.length < 1000) break
+}
+console.log(`${byRef.size} bay plots already on the share`)
 
 let inserted = 0, updated = 0, counts = 0
 for (let i = 0; i < feats.length; i += 100) {
