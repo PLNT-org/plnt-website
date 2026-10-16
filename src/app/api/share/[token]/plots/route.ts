@@ -78,17 +78,26 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const { data, error } = await supabaseAdmin
-    .from('share_plots')
-    .select(PLOT_COLUMNS)
-    .eq('share_id', shareId)
-    .order('created_at', { ascending: true })
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  // Supabase caps a select at 1,000 rows; a property with its bays published
+  // has a few thousand plots, so page through them.
+  const PAGE = 1000
+  const rows: any[] = []
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabaseAdmin
+      .from('share_plots')
+      .select(PLOT_COLUMNS)
+      .eq('share_id', shareId)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+    rows.push(...(data || []))
+    if (!data || data.length < PAGE) break
   }
 
-  return NextResponse.json({ plots: (data || []).map(toClientPlot) })
+  return NextResponse.json({ plots: rows.map(toClientPlot) })
 }
 
 // POST — create a plot. Body: { boundary, areaAcres?, block?, size?, species?, readinessDate?, manualCount?, email? }

@@ -677,6 +677,12 @@ export default function SharedPropertyMap({
     L.control.scale({ position: 'bottomleft' }).addTo(map)
     mapRef.current = map
 
+    // The plant markers draw on a canvas in the overlay pane (z 400), which
+    // swallows clicks on anything under it. Bays and viewer plots get their own
+    // panes above it so they stay clickable; plots sit above bays.
+    map.createPane('bays').style.zIndex = '410'
+    map.createPane('plots').style.zIndex = '420'
+
     // Published bays sit under the viewer-drawn plots so a hand-drawn plot
     // stays clickable on top of them.
     baysLayerRef.current = L.layerGroup().addTo(map)
@@ -1931,6 +1937,9 @@ export default function SharedPropertyMap({
       const sel = plot.id === selectedBayId
       const color = sel ? '#ffd600' : reviewer ? confidenceMeta(plot.countConfidence).color : '#ffffff'
       const polygon = L.polygon(coords, {
+        pane: 'bays',
+        // While plants are being added or removed, the dots need the clicks.
+        interactive: !editingCount,
         color,
         weight: sel ? 3 : reviewer ? 1.5 : 1,
         opacity: sel ? 1 : reviewer ? 0.9 : 0.55,
@@ -1949,7 +1958,7 @@ export default function SharedPropertyMap({
       })
       polygon.addTo(layer)
     }
-  }, [plots, showBays, selectedBayId, reviewer])
+  }, [plots, showBays, selectedBayId, reviewer, editingCount])
 
   // Frame a bay and select it (from the orders sheet).
   const goToBay = useCallback(
@@ -2389,7 +2398,7 @@ export default function SharedPropertyMap({
       if (parts.length === 0) continue
       const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
       const color = plotColor(plot, annot, idx)
-      const polygon = L.polygon(coords, { color, weight: 2, fillColor: color, fillOpacity: 0.2 })
+      const polygon = L.polygon(coords, { pane: 'plots', color, weight: 2, fillColor: color, fillOpacity: 0.2 })
 
       const popupEl = document.createElement('div')
       popupEl.innerHTML = plotPopupHtml(plot, annot)
