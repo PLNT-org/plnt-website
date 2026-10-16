@@ -505,10 +505,9 @@ export default function SharedPropertyMap({
   const [saveError, setSaveError] = useState('')
 
   // ---- Published bays (PLNT's count per bay) and work orders ----
-  // Bays are plots with a bayRef. They draw in their own layer, independent of
-  // the Block/Size/Species toggles, with no permanent label (there are
-  // thousands), and clicking one opens the bay card instead of a popup.
-  const [showBays, setShowBays] = useState(true)
+  // Bays are plots with a bayRef. They draw in their own layer whenever the
+  // Block layer is on, with no label (there are thousands), and clicking one
+  // opens the bay card instead of a popup.
   const [selectedBayId, setSelectedBayId] = useState<string | null>(null)
   // Reviewer view colours each bay by how it was counted; the client sees one colour.
   const [reviewer, setReviewer] = useState(false)
@@ -1891,7 +1890,11 @@ export default function SharedPropertyMap({
         const res = await fetch(`/api/share/${token}/plots?k=${encodeURIComponent(data.accessToken!)}`)
         if (!res.ok) return
         const body = await res.json()
-        if (!cancelled && Array.isArray(body.plots)) setPlots(body.plots)
+        if (!cancelled && Array.isArray(body.plots)) {
+          setPlots(body.plots)
+          // A share with published bays opens with them showing.
+          if (body.plots.some((p: SharePlot) => p.bayRef)) setAnnot((prev) => ({ ...prev, block: true }))
+        }
       } catch {
         // Non-fatal — the map still works without saved plots.
       }
@@ -1929,7 +1932,7 @@ export default function SharedPropertyMap({
     const layer = baysLayerRef.current
     if (!layer) return
     layer.clearLayers()
-    if (!showBays) return
+    if (!annot.block) return
     for (const plot of plots) {
       const ring = plot.boundary?.coordinates?.[0]
       if (!plot.bayRef || !ring) continue
@@ -1946,11 +1949,6 @@ export default function SharedPropertyMap({
         fillColor: color,
         fillOpacity: sel ? 0.25 : reviewer ? 0.15 : 0.03,
       })
-      const n = bayCount(plot)
-      polygon.bindTooltip(
-        `<span class="plnt-label-inner">Bay ${escapeHtml(plot.bayRef)}${n != null ? ` · ${n.toLocaleString()} plants` : ''}</span>`,
-        { sticky: true, direction: 'top', className: 'plnt-plot-label' }
-      )
       polygon.on('click', () => {
         setSelectedBayId(plot.id)
         setCorrectDraft(null)
@@ -1958,7 +1956,7 @@ export default function SharedPropertyMap({
       })
       polygon.addTo(layer)
     }
-  }, [plots, showBays, selectedBayId, reviewer, editingCount])
+  }, [plots, annot.block, selectedBayId, reviewer, editingCount])
 
   // Frame a bay and select it (from the orders sheet).
   const goToBay = useCallback(
@@ -3060,30 +3058,6 @@ export default function SharedPropertyMap({
               </button>
             </div>
             <div className="p-1.5 max-h-[60vh] overflow-y-auto">
-              {plots.some((p) => p.bayRef) && (
-                <div className="mb-1 rounded-md border border-gray-100 px-2 py-1.5 flex flex-col gap-1">
-                  <label className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
-                    <input type="checkbox" checked={showBays} onChange={(e) => setShowBays(e.target.checked)} className="h-4 w-4 accent-[#0f2e1d]" />
-                    Bays and counts
-                    <span className="ml-auto text-[11px] text-gray-400 tabular-nums">{plots.filter((p) => p.bayRef).length}</span>
-                  </label>
-                  <label className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer" title="Colour each bay by how it was counted">
-                    <input type="checkbox" checked={reviewer} onChange={(e) => setReviewer(e.target.checked)} className="h-4 w-4 accent-[#0f2e1d]" />
-                    <Eye className="h-3.5 w-3.5 text-gray-500" />
-                    Reviewer view
-                  </label>
-                  {reviewer && (
-                    <div className="flex flex-col gap-0.5 pl-6 text-[11px] text-gray-600">
-                      {Object.entries(CONFIDENCE_META).map(([k, m]) => (
-                        <div key={k} className="flex items-center gap-1.5">
-                          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: m.color }} />
-                          {m.label}: {m.note}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
               {data.layers.map((layer) => {
                 const meta = LAYER_META[layer.type]
                 const isOn = !!visible[layer.type]
@@ -3260,6 +3234,35 @@ export default function SharedPropertyMap({
                   />
                   <span className="text-xs text-gray-600 flex-1">{ANNOT_META.size.label}</span>
                 </label>
+                {/* Published bays ride on the Block layer. The reviewer view colours
+                    them by how each one was counted; the client sees one colour. */}
+                {plots.some((p) => p.bayRef) && annot.block && (
+                  <>
+                    <label
+                      className="flex items-center gap-2 cursor-pointer rounded p-1.5 pl-7 hover:bg-gray-50"
+                      title="Colour each bay by how it was counted"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={reviewer}
+                        onChange={(e) => setReviewer(e.target.checked)}
+                        className="rounded border-gray-300"
+                      />
+                      <Eye className="h-3.5 w-3.5 text-gray-500" />
+                      <span className="text-xs text-gray-600 flex-1">Reviewer view</span>
+                    </label>
+                    {reviewer && (
+                      <div className="flex flex-col gap-0.5 pl-9 pb-1 text-[11px] text-gray-600">
+                        {Object.entries(CONFIDENCE_META).map(([k, m]) => (
+                          <div key={k} className="flex items-center gap-1.5">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: m.color }} />
+                            {m.label}: {m.note}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
                 {/* Species row, with its own Draw button */}
                 <div className="flex items-center gap-2 rounded p-1.5 hover:bg-gray-50">
                   <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
