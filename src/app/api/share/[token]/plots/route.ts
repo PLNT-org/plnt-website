@@ -39,7 +39,8 @@ function isValidPolygon(b: any): b is GeoJSONPolygon {
 
 // Columns every handler returns — kept in one place so a new field can't be
 // added to some responses and forgotten in others.
-const PLOT_COLUMNS = 'id, boundary, area_acres, block, container_size, species, readiness_date, manual_count'
+const PLOT_COLUMNS =
+  'id, boundary, area_acres, block, container_size, species, readiness_date, manual_count, bay_ref, bed_ref, plant_count, count_method, count_confidence'
 
 // Map a DB row to the shape the client renders.
 function toClientPlot(row: any) {
@@ -52,6 +53,12 @@ function toClientPlot(row: any) {
     species: row.species,
     readinessDate: row.readiness_date,
     manualCount: row.manual_count,
+    // Published by PLNT's bay-layer sync; null on plots the viewer drew by hand.
+    bayRef: row.bay_ref ?? null,
+    bedRef: row.bed_ref ?? null,
+    plantCount: row.plant_count ?? null,
+    countMethod: row.count_method ?? null,
+    countConfidence: row.count_confidence ?? null,
   }
 }
 
