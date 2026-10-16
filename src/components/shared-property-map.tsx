@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints, ClipboardList, Eye } from 'lucide-react'
 import { ShareWalkthrough, type Tour } from '@/components/share-walkthrough'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
@@ -29,7 +29,53 @@ export interface SharePlot {
   // can't count (uncovered strip, under shade cloth, staged after the flight).
   // null/undefined = derive the count from the detections, the default.
   manualCount?: number | null
+  // Published by PLNT's bay-layer sync (scripts/sync-share-plots.mjs): the bay
+  // id that survives redrawing, its bed, the latest published count and how it
+  // was counted. null on plots the viewer drew by hand.
+  bayRef?: string | null
+  bedRef?: string | null
+  plantCount?: number | null
+  countMethod?: string | null
+  countConfidence?: 'verified' | 'good' | 'medium' | 'estimate' | string | null
 }
+
+// A flagged bay: task + note, created from the bay card or the phone.
+export interface WorkOrder {
+  id: string
+  plotId: string | null
+  bayRef: string | null
+  task: string
+  note: string | null
+  plantCountAtCreation: number | null
+  createdByEmail: string | null
+  assignedTo: string | null
+  dueDate: string | null
+  status: 'open' | 'done' | 'cancelled' | string
+  createdAt: string
+}
+
+const ORDER_TASKS: { value: string; label: string }[] = [
+  { value: 'water', label: 'Water' },
+  { value: 'prune', label: 'Prune' },
+  { value: 'space', label: 'Space' },
+  { value: 'relocate', label: 'Relocate' },
+  { value: 'upsize', label: 'Upsize' },
+  { value: 'pull', label: 'Pull' },
+  { value: 'spray_ipm', label: 'Spray (IPM)' },
+  { value: 'other', label: 'Other' },
+]
+const taskLabel = (v: string) => ORDER_TASKS.find((t) => t.value === v)?.label ?? v
+
+// How the published count was made, in the client's words, with the colour the
+// reviewer view paints the bay. Lightness differs as well as hue so the four
+// read apart for everyone.
+const CONFIDENCE_META: Record<string, { label: string; note: string; color: string }> = {
+  verified: { label: 'Verified', note: 'Hand count or reviewer edit', color: '#1b5e20' },
+  good: { label: 'Good', note: 'Detector saw every plant, within 3%', color: '#1e88e5' },
+  medium: { label: 'Medium', note: 'Lattice under canopy, within 5%', color: '#ef6c00' },
+  estimate: { label: 'Estimate', note: 'Assumed layout, within 15%', color: '#c62828' },
+}
+const confidenceMeta = (c?: string | null) => CONFIDENCE_META[c ?? ''] ?? { label: 'Counted', note: 'Published by PLNT', color: '#4b5d52' }
 
 // The three annotation layers the viewer can toggle on to draw + tag plots.
 type AnnotKey = 'block' | 'size' | 'species'
@@ -458,6 +504,25 @@ export default function SharedPropertyMap({
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
+  // ---- Published bays (PLNT's count per bay) and work orders ----
+  // Bays are plots with a bayRef. They draw in their own layer, independent of
+  // the Block/Size/Species toggles, with no permanent label (there are
+  // thousands), and clicking one opens the bay card instead of a popup.
+  const [showBays, setShowBays] = useState(true)
+  const [selectedBayId, setSelectedBayId] = useState<string | null>(null)
+  // Reviewer view colours each bay by how it was counted; the client sees one colour.
+  const [reviewer, setReviewer] = useState(false)
+  const [orders, setOrders] = useState<WorkOrder[]>([])
+  const [ordersOpen, setOrdersOpen] = useState(false)
+  const [orderTask, setOrderTask] = useState('water')
+  const [orderNote, setOrderNote] = useState('')
+  const [orderBusy, setOrderBusy] = useState(false)
+  const [orderMsg, setOrderMsg] = useState('')
+  // Correcting a count: the number being typed, or null when not correcting.
+  const [correctDraft, setCorrectDraft] = useState<string | null>(null)
+  const [countBusy, setCountBusy] = useState(false)
+  const baysLayerRef = useRef<L.LayerGroup | null>(null)
+
   const plotsLayerRef = useRef<L.LayerGroup | null>(null)
   // Overlay that lights up the plots of an expanded inventory line.
   const highlightLayerRef = useRef<L.LayerGroup | null>(null)
@@ -612,6 +677,9 @@ export default function SharedPropertyMap({
     L.control.scale({ position: 'bottomleft' }).addTo(map)
     mapRef.current = map
 
+    // Published bays sit under the viewer-drawn plots so a hand-drawn plot
+    // stays clickable on top of them.
+    baysLayerRef.current = L.layerGroup().addTo(map)
     // Layer group that holds all saved viewer-drawn plots (redrawn by an effect).
     plotsLayerRef.current = L.layerGroup().addTo(map)
     // Highlight overlay sits on top of the plots (added last).
@@ -650,6 +718,7 @@ export default function SharedPropertyMap({
       targetsLayerRef.current = null
       gpsLayerRef.current = null
       plotsLayerRef.current = null
+      baysLayerRef.current = null
       highlightLayerRef.current = null
       tourLayerRef.current = null
       eraseLayerRef.current = null
@@ -1826,6 +1895,147 @@ export default function SharedPropertyMap({
     }
   }, [token, data.accessToken])
 
+  // Work orders for this share, newest first.
+  useEffect(() => {
+    if (!data.accessToken) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/share/${token}/work-orders?k=${encodeURIComponent(data.accessToken!)}`)
+        if (!res.ok) return
+        const body = await res.json()
+        if (!cancelled && Array.isArray(body.orders)) setOrders(body.orders)
+      } catch {
+        // Non-fatal — the map works without orders.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [token, data.accessToken])
+
+  const selectedBay = selectedBayId ? plots.find((p) => p.id === selectedBayId) ?? null : null
+  const bayCount = (p: SharePlot) => p.manualCount ?? p.plantCount ?? null
+
+  // Draw the published bays: one colour for the client, confidence colours for
+  // the reviewer view, the selected bay in yellow. Hover shows the bay and count.
+  useEffect(() => {
+    const layer = baysLayerRef.current
+    if (!layer) return
+    layer.clearLayers()
+    if (!showBays) return
+    for (const plot of plots) {
+      const ring = plot.boundary?.coordinates?.[0]
+      if (!plot.bayRef || !ring) continue
+      const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
+      const sel = plot.id === selectedBayId
+      const color = sel ? '#ffd600' : reviewer ? confidenceMeta(plot.countConfidence).color : '#ffffff'
+      const polygon = L.polygon(coords, {
+        color,
+        weight: sel ? 3 : reviewer ? 1.5 : 1,
+        opacity: sel ? 1 : reviewer ? 0.9 : 0.55,
+        fillColor: color,
+        fillOpacity: sel ? 0.25 : reviewer ? 0.15 : 0.03,
+      })
+      const n = bayCount(plot)
+      polygon.bindTooltip(
+        `<span class="plnt-label-inner">Bay ${escapeHtml(plot.bayRef)}${n != null ? ` · ${n.toLocaleString()} plants` : ''}</span>`,
+        { sticky: true, direction: 'top', className: 'plnt-plot-label' }
+      )
+      polygon.on('click', () => {
+        setSelectedBayId(plot.id)
+        setCorrectDraft(null)
+        setOrderMsg('')
+      })
+      polygon.addTo(layer)
+    }
+  }, [plots, showBays, selectedBayId, reviewer])
+
+  // Frame a bay and select it (from the orders sheet).
+  const goToBay = useCallback(
+    (plotId: string | null) => {
+      const plot = plotId ? plots.find((p) => p.id === plotId) : null
+      if (!plot) return
+      setSelectedBayId(plot.id)
+      setOrdersOpen(false)
+      const ring = plot.boundary?.coordinates?.[0]
+      const map = mapRef.current
+      if (ring && map) map.fitBounds(L.latLngBounds(ring.map(([lng, lat]) => [lat, lng] as [number, number])).pad(1.5))
+    },
+    [plots]
+  )
+
+  const createOrder = useCallback(async () => {
+    if (!selectedBay || !data.accessToken) return
+    setOrderBusy(true)
+    setOrderMsg('')
+    try {
+      const res = await fetch(`/api/share/${token}/work-orders?k=${encodeURIComponent(data.accessToken)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plotId: selectedBay.id, task: orderTask, note: orderNote, email: viewerEmail }),
+      })
+      const body = await res.json()
+      if (!res.ok) throw new Error(body?.error || 'Could not create the work order.')
+      setOrders((prev) => [body.order, ...prev])
+      setOrderNote('')
+      setOrderMsg(`Work order created for bay ${selectedBay.bayRef}. It is in the Orders list.`)
+    } catch (e: any) {
+      setOrderMsg(e?.message || 'Could not create the work order.')
+    } finally {
+      setOrderBusy(false)
+    }
+  }, [selectedBay, data.accessToken, token, orderTask, orderNote, viewerEmail])
+
+  const setOrderStatus = useCallback(
+    async (order: WorkOrder, status: 'open' | 'done') => {
+      if (!data.accessToken) return
+      setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status } : o))) // optimistic
+      try {
+        const res = await fetch(`/api/share/${token}/work-orders?k=${encodeURIComponent(data.accessToken)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: order.id, status, email: viewerEmail }),
+        })
+        if (!res.ok) throw new Error()
+      } catch {
+        setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: order.status } : o)))
+      }
+    },
+    [data.accessToken, token, viewerEmail]
+  )
+
+  // Confirm the published count as it stands, or correct it with a number.
+  const reviewCount = useCallback(
+    async (action: 'confirm' | 'correct') => {
+      if (!selectedBay || !data.accessToken) return
+      const n = action === 'correct' ? Number.parseInt(correctDraft ?? '', 10) : null
+      if (action === 'correct' && (!Number.isFinite(n) || (n as number) < 0)) return
+      setCountBusy(true)
+      try {
+        const res = await fetch(`/api/share/${token}/plot-counts?k=${encodeURIComponent(data.accessToken)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plotId: selectedBay.id, action, plantCount: n, email: viewerEmail }),
+        })
+        if (!res.ok) throw new Error()
+        setPlots((prev) =>
+          prev.map((p) =>
+            p.id === selectedBay.id
+              ? { ...p, countConfidence: 'verified', ...(action === 'correct' ? { plantCount: n as number, countMethod: 'reviewer corrected' } : {}) }
+              : p
+          )
+        )
+        setCorrectDraft(null)
+      } catch {
+        // Leave the card as it was; the reviewer can retry.
+      } finally {
+        setCountBusy(false)
+      }
+    },
+    [selectedBay, data.accessToken, token, correctDraft, viewerEmail]
+  )
+
   // Tear down an in-progress drawing: remove map handlers + temporary layers.
   const teardownDraw = useCallback(() => {
     const map = mapRef.current
@@ -2172,6 +2382,7 @@ export default function SharedPropertyMap({
       const plot = plots[idx]
       const ring = plot.boundary?.coordinates?.[0]
       if (!ring) continue
+      if (plot.bayRef) continue // published bays have their own layer
       // Only draw the boundary if at least one active layer applies to it, so
       // toggling Block/Size/Species off hides the boundaries that relied on it.
       const parts = activePlotParts(plot, annot)
@@ -2840,6 +3051,30 @@ export default function SharedPropertyMap({
               </button>
             </div>
             <div className="p-1.5 max-h-[60vh] overflow-y-auto">
+              {plots.some((p) => p.bayRef) && (
+                <div className="mb-1 rounded-md border border-gray-100 px-2 py-1.5 flex flex-col gap-1">
+                  <label className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                    <input type="checkbox" checked={showBays} onChange={(e) => setShowBays(e.target.checked)} className="h-4 w-4 accent-[#0f2e1d]" />
+                    Bays and counts
+                    <span className="ml-auto text-[11px] text-gray-400 tabular-nums">{plots.filter((p) => p.bayRef).length}</span>
+                  </label>
+                  <label className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer" title="Colour each bay by how it was counted">
+                    <input type="checkbox" checked={reviewer} onChange={(e) => setReviewer(e.target.checked)} className="h-4 w-4 accent-[#0f2e1d]" />
+                    <Eye className="h-3.5 w-3.5 text-gray-500" />
+                    Reviewer view
+                  </label>
+                  {reviewer && (
+                    <div className="flex flex-col gap-0.5 pl-6 text-[11px] text-gray-600">
+                      {Object.entries(CONFIDENCE_META).map(([k, m]) => (
+                        <div key={k} className="flex items-center gap-1.5">
+                          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: m.color }} />
+                          {m.label}: {m.note}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {data.layers.map((layer) => {
                 const meta = LAYER_META[layer.type]
                 const isOn = !!visible[layer.type]
@@ -3510,6 +3745,209 @@ export default function SharedPropertyMap({
               Tap a row to navigate to it, then enter the height you measured in the card at the top. Readings save to
               the share (and to this device first, so a dead signal loses nothing).
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Bay card — the published count for one bay, confirm or correct it, flag it */}
+      {selectedBay && !ordersOpen && (
+        <div className="absolute right-3 bottom-14 z-[1160] w-[min(22rem,calc(100%-1.5rem))] max-h-[72%] overflow-y-auto rounded-xl bg-white shadow-xl border border-gray-200">
+          <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-2">
+            <div>
+              <div className="text-[11px] text-gray-500">Bed {selectedBay.bedRef ?? selectedBay.bayRef?.split('-')[0]}</div>
+              <div className="text-lg font-semibold text-gray-900 leading-tight">Bay {selectedBay.bayRef}</div>
+            </div>
+            <button
+              onClick={() => setSelectedBayId(null)}
+              className="text-gray-400 hover:text-gray-700 p-1"
+              title="Close"
+              aria-label="Close bay card"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex items-end justify-between gap-3 px-4">
+            <div>
+              <div className="text-3xl font-bold text-gray-900 leading-none tabular-nums">
+                {bayCount(selectedBay) != null ? bayCount(selectedBay)!.toLocaleString() : '—'}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">plants counted{selectedBay.manualCount != null ? ' (entered)' : ''}</div>
+            </div>
+            <div className="flex flex-col items-end gap-1 max-w-[11rem]">
+              <span
+                className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold text-white"
+                style={{ backgroundColor: confidenceMeta(selectedBay.countConfidence).color }}
+              >
+                {confidenceMeta(selectedBay.countConfidence).label}
+              </span>
+              <span className="text-[11px] text-gray-500 text-right">{confidenceMeta(selectedBay.countConfidence).note}</span>
+            </div>
+          </div>
+          <div className="flex gap-2 px-4 mt-3">
+            {correctDraft == null ? (
+              <>
+                <button
+                  onClick={() => reviewCount('confirm')}
+                  disabled={countBusy || selectedBay.countConfidence === 'verified'}
+                  className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm font-medium text-[#0f2e1d] hover:bg-gray-50 disabled:opacity-40"
+                >
+                  {selectedBay.countConfidence === 'verified' ? 'Verified' : 'Confirm count'}
+                </button>
+                <button
+                  onClick={() => setCorrectDraft(String(bayCount(selectedBay) ?? ''))}
+                  className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm font-medium text-[#0f2e1d] hover:bg-gray-50"
+                >
+                  Correct count
+                </button>
+              </>
+            ) : (
+              <div className="flex-1 flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  value={correctDraft}
+                  onChange={(e) => setCorrectDraft(e.target.value)}
+                  aria-label="Corrected plant count"
+                  className="w-24 rounded-md border border-gray-300 px-2 py-1.5 text-sm tabular-nums"
+                />
+                <button
+                  onClick={() => reviewCount('correct')}
+                  disabled={countBusy}
+                  className="rounded-md bg-[#0f2e1d] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#143d27] disabled:opacity-40"
+                >
+                  Save
+                </button>
+                <button onClick={() => setCorrectDraft(null)} className="text-sm text-gray-500 hover:text-gray-800">
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="mt-3 border-t border-gray-100 px-4 py-3 flex flex-col gap-2">
+            <div className="text-sm font-semibold text-gray-900">Flag this bay</div>
+            <label className="text-[11px] text-gray-500 flex flex-col gap-1">
+              Task
+              <select
+                value={orderTask}
+                onChange={(e) => setOrderTask(e.target.value)}
+                className="rounded-md border border-gray-300 px-2 py-1.5 text-sm text-gray-900 bg-white"
+              >
+                {ORDER_TASKS.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-[11px] text-gray-500 flex flex-col gap-1">
+              Note
+              <textarea
+                value={orderNote}
+                onChange={(e) => setOrderNote(e.target.value)}
+                rows={2}
+                placeholder="What you see and what needs doing"
+                className="rounded-md border border-gray-300 px-2 py-1.5 text-sm text-gray-900 resize-y"
+              />
+            </label>
+            <button
+              onClick={createOrder}
+              disabled={orderBusy}
+              className="rounded-md bg-[#0f2e1d] px-3 py-2 text-sm font-medium text-white hover:bg-[#143d27] disabled:opacity-40"
+            >
+              {orderBusy ? 'Creating…' : 'Create work order'}
+            </button>
+            {orderMsg && <div className="text-[12px] text-[#1b5e20] bg-[#e8f3ea] rounded-md px-2.5 py-2">{orderMsg}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Work orders — collapsed trigger (bottom-right) */}
+      {!ordersOpen && !fieldOpen && (
+        <button
+          onClick={() => {
+            setInvOpen(false)
+            setOrdersOpen(true)
+          }}
+          className="absolute bottom-3 right-3 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"
+          title="Work orders"
+        >
+          <ClipboardList className="h-4 w-4" />
+          Orders
+          <span className="text-green-300 tabular-nums">({orders.filter((o) => o.status === 'open').length})</span>
+          <ChevronUp className="h-4 w-4" />
+        </button>
+      )}
+
+      {/* Work orders — bottom sheet */}
+      {ordersOpen && (
+        <div
+          className="absolute inset-x-0 bottom-0 z-[1150] flex flex-col bg-white shadow-[0_-4px_20px_rgba(0,0,0,0.15)] rounded-t-xl overflow-hidden"
+          style={{ height: '50%' }}
+        >
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100">
+            <ClipboardList className="h-4 w-4 text-[#0f2e1d] shrink-0" />
+            <span className="text-sm font-semibold text-gray-900">Work orders</span>
+            <span className="text-xs text-gray-400 tabular-nums">
+              {orders.filter((o) => o.status === 'open').length} open · {orders.filter((o) => o.status === 'done').length} done
+            </span>
+            <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={() => window.print()}
+                disabled={orders.length === 0}
+                className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
+                title="Print the list"
+                aria-label="Print the work order list"
+              >
+                <Download className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setOrdersOpen(false)}
+                className="text-gray-400 hover:text-gray-700 p-1"
+                title="Hide work orders"
+                aria-label="Hide work orders"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-auto">
+            {orders.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-sm text-gray-400 p-6 text-center">
+                No work orders yet. Click a bay on the map and use “Flag this bay”.
+              </div>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {orders.map((o) => (
+                  <li key={o.id} className={`flex items-center gap-3 px-3 py-2 ${o.status === 'done' ? 'bg-gray-50 text-gray-500' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={o.status === 'done'}
+                      onChange={(e) => setOrderStatus(o, e.target.checked ? 'done' : 'open')}
+                      aria-label={`Mark ${taskLabel(o.task)} on bay ${o.bayRef ?? ''} done`}
+                      className="h-4 w-4 accent-[#0f2e1d]"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-900 truncate">
+                        {taskLabel(o.task)} · Bay {o.bayRef ?? '—'}
+                        {o.plantCountAtCreation != null && (
+                          <span className="font-normal text-gray-500"> ({o.plantCountAtCreation.toLocaleString()} plants)</span>
+                        )}
+                      </div>
+                      {o.note && <div className="text-xs text-gray-500 truncate">{o.note}</div>}
+                    </div>
+                    <div className="text-[11px] text-gray-400 whitespace-nowrap">{new Date(o.createdAt).toLocaleDateString()}</div>
+                    {o.plotId && (
+                      <button
+                        onClick={() => goToBay(o.plotId)}
+                        className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-[#0f2e1d] hover:bg-gray-50 whitespace-nowrap"
+                      >
+                        Open on map
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       )}
