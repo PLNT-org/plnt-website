@@ -376,7 +376,11 @@ function TourSummary({ tour }: { tour: Tour }) {
   const meanAbs = rows.reduce((a, st) => a + Math.abs(pct(st)), 0) / rows.length
   const hand = rows.reduce((a, st) => a + st.truth!, 0)
   const flight = rows.reduce((a, st) => a + st.ours!, 0)
-  const fmtPct = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`
+  // Rounded first, so a difference under 0.05% reads "0.0%" rather than "-0.0%".
+  const fmtPct = (v: number) => {
+    const r = Math.round(v * 10) / 10
+    return r === 0 ? '0.0%' : `${r > 0 ? '+' : ''}${r.toFixed(1)}%`
+  }
   return (
     <div className="mt-2">
       <div className="grid grid-cols-2 gap-2">
