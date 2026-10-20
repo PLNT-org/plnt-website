@@ -135,6 +135,9 @@ export async function POST(request: NextRequest) {
       : null
   const email =
     typeof body.email === 'string' && body.email.includes('@') ? body.email.trim().toLowerCase() : null
+  // A viewer-drawn plot may name the bay or bed it sits in (e.g. "L-8"); kept in bed_ref,
+  // which only published bays use otherwise (they also carry bay_ref, drawn plots never do).
+  const bedRef = typeof body.bedRef === 'string' && body.bedRef.trim() ? body.bedRef.trim().slice(0, 40) : null
 
   const { data, error } = await supabaseAdmin
     .from('share_plots')
@@ -147,6 +150,7 @@ export async function POST(request: NextRequest) {
       species,
       readiness_date: readinessDate,
       manual_count: parseManualCount(body.manualCount),
+      bed_ref: bedRef,
       created_by_email: email,
     })
     .select(PLOT_COLUMNS)
@@ -197,6 +201,9 @@ export async function PATCH(request: NextRequest) {
       typeof body.readinessDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.readinessDate)
         ? body.readinessDate
         : null
+  }
+  if ('bedRef' in body) {
+    update.bed_ref = typeof body.bedRef === 'string' && body.bedRef.trim() ? body.bedRef.trim().slice(0, 40) : null
   }
   // Clearing the input sends '' -> null, which restores the derived count.
   if ('manualCount' in body) {
