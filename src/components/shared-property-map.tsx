@@ -3017,8 +3017,9 @@ export default function SharedPropertyMap({
     }
     const step = tour.steps[tourStep]
     if (!step) return
-    // A how-to step points at controls; it leaves the drawer and camera where the viewer has them.
-    if (step.kind === 'info') return
+    // A how-to step points at controls, and the results card sits over the map as it is:
+    // both leave the drawer and camera where the viewer has them.
+    if (step.kind === 'info' || step.kind === 'summary') return
     if (step.kind === 'block') {
       setInvOpen(false)
       setShowPoints(true)
@@ -3343,10 +3344,10 @@ export default function SharedPropertyMap({
       ) : null}
 
       {/* Guided walkthrough card */}
-      {tour && tour.mode === 'pills' && tourStep != null && tourStep >= 0 && (
+      {tour && tourStep != null && tourStep >= 0 && (tour.mode === 'pills' || tour.steps[tourStep]?.card === false) && (
         <TourChip step={tourStep} total={tour.steps.length} onClose={closeTour} />
       )}
-      {tour && tour.mode !== 'pills' && tourStep != null && (
+      {tour && tour.mode !== 'pills' && tourStep != null && !(tourStep >= 0 && tour.steps[tourStep]?.card === false) && (
         <ShareWalkthrough
           tour={tour}
           step={tourStep}
@@ -3354,6 +3355,7 @@ export default function SharedPropertyMap({
           onClose={closeTour}
           onVerify={sendTourCheck}
           dock={draft || editing ? 'left' : 'center'}
+          viewerEmail={viewerEmail}
         />
       )}
 
