@@ -3,8 +3,8 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints } from 'lucide-react'
-import { ShareWalkthrough, type Tour } from '@/components/share-walkthrough'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints, ClipboardList, Eye } from 'lucide-react'
+import { ShareWalkthrough, TourChip, TourPointers, type Tour, type TourStep } from '@/components/share-walkthrough'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
 
@@ -29,7 +29,58 @@ export interface SharePlot {
   // can't count (uncovered strip, under shade cloth, staged after the flight).
   // null/undefined = derive the count from the detections, the default.
   manualCount?: number | null
+  // Published by PLNT's bay-layer sync (scripts/sync-share-plots.mjs): the bay
+  // id that survives redrawing, its bed, the latest published count and how it
+  // was counted. null on plots the viewer drew by hand.
+  bayRef?: string | null
+  bedRef?: string | null
+  plantCount?: number | null
+  countMethod?: string | null
+  countConfidence?: 'verified' | 'good' | 'medium' | 'estimate' | string | null
 }
+
+// A flagged bay: task + note, created from the bay card or the phone.
+export interface WorkOrder {
+  id: string
+  plotId: string | null
+  bayRef: string | null
+  task: string
+  note: string | null
+  plantCountAtCreation: number | null
+  createdByEmail: string | null
+  assignedTo: string | null
+  dueDate: string | null
+  status: 'open' | 'done' | 'cancelled' | string
+  createdAt: string
+}
+
+const ORDER_TASKS: { value: string; label: string }[] = [
+  { value: 'water', label: 'Water' },
+  { value: 'prune', label: 'Prune' },
+  { value: 'space', label: 'Space' },
+  { value: 'relocate', label: 'Relocate' },
+  { value: 'upsize', label: 'Upsize' },
+  { value: 'pull', label: 'Pull' },
+  { value: 'spray_ipm', label: 'Spray (IPM)' },
+  { value: 'other', label: 'Other' },
+]
+const taskLabel = (v: string) => ORDER_TASKS.find((t) => t.value === v)?.label ?? v
+
+// How the published count was made, in the client's words, with the colour the
+// reviewer view paints the bay. Lightness differs as well as hue so the four
+// read apart for everyone.
+const CONFIDENCE_META: Record<string, { label: string; note: string; color: string }> = {
+  verified: { label: 'Verified', note: 'Hand count or reviewer edit', color: '#1b5e20' },
+  good: { label: 'Good', note: 'Detector saw every plant, within 3%', color: '#1e88e5' },
+  medium: { label: 'Medium', note: 'Lattice under canopy, within 5%', color: '#ef6c00' },
+  estimate: { label: 'Estimate', note: 'Assumed layout, within 15%', color: '#c62828' },
+}
+// Who sees how sure each count is: the confidence badge (Good / Medium / Estimate), how the
+// count was made (e.g. "Lattice under canopy, within 5%") and the Reviewer view that colours
+// bays by it. PLNT staff only; everyone else sees the counts alone.
+const METHOD_NOTE_VIEWERS = ['porter@plnt.net']
+
+const confidenceMeta = (c?: string | null) => CONFIDENCE_META[c ?? ''] ?? { label: 'Counted', note: 'Published by PLNT', color: '#4b5d52' }
 
 // The three annotation layers the viewer can toggle on to draw + tag plots.
 type AnnotKey = 'block' | 'size' | 'species'
@@ -316,6 +367,18 @@ const DEFAULT_PLOT_COLOR = '#10b981'
 const PLOT_PALETTE4 = ['#3f7d5a', '#3f6f9e', '#b1894d', '#7d5e88']
 
 // Escape text for safe insertion into the tooltip's innerHTML.
+// Plant dot size for a zoom level: about a plant's width (~30 cm) on screen, up
+// to 3 px, with the white outline only once dots are big enough to carry it.
+// When a plant is under ~1 px wide the dots are hidden (`hidden`): Leaflet's
+// canvas never draws a dot under a 1 px radius, so at several plants per pixel
+// they painted the beds solid and hid the photo.
+function dotStyle(zoom: number, lat: number): { radius: number; weight: number; fillOpacity: number; hidden: boolean } {
+  const metresPerPx = (156543.03 * Math.cos((lat * Math.PI) / 180)) / 2 ** zoom
+  const px = 0.15 / metresPerPx
+  const radius = Math.max(1, Math.min(3, px))
+  return { radius, weight: radius >= 2.5 ? 1 : 0, fillOpacity: px >= 2 ? 1 : px >= 1 ? 0.6 : 0.35, hidden: px < 0.5 }
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
@@ -347,25 +410,6 @@ function activePlotParts(plot: SharePlot, annot: Record<AnnotKey, boolean>): str
   if (annot.size && plot.size != null) parts.push(`${plot.size}-Gallon`)
   if (annot.species && plot.species) parts.push(plot.species)
   return parts
-}
-
-// Full popup HTML for a plot — every active toggle's field.
-function plotPopupHtml(plot: SharePlot, annot: Record<AnnotKey, boolean>): string {
-  const rows: string[] = []
-  if (annot.block && plot.block != null) rows.push(`<div><strong>Block:</strong> ${plot.block}</div>`)
-  if (annot.size && plot.size != null) rows.push(`<div><strong>Size:</strong> ${plot.size}-Gallon</div>`)
-  if (annot.species && plot.species) {
-    rows.push(`<div><strong>Species:</strong> ${plot.species}</div>`)
-    if (plot.readinessDate) rows.push(`<div><strong>Ready:</strong> ${fmtReadiness(plot.readinessDate)}</div>`)
-    // Labelled "entered" so nobody mistakes a typed number for a detected one.
-    if (plot.manualCount != null) {
-      rows.push(
-        `<div><strong>Count:</strong> ${plot.manualCount.toLocaleString()} <span style="color:#6b7280;">(entered)</span></div>`
-      )
-    }
-  }
-  if (plot.areaAcres != null) rows.push(`<div style="color:#6b7280;">${plot.areaAcres.toFixed(2)} acres</div>`)
-  return `<div style="min-width:120px;font-size:12px;line-height:1.5;">${rows.join('') || '<em>Plot</em>'}</div>`
 }
 
 export default function SharedPropertyMap({
@@ -408,6 +452,8 @@ export default function SharedPropertyMap({
   const [cogLoading, setCogLoading] = useState<Record<string, boolean>>({})
   const [showPoints, setShowPoints] = useState(true)
   const [pointsLoading, setPointsLoading] = useState(false)
+  // True while the map is zoomed out too far to draw single plants (see dotStyle).
+  const [dotsHidden, setDotsHidden] = useState(false)
 
   // ---- Viewer count corrections (add missed / remove double-counted plants) ----
   const [pointEdits, setPointEdits] = useState<PointEdit[]>([])
@@ -454,9 +500,27 @@ export default function SharedPropertyMap({
   const [draft, setDraft] = useState<{ boundary: GeoJSONPolygon; areaAcres: number } | null>(null)
   // The saved plot currently being edited (fields only — boundary untouched).
   const [editing, setEditing] = useState<SharePlot | null>(null)
-  const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '', manualCount: '' })
+  const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '', manualCount: '', bay: '' })
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
+
+  // ---- Published bays (PLNT's count per bay) and work orders ----
+  // Bays are plots with a bayRef. They draw in their own layer whenever the
+  // Block layer is on, with no label (there are thousands), and clicking one
+  // opens the bay card instead of a popup.
+  const [selectedBayId, setSelectedBayId] = useState<string | null>(null)
+  // Reviewer view colours each bay by how it was counted; the client sees one colour.
+  const [reviewer, setReviewer] = useState(false)
+  const [orders, setOrders] = useState<WorkOrder[]>([])
+  const [ordersOpen, setOrdersOpen] = useState(false)
+  const [orderTask, setOrderTask] = useState('water')
+  const [orderNote, setOrderNote] = useState('')
+  const [orderBusy, setOrderBusy] = useState(false)
+  const [orderMsg, setOrderMsg] = useState('')
+  // Correcting a count: the number being typed, or null when not correcting.
+  const [correctDraft, setCorrectDraft] = useState<string | null>(null)
+  const [countBusy, setCountBusy] = useState(false)
+  const baysLayerRef = useRef<L.LayerGroup | null>(null)
 
   const plotsLayerRef = useRef<L.LayerGroup | null>(null)
   // Overlay that lights up the plots of an expanded inventory line.
@@ -526,6 +590,10 @@ export default function SharedPropertyMap({
   const [tour, setTour] = useState<Tour | null>(null)
   const [tourStep, setTourStep] = useState<number | null>(null)
   const tourLayerRef = useRef<L.LayerGroup | null>(null)
+  // Pills mode: a dashed "training line" the viewer traces, and its corners, which drawing clicks snap to.
+  const tourGuideLayerRef = useRef<L.LayerGroup | null>(null)
+  const tourGuideRef = useRef<L.LatLng[] | null>(null)
+  const tourGuideKeyRef = useRef('')
   const tourSeenKey = `plnt-tour-seen:${token}`
 
   useEffect(() => {
@@ -543,7 +611,14 @@ export default function SharedPropertyMap({
         } catch {
           /* private mode — just open it */
         }
-        if (!seen) setTourStep(-1)
+        if (!seen) {
+          if (t.mode === 'pills') {
+            // Same clean start as the Walkthrough button (pills mode has no intro card).
+            setPanelOpen(false)
+            setAnnot((p) => ({ ...p, species: false }))
+            setTourStep(0)
+          } else setTourStep(-1)
+        }
       } catch (err) {
         console.error('Failed to load walkthrough:', err)
       }
@@ -553,6 +628,98 @@ export default function SharedPropertyMap({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.tourUrl])
+
+  // A pointer step with `advance` moves on when the viewer clicks its control.
+  useEffect(() => {
+    if (!tour || tourStep == null || tourStep < 0) return
+    const targets = (tour.steps[tourStep]?.point ?? []).filter((p) => p.advance).map((p) => p.target)
+    if (!targets.length) return
+    const onClick = (e: MouseEvent) => {
+      // Any tagged element around the click counts (a row's cell and its button can both carry a tag).
+      let el = (e.target as HTMLElement | null)?.closest?.('[data-tour]') as HTMLElement | null
+      while (el && !targets.includes(el.dataset.tour ?? '')) el = el.parentElement?.closest('[data-tour]') as HTMLElement | null
+      if (el) {
+        setTimeout(() => {
+          // The last step's control ends the tour.
+          if (tourStep >= tour.steps.length - 1) closeTour()
+          else setTourStep((s) => (s != null && s === tourStep ? s + 1 : s))
+        }, 0)
+      }
+    }
+    document.addEventListener('click', onClick)
+    return () => document.removeEventListener('click', onClick)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tour, tourStep])
+
+  // Pills mode: watch the page for a step that's already done (skip_if), whose result has
+  // appeared (next_when), or whose controls are gone (return_to, e.g. a drawing cancelled).
+  useEffect(() => {
+    if (!tour || tour.mode !== 'pills' || tourStep == null || tourStep < 0) return
+    const step = tour.steps[tourStep]
+    if (!step) return
+    const root = rootRef.current
+    const has = (t?: string) => !!t && !!root?.querySelector(`[data-tour="${t}"]`)
+    let missing = 0
+    const id = window.setInterval(() => {
+      if (has(step.next_when) || has(step.skip_if)) {
+        if (tourStep >= tour.steps.length - 1) closeTour()
+        else setTourStep((s) => (s === tourStep ? s + 1 : s))
+        return
+      }
+      if (step.return_to != null && !(step.point ?? []).some((p) => has(p.target))) {
+        missing += 1
+        if (missing >= 3) setTourStep((s) => (s === tourStep ? step.return_to! : s))
+      } else missing = 0
+    }, 300)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tour, tourStep])
+
+  // Pills mode: draw the step's guide (a dashed outline to trace) and frame it when it first appears.
+  useEffect(() => {
+    const map = mapRef.current
+    const layer = tourGuideLayerRef.current
+    if (!map || !layer) return
+    layer.clearLayers()
+    tourGuideRef.current = null
+    const step = tour && tourStep != null && tourStep >= 0 ? tour.steps[tourStep] : null
+    const ring = step?.guide?.coordinates?.[0]
+    if (!ring) {
+      tourGuideKeyRef.current = ''
+      return
+    }
+    const coords = ring.map(([lng, lat]) => L.latLng(lat, lng))
+    tourGuideRef.current = coords.slice(0, -1)
+    L.polygon(coords, { pane: 'tour', color: '#ffffff', weight: 6, opacity: 0.85, fill: false, interactive: false }).addTo(layer)
+    L.polygon(coords, { pane: 'tour', color: '#e5484d', weight: 3, dashArray: '8 7', fill: true, fillColor: '#e5484d', fillOpacity: 0.06, interactive: false }).addTo(layer)
+    for (const c of tourGuideRef.current) {
+      L.circleMarker(c, { pane: 'tour', radius: 6, color: '#e5484d', weight: 2, fillColor: '#ffffff', fillOpacity: 1, interactive: false }).addTo(layer)
+    }
+    const key = JSON.stringify(ring)
+    if (key !== tourGuideKeyRef.current) {
+      tourGuideKeyRef.current = key
+      map.fitBounds(L.latLngBounds(coords).pad(0.15), { paddingTopLeft: [40, 60], paddingBottomRight: [320, 80] })
+    }
+  }, [tour, tourStep])
+
+  // Species suggestions: the link's own list (e.g. its grower's catalog) first, then the general list.
+  const speciesOptions = tour?.species_list?.length
+    ? [...tour.species_list, ...SPECIES_LIST.filter((x) => !tour.species_list!.includes(x))]
+    : SPECIES_LIST
+
+  // Pills mode starts from a clean screen so the first steps (open Layers, turn on Species) show
+  // every time: panel closed, Species off, inventory shut, no drawing in progress.
+  const tourStepRef = useRef<number | null>(null)
+  tourStepRef.current = tourStep
+  const startTour = () => {
+    if (tour?.mode === 'pills') {
+      if (isDrawing) cancelDrawing()
+      setPanelOpen(false)
+      setAnnot((p) => ({ ...p, species: false }))
+      setInvOpen(false)
+      setTourStep(0)
+    } else setTourStep(-1)
+  }
 
   const closeTour = () => {
     setTourStep(null)
@@ -568,6 +735,18 @@ export default function SharedPropertyMap({
     if (!map) return
     const { north, south, east, west } = data.bounds
     map.fitBounds([[south, west], [north, east]])
+    zoomToDots(map)
+  }
+
+  // A share with plant dots opens zoomed in to where single dots show (see
+  // dotStyle), centred on the property, rather than on the whole parcel where
+  // the dots are hidden. "Zoom in to see each plant" and the zoom buttons
+  // still reach the whole-property view.
+  const zoomToDots = (map: L.Map) => {
+    if (!data.layers.some((l) => l.type === 'rgb' && l.pointsUrl)) return
+    const lat = map.getCenter().lat
+    const z = Math.ceil(Math.log2((156543.03 * Math.cos((lat * Math.PI) / 180)) / 0.3))
+    if (map.getZoom() < z) map.setView(map.getCenter(), z)
   }
 
   // Initialize map and create the tile layer for any layer that has one.
@@ -588,6 +767,7 @@ export default function SharedPropertyMap({
     }).addTo(map)
 
     map.fitBounds([[south, west], [north, east]])
+    zoomToDots(map)
 
     // On a parcel-locked share the landing view is the whole world the viewer
     // gets: its zoom becomes the floor, and panning is clamped to the parcel.
@@ -612,12 +792,30 @@ export default function SharedPropertyMap({
     L.control.scale({ position: 'bottomleft' }).addTo(map)
     mapRef.current = map
 
+    // The plant markers draw on a canvas in the overlay pane (z 400), which
+    // swallows clicks on anything under it. Bays and viewer plots get their own
+    // panes above it so they stay clickable; plots sit above bays.
+    map.createPane('bays').style.zIndex = '410'
+    map.createPane('plots').style.zIndex = '420'
+    // The walkthrough's block outline sits above both, and never takes clicks.
+    const tourPane = map.createPane('tour')
+    tourPane.style.zIndex = '430'
+    tourPane.style.pointerEvents = 'none'
+    // The plot being drawn sits above everything, including a walkthrough guide it traces.
+    const drawPane = map.createPane('drawing')
+    drawPane.style.zIndex = '440'
+    drawPane.style.pointerEvents = 'none'
+
+    // Published bays sit under the viewer-drawn plots so a hand-drawn plot
+    // stays clickable on top of them.
+    baysLayerRef.current = L.layerGroup().addTo(map)
     // Layer group that holds all saved viewer-drawn plots (redrawn by an effect).
     plotsLayerRef.current = L.layerGroup().addTo(map)
     // Highlight overlay sits on top of the plots (added last).
     highlightLayerRef.current = L.layerGroup().addTo(map)
     // The walkthrough's own outline, above everything else.
     tourLayerRef.current = L.layerGroup().addTo(map)
+    tourGuideLayerRef.current = L.layerGroup().addTo(map)
 
     for (const layer of data.layers) {
       if (layer.tilesUrl) {
@@ -650,6 +848,7 @@ export default function SharedPropertyMap({
       targetsLayerRef.current = null
       gpsLayerRef.current = null
       plotsLayerRef.current = null
+      baysLayerRef.current = null
       highlightLayerRef.current = null
       tourLayerRef.current = null
       eraseLayerRef.current = null
@@ -803,6 +1002,8 @@ export default function SharedPropertyMap({
         if (!pointsCanvasRef.current) pointsCanvasRef.current = L.canvas({ padding: 0.5 })
         const renderer = pointsCanvasRef.current
         const group = L.layerGroup()
+        const st0 = dotStyle(map.getZoom(), map.getCenter().lat)
+        const dot0 = { radius: st0.radius, weight: st0.weight, fillOpacity: st0.fillOpacity }
         // In edit mode a dot is a click target (removes it); the handler reads
         // refs so we never rebuild the group just to toggle edit mode on/off.
         const onDotClick = (pt: { lat: number; lng: number; addId?: string }) => () => {
@@ -817,11 +1018,9 @@ export default function SharedPropertyMap({
         const addDot = (lat: number, lng: number, addId?: string) => {
           const m = L.circleMarker([lat, lng], {
             renderer,
-            radius: 3,
+            ...dot0,
             fillColor: addId ? '#f59e0b' : '#22c55e', // viewer-added = amber, detected = green
-            fillOpacity: 1,
             color: '#ffffff',
-            weight: 1,
             opacity: 1,
           })
           m.on('click', onDotClick({ lat, lng, addId }))
@@ -835,7 +1034,10 @@ export default function SharedPropertyMap({
         if (cancelled) return
         if (prev && map.hasLayer(prev)) map.removeLayer(prev)
         pointsLayerRef.current = group
-        group.addTo(map)
+        // Zoomed out too far for single plants: keep the group off the map (the
+        // zoom handler below adds it back once plants are about a pixel wide).
+        if (!dotStyle(map.getZoom(), map.getCenter().lat).hidden) group.addTo(map)
+        setDotsHidden(dotStyle(map.getZoom(), map.getCenter().lat).hidden)
       } catch (err) {
         console.error('Failed to load plant points:', err)
       } finally {
@@ -846,6 +1048,42 @@ export default function SharedPropertyMap({
     void ensure()
     return () => {
       cancelled = true
+    }
+  }, [visible, showPoints, rgbLayer, pointEdits])
+
+  // Resize the plant dots as the map zooms (see dotStyle). Only acts when the
+  // size actually changes, and restyles the whole canvas group in one pass.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    let last = ''
+    const wantPoints = !!visible['rgb'] && showPoints && !!rgbLayer?.pointsUrl
+    const apply = () => {
+      const group = pointsLayerRef.current
+      if (!group || !wantPoints) {
+        setDotsHidden(false)
+        return
+      }
+      const st = dotStyle(map.getZoom(), map.getCenter().lat)
+      setDotsHidden(st.hidden)
+      if (st.hidden) {
+        if (map.hasLayer(group)) map.removeLayer(group)
+        return
+      }
+      if (!map.hasLayer(group)) group.addTo(map)
+      const key = JSON.stringify(st)
+      if (key === last) return
+      last = key
+      group.eachLayer((l) => {
+        const m = l as L.CircleMarker
+        m.setRadius(st.radius)
+        m.setStyle({ weight: st.weight, fillOpacity: st.fillOpacity })
+      })
+    }
+    apply()
+    map.on('zoomend', apply)
+    return () => {
+      map.off('zoomend', apply)
     }
   }, [visible, showPoints, rgbLayer, pointEdits])
 
@@ -1816,7 +2054,11 @@ export default function SharedPropertyMap({
         const res = await fetch(`/api/share/${token}/plots?k=${encodeURIComponent(data.accessToken!)}`)
         if (!res.ok) return
         const body = await res.json()
-        if (!cancelled && Array.isArray(body.plots)) setPlots(body.plots)
+        if (!cancelled && Array.isArray(body.plots)) {
+          setPlots(body.plots)
+          // A share with published bays opens with them showing.
+          if (body.plots.some((p: SharePlot) => p.bayRef)) setAnnot((prev) => ({ ...prev, block: true }))
+        }
       } catch {
         // Non-fatal — the map still works without saved plots.
       }
@@ -1825,6 +2067,194 @@ export default function SharedPropertyMap({
       cancelled = true
     }
   }, [token, data.accessToken])
+
+  // Work orders for this share, newest first.
+  useEffect(() => {
+    if (!data.accessToken) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(`/api/share/${token}/work-orders?k=${encodeURIComponent(data.accessToken!)}`)
+        if (!res.ok) return
+        const body = await res.json()
+        if (!cancelled && Array.isArray(body.orders)) setOrders(body.orders)
+      } catch {
+        // Non-fatal — the map works without orders.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [token, data.accessToken])
+
+  const selectedBay = selectedBayId ? plots.find((p) => p.id === selectedBayId) ?? null : null
+  // A drawn plot has no published count: it counts the plant dots inside its outline
+  // (with the viewer's dot edits applied), like the inventory does.
+  const dotsInPlot = (p: SharePlot): number | null => {
+    const ring = p.boundary?.coordinates?.[0]
+    const base = pointsDataRef.current
+    if (!ring || !base) return null
+    let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity
+    for (const [lng, lat] of ring) {
+      if (lng < minLng) minLng = lng
+      if (lng > maxLng) maxLng = lng
+      if (lat < minLat) minLat = lat
+      if (lat > maxLat) maxLat = lat
+    }
+    const removed = new Set(pointEdits.filter((e) => e.kind === 'remove').map((e) => ptKey(e.lat, e.lng)))
+    const inside = (lat: number, lng: number) =>
+      lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng && pointInRing(lng, lat, ring)
+    let n = 0
+    for (const [lat, lng] of base) if (!removed.has(ptKey(lat, lng)) && inside(lat, lng)) n++
+    for (const a of pointEdits) if (a.kind === 'add' && inside(a.lat, a.lng)) n++
+    return n
+  }
+  const showMethodNotes = !!viewerEmail && METHOD_NOTE_VIEWERS.includes(viewerEmail.trim().toLowerCase())
+  const bayCount = (p: SharePlot) => p.manualCount ?? p.plantCount ?? (p.bayRef ? null : dotsInPlot(p))
+  // How a drawn plot is titled on its card and in messages.
+  const plotTitle = (p: SharePlot) =>
+    p.bayRef ? `Bay ${p.bayRef}` : p.bedRef ? `Bay ${p.bedRef}` : p.block != null ? `Block ${p.block}` : p.species || 'Your plot'
+
+  // Draw the published bays: one colour for the client, confidence colours for
+  // the reviewer view, the selected bay in yellow. Hover shows the bay and count.
+  useEffect(() => {
+    const layer = baysLayerRef.current
+    if (!layer) return
+    layer.clearLayers()
+    if (!annot.block) return
+    for (const plot of plots) {
+      const ring = plot.boundary?.coordinates?.[0]
+      if (!plot.bayRef || !ring) continue
+      const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
+      const sel = plot.id === selectedBayId
+      const color = sel ? '#ffd600' : reviewer ? confidenceMeta(plot.countConfidence).color : '#ffffff'
+      const polygon = L.polygon(coords, {
+        pane: 'bays',
+        // While plants are being added or removed, the dots need the clicks; while a plot is
+        // being drawn, the map does (a bay would open its card under each corner click).
+        interactive: !editingCount && !isDrawing,
+        color,
+        weight: sel ? 3 : reviewer ? 1.5 : 1,
+        // Faint while zoomed out, where thousands of white outlines read as stripes over the photo.
+        opacity: sel ? 1 : reviewer ? 0.9 : dotsHidden ? 0.2 : 0.55,
+        fillColor: color,
+        fillOpacity: sel ? 0.25 : reviewer ? 0.15 : 0.03,
+      })
+      polygon.on('click', () => {
+        setSelectedBayId(plot.id)
+        setCorrectDraft(null)
+        setOrderMsg('')
+      })
+      polygon.addTo(layer)
+    }
+  }, [plots, annot.block, selectedBayId, reviewer, editingCount, dotsHidden, isDrawing])
+
+  // Frame a bay and select it (from the orders sheet).
+  const goToBay = useCallback(
+    (plotId: string | null) => {
+      const plot = plotId ? plots.find((p) => p.id === plotId) : null
+      if (!plot) return
+      setSelectedBayId(plot.id)
+      setOrdersOpen(false)
+      const ring = plot.boundary?.coordinates?.[0]
+      const map = mapRef.current
+      if (ring && map) map.fitBounds(L.latLngBounds(ring.map(([lng, lat]) => [lat, lng] as [number, number])).pad(1.5))
+    },
+    [plots]
+  )
+
+  const createOrder = useCallback(async () => {
+    if (!selectedBay || !data.accessToken) return
+    setOrderBusy(true)
+    setOrderMsg('')
+    try {
+      const res = await fetch(`/api/share/${token}/work-orders?k=${encodeURIComponent(data.accessToken)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plotId: selectedBay.id, task: orderTask, note: orderNote, email: viewerEmail }),
+      })
+      const body = await res.json()
+      if (!res.ok) throw new Error(body?.error || 'Could not create the work order.')
+      setOrders((prev) => [body.order, ...prev])
+      setOrderNote('')
+      setOrderMsg(`Work order created for ${plotTitle(selectedBay)}. It is in the Orders list.`)
+    } catch (e: any) {
+      setOrderMsg(e?.message || 'Could not create the work order.')
+    } finally {
+      setOrderBusy(false)
+    }
+  }, [selectedBay, data.accessToken, token, orderTask, orderNote, viewerEmail])
+
+  // A walkthrough count check ("looks right" or the viewer's own number) is filed
+  // as a work order on the step's area, so it lands in the Orders list for PLNT.
+  const sendTourCheck = useCallback(
+    async (step: TourStep, count: number | null) => {
+      if (!data.accessToken) throw new Error('Not signed in to this share.')
+      const ring = step.polygon?.coordinates?.[0]
+      const location = ring ? (([lng, lat]) => ({ lat, lng }))(ringCentroid(ring)) : undefined
+      const note =
+        `Count check, ${step.title}: flight count ${step.ours?.toLocaleString() ?? '—'}. ` +
+        (count == null ? 'Viewer says it looks right.' : `Viewer counted ${count.toLocaleString()}.`)
+      const res = await fetch(`/api/share/${token}/work-orders?k=${encodeURIComponent(data.accessToken)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bayRef: step.verify?.bay_ref ?? step.title, task: 'other', note, location, email: viewerEmail }),
+      })
+      const body = await res.json()
+      if (!res.ok) throw new Error(body?.error || 'Could not send the count.')
+      setOrders((prev) => [body.order, ...prev])
+    },
+    [data.accessToken, token, viewerEmail]
+  )
+
+  const setOrderStatus = useCallback(
+    async (order: WorkOrder, status: 'open' | 'done') => {
+      if (!data.accessToken) return
+      setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status } : o))) // optimistic
+      try {
+        const res = await fetch(`/api/share/${token}/work-orders?k=${encodeURIComponent(data.accessToken)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: order.id, status, email: viewerEmail }),
+        })
+        if (!res.ok) throw new Error()
+      } catch {
+        setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: order.status } : o)))
+      }
+    },
+    [data.accessToken, token, viewerEmail]
+  )
+
+  // Confirm the published count as it stands, or correct it with a number.
+  const reviewCount = useCallback(
+    async (action: 'confirm' | 'correct') => {
+      if (!selectedBay || !data.accessToken) return
+      const n = action === 'correct' ? Number.parseInt(correctDraft ?? '', 10) : null
+      if (action === 'correct' && (!Number.isFinite(n) || (n as number) < 0)) return
+      setCountBusy(true)
+      try {
+        const res = await fetch(`/api/share/${token}/plot-counts?k=${encodeURIComponent(data.accessToken)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plotId: selectedBay.id, action, plantCount: n, email: viewerEmail }),
+        })
+        if (!res.ok) throw new Error()
+        setPlots((prev) =>
+          prev.map((p) =>
+            p.id === selectedBay.id
+              ? { ...p, countConfidence: 'verified', ...(action === 'correct' ? { plantCount: n as number, countMethod: 'reviewer corrected' } : {}) }
+              : p
+          )
+        )
+        setCorrectDraft(null)
+      } catch {
+        // Leave the card as it was; the reviewer can retry.
+      } finally {
+        setCountBusy(false)
+      }
+    },
+    [selectedBay, data.accessToken, token, correctDraft, viewerEmail]
+  )
 
   // Tear down an in-progress drawing: remove map handlers + temporary layers.
   const teardownDraw = useCallback(() => {
@@ -1858,7 +2288,7 @@ export default function SharedPropertyMap({
     if (points.length < 3) return
     const ring = points.map((p) => [p.lng, p.lat])
     ring.push(ring[0]) // close the polygon
-    setForm({ block: '', size: '', species: '', readinessDate: '', manualCount: '' })
+    setForm({ block: '', size: '', species: '', readinessDate: '', manualCount: '', bay: '' })
     setSaveError('')
     setDraft({ boundary: { type: 'Polygon', coordinates: [ring] }, areaAcres: plotAreaAcres(points) })
   }, [teardownDraw])
@@ -1901,7 +2331,21 @@ export default function SharedPropertyMap({
     drawMarkersRef.current.forEach((m) => m.remove())
     drawMarkersRef.current = []
 
-    const handleClick = (e: L.LeafletMouseEvent) => {
+    const handleClick = (e0: L.LeafletMouseEvent) => {
+      // While a walkthrough guide is showing, a click near one of its corners lands exactly on it.
+      let latlng = e0.latlng
+      const guide = tourGuideRef.current
+      if (guide?.length) {
+        const here0 = map.latLngToContainerPoint(latlng)
+        let best: L.LatLng | null = null
+        let bestD = 18
+        for (const v of guide) {
+          const d = map.latLngToContainerPoint(v).distanceTo(here0)
+          if (d < bestD) { bestD = d; best = v }
+        }
+        if (best) latlng = best
+      }
+      const e = { ...e0, latlng } as L.LeafletMouseEvent
       // Close the shape by clicking back on the first vertex (needs >= 3 points).
       if (drawPointsRef.current.length >= 3) {
         const first = map.latLngToContainerPoint(drawPointsRef.current[0])
@@ -1915,6 +2359,8 @@ export default function SharedPropertyMap({
       drawPointsRef.current.push(e.latlng)
       // The first vertex is drawn larger/hollow so it reads as the "click to close" target.
       const marker = L.circleMarker(e.latlng, {
+        pane: 'drawing',
+        interactive: false,
         radius: isFirst ? 7 : 5,
         fillColor: isFirst ? '#ffffff' : DEFAULT_PLOT_COLOR,
         color: isFirst ? DEFAULT_PLOT_COLOR : '#fff',
@@ -1926,11 +2372,13 @@ export default function SharedPropertyMap({
       drawPolygonRef.current?.remove()
       if (drawPointsRef.current.length >= 2) {
         drawPolygonRef.current = L.polygon(drawPointsRef.current, {
+          pane: 'drawing',
+          interactive: false,
           color: DEFAULT_PLOT_COLOR,
-          weight: 2,
+          weight: 4, // as heavy as a walkthrough guide, so the traced edge reads on top of it
           fillColor: DEFAULT_PLOT_COLOR,
           fillOpacity: 0.1,
-          dashArray: '5, 5',
+          dashArray: '8, 6',
         }).addTo(map)
       }
     }
@@ -1947,14 +2395,18 @@ export default function SharedPropertyMap({
       if (pts.length === 0) return
       rubberBandRef.current?.remove()
       rubberBandRef.current = L.polyline([pts[pts.length - 1], e.latlng], {
+        pane: 'drawing',
+        interactive: false,
         color: DEFAULT_PLOT_COLOR,
-        weight: 2,
-        dashArray: '5, 10',
+        weight: 3,
+        dashArray: '8, 8',
         opacity: 0.7,
       }).addTo(map)
       if (pts.length >= 2) {
         closingLineRef.current?.remove()
         closingLineRef.current = L.polyline([e.latlng, pts[0]], {
+          pane: 'drawing',
+          interactive: false,
           color: DEFAULT_PLOT_COLOR,
           weight: 2,
           dashArray: '3, 6',
@@ -1986,6 +2438,7 @@ export default function SharedPropertyMap({
       species: plot.species || '',
       readinessDate: plot.readinessDate || '',
       manualCount: plot.manualCount != null ? String(plot.manualCount) : '',
+      bay: !plot.bayRef && plot.bedRef ? plot.bedRef : '',
     })
     setSaveError('')
     setDraft(null)
@@ -2014,8 +2467,10 @@ export default function SharedPropertyMap({
           areaAcres: draft.areaAcres,
           // Only the drawn layer's fields are saved (block+size, or species+readiness).
           block: drawMode === 'block' ? form.block : undefined,
-          size: drawMode === 'block' ? form.size : undefined,
+          // Pot size is required for a block and optional for a species plot (mixed-size blocks).
+          size: form.size,
           species: drawMode === 'species' ? form.species : undefined,
+          bedRef: drawMode === 'species' ? form.bay : undefined,
           readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
           manualCount: drawMode === 'species' ? form.manualCount : undefined,
           email: viewerEmail,
@@ -2055,8 +2510,10 @@ export default function SharedPropertyMap({
         body: JSON.stringify({
           id: editing.id,
           block: drawMode === 'block' ? form.block : undefined,
-          size: drawMode === 'block' ? form.size : undefined,
+          // Pot size is required for a block and optional for a species plot (mixed-size blocks).
+          size: form.size,
           species: drawMode === 'species' ? form.species : undefined,
+          bedRef: drawMode === 'species' ? form.bay : undefined,
           readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
           manualCount: drawMode === 'species' ? form.manualCount : undefined,
         }),
@@ -2172,36 +2629,31 @@ export default function SharedPropertyMap({
       const plot = plots[idx]
       const ring = plot.boundary?.coordinates?.[0]
       if (!ring) continue
+      if (plot.bayRef) continue // published bays have their own layer
       // Only draw the boundary if at least one active layer applies to it, so
       // toggling Block/Size/Species off hides the boundaries that relied on it.
       const parts = activePlotParts(plot, annot)
       if (parts.length === 0) continue
       const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
       const color = plotColor(plot, annot, idx)
-      const polygon = L.polygon(coords, { color, weight: 2, fillColor: color, fillOpacity: 0.2 })
-
-      const popupEl = document.createElement('div')
-      popupEl.innerHTML = plotPopupHtml(plot, annot)
-      const actions = document.createElement('div')
-      actions.style.cssText = 'margin-top:6px;display:flex;gap:12px;'
-      const edit = document.createElement('button')
-      edit.textContent = 'Edit'
-      edit.style.cssText = 'font-size:11px;color:#16a34a;background:none;border:none;cursor:pointer;padding:0;'
-      edit.onclick = () => {
-        polygon.closePopup()
-        startEdit(plot)
-      }
-      const del = document.createElement('button')
-      del.textContent = 'Delete plot'
-      del.style.cssText = 'font-size:11px;color:#dc2626;background:none;border:none;cursor:pointer;padding:0;'
-      del.onclick = () => {
-        polygon.closePopup()
-        deletePlot(plot.id)
-      }
-      actions.appendChild(edit)
-      actions.appendChild(del)
-      popupEl.appendChild(actions)
-      polygon.bindPopup(popupEl)
+      const colored: L.PathOptions = { color, weight: 2, opacity: 1, fillColor: color, fillOpacity: 0.2 }
+      // With a walkthrough, only its blocks are colored; the rest are plain
+      // outlines (like the bays) that take their color while their popup is open.
+      const tourBlocks = tour?.inventory_blocks?.length ? new Set(tour.inventory_blocks) : null
+      const plain = !!tourBlocks && annot.block && !(plot.block != null && tourBlocks.has(plot.block))
+      const muted: L.PathOptions = { color: '#ffffff', weight: 1, opacity: 0.55, fillColor: '#ffffff', fillOpacity: 0.03 }
+      // While a new plot is being drawn, existing plots let the clicks through to the map
+      // (a species plot is drawn inside a block, so the block would otherwise swallow every corner).
+      // A click opens the same card a published bay does (count, confirm/correct, work order,
+      // plus Edit / Delete for a drawn plot); the selected plot shows its colour and a heavier edge.
+      const sel = plot.id === selectedBayId
+      const style = sel ? { ...colored, weight: 3, color: '#ffd600' } : plain ? muted : colored
+      const polygon = L.polygon(coords, { pane: 'plots', interactive: !isDrawing, ...style })
+      polygon.on('click', () => {
+        setSelectedBayId(plot.id)
+        setCorrectDraft(null)
+        setOrderMsg('')
+      })
 
       // On-map label shows block/size only — species is view-on-click (popup),
       // since species names are too long to read inside the plots. Species plots
@@ -2212,7 +2664,8 @@ export default function SharedPropertyMap({
       ]
         .filter(Boolean)
         .join(' -- ')
-      if (mapLabel) {
+      // Plain (non-walkthrough) blocks carry no on-map label; their popup names them.
+      if (mapLabel && !plain) {
         polygon.bindTooltip(`<span class="plnt-label-inner">${escapeHtml(mapLabel)}</span>`, {
           permanent: true,
           direction: 'center',
@@ -2222,7 +2675,7 @@ export default function SharedPropertyMap({
       layer.addLayer(polygon)
     }
     fitPlotLabels()
-  }, [plots, annot, deletePlot, startEdit, fitPlotLabels])
+  }, [plots, annot, deletePlot, startEdit, fitPlotLabels, tour, isDrawing, selectedBayId])
 
   // Re-fit labels to their boundaries as the map zooms.
   useEffect(() => {
@@ -2263,11 +2716,27 @@ export default function SharedPropertyMap({
       )
       const pts: [number, number][] = base.filter(([lat, lng]) => !removedKeys.has(ptKey(lat, lng)))
       for (const a of pointEdits) if (a.kind === 'add') pts.push([a.lat, a.lng])
+      // Only hand-drawn plots feed the inventory; published bays bring their own
+      // counts. The bounding-box test skips the ring walk for almost every dot,
+      // which keeps a 350k-dot share from freezing the page when the drawer opens.
       const counts: Record<string, number> = {}
       for (const plot of plots) {
+        if (plot.bayRef) continue
         const ring = plot.boundary?.coordinates?.[0]
         let c = 0
-        if (ring) for (const [lat, lng] of pts) if (pointInRing(lng, lat, ring)) c++
+        if (ring) {
+          let minLng = Infinity, maxLng = -Infinity, minLat = Infinity, maxLat = -Infinity
+          for (const [lng, lat] of ring) {
+            if (lng < minLng) minLng = lng
+            if (lng > maxLng) maxLng = lng
+            if (lat < minLat) minLat = lat
+            if (lat > maxLat) maxLat = lat
+          }
+          for (const [lat, lng] of pts) {
+            if (lat < minLat || lat > maxLat || lng < minLng || lng > maxLng) continue
+            if (pointInRing(lng, lat, ring)) c++
+          }
+        }
         counts[plot.id] = c
       }
       if (!cancelled) setInvCounts(counts)
@@ -2302,9 +2771,16 @@ export default function SharedPropertyMap({
   // block's number + size (found by which block boundary its centroid falls
   // inside). A block with no species still has a count — its dots — so it gets
   // a line of its own (species "—") rather than vanishing from the table.
-  const blockPlots = plots.filter((p) => p.block != null)
+  // Published bays (bayRef) show their counts on the bay card and stay out of
+  // the inventory. A walkthrough may name the blocks the inventory lists
+  // (`inventory_blocks`, e.g. only the hand-counted ones); species plots that
+  // fall outside those blocks drop out with them.
+  const invBlockSet = tour?.inventory_blocks?.length ? new Set(tour.inventory_blocks) : null
+  const blockPlots = plots.filter(
+    (p) => p.block != null && !p.bayRef && (!invBlockSet || invBlockSet.has(p.block))
+  )
   const speciesRows = plots
-    .filter((p) => !!p.species)
+    .filter((p) => !!p.species && !p.bayRef)
     .map((sp) => {
       const ring = sp.boundary?.coordinates?.[0]
       let block: SharePlot | null = null
@@ -2319,23 +2795,27 @@ export default function SharedPropertyMap({
       return {
         id: sp.id,
         species: sp.species ?? null,
-        size: block?.size ?? null,
+        // A species plot's own pot size wins over its block's (one block can hold mixed sizes).
+        size: sp.size ?? block?.size ?? null,
         block: block?.block ?? null,
         blockId: block?.id ?? null,
+        bay: sp.bedRef ?? null, // the bay/bed the viewer named for this plot, shown when it has no block
         readinessDate: sp.readinessDate ?? null,
       }
     })
   const blocksWithSpecies = new Set(speciesRows.map((r) => r.blockId).filter(Boolean))
   const inventoryRows = [
-    ...speciesRows,
+    ...speciesRows.filter((r) => !invBlockSet || r.blockId),
     ...blockPlots
       .filter((b) => !blocksWithSpecies.has(b.id))
       .map((b) => ({
         id: b.id,
-        species: null as string | null,
+        // A walkthrough can name these species-less block lines (e.g. "Test Blocks").
+        species: (tour?.inventory_species ?? null) as string | null,
         size: b.size ?? null,
         block: b.block ?? null,
         blockId: b.id,
+        bay: null as string | null,
         readinessDate: b.readinessDate ?? null,
       })),
   ]
@@ -2349,14 +2829,17 @@ export default function SharedPropertyMap({
     species: string | null
     size: number | null
     block: number | null
+    bay: string | null
     plotIds: string[]
     readiness: string[]
   }
   const inventoryGroups = Object.values(
     inventoryRows.reduce((acc: Record<string, InvGroup>, r) => {
-      const key = `${r.block ?? ''}|${r.size ?? ''}|${(r.species ?? '').trim().toLowerCase()}`
+      // Plots with no block are split by the bay the viewer named, so each bay gets its own row.
+      const bay = r.block == null ? r.bay ?? null : null
+      const key = `${r.block ?? ''}|${bay ?? ''}|${r.size ?? ''}|${(r.species ?? '').trim().toLowerCase()}`
       if (!acc[key]) {
-        acc[key] = { key, species: r.species, size: r.size, block: r.block, plotIds: [], readiness: [] }
+        acc[key] = { key, species: r.species, size: r.size, block: r.block, bay, plotIds: [], readiness: [] }
       }
       acc[key].plotIds.push(r.id)
       if (r.readinessDate) acc[key].readiness.push(r.readinessDate)
@@ -2368,6 +2851,7 @@ export default function SharedPropertyMap({
       species: g.species,
       size: g.size,
       block: g.block,
+      bay: g.bay,
       plotIds: g.plotIds,
       // Earliest readiness across the group (ISO dates sort chronologically).
       readinessDate: g.readiness.length ? g.readiness.slice().sort()[0] : null,
@@ -2449,7 +2933,7 @@ export default function SharedPropertyMap({
       g.size != null ? g.size : '',
       groupCount(g) ?? '',
       groupCount(g) == null ? '' : countSource(g.plotIds),
-      g.block != null ? g.block : '',
+      g.block != null ? g.block : g.bay ? `Bay ${g.bay}` : '',
       g.readinessDate ? fmtReadiness(g.readinessDate) : '',
     ])
     const csv = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\n')
@@ -2533,14 +3017,16 @@ export default function SharedPropertyMap({
     }
     const step = tour.steps[tourStep]
     if (!step) return
+    // A how-to step points at controls; it leaves the drawer and camera where the viewer has them.
+    if (step.kind === 'info') return
     if (step.kind === 'block') {
       setInvOpen(false)
       setShowPoints(true)
       const ring = step.polygon?.coordinates?.[0]
       if (ring) {
         const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
-        L.polygon(coords, { color: '#ffffff', weight: 7, opacity: 0.9, fill: false, interactive: false }).addTo(layer)
-        L.polygon(coords, { color: '#f59e0b', weight: 3, opacity: 1, fill: false, interactive: false }).addTo(layer)
+        L.polygon(coords, { pane: 'tour', color: '#ffffff', weight: 7, opacity: 0.9, fill: false, interactive: false }).addTo(layer)
+        L.polygon(coords, { pane: 'tour', color: '#f59e0b', weight: 3, opacity: 1, fill: false, interactive: false }).addTo(layer)
       }
       const b = step.bounds
       if (b) {
@@ -2553,7 +3039,13 @@ export default function SharedPropertyMap({
       }
       return
     }
-    // inventory steps
+    // inventory steps. A step that points at the Inventory button waits for the
+    // viewer to open the drawer themselves instead of opening it for them.
+    const pointsAtInvButton = step.point?.some((p) => p.target === 'inventory-button')
+    if (pointsAtInvButton) {
+      setInvOpen(false)
+      return
+    }
     setInvOpen(true)
     setInvFrac(0.5)
     if (step.action === 'open') {
@@ -2572,7 +3064,8 @@ export default function SharedPropertyMap({
           (wanted != null && line.blocks.find((g) => g.block === wanted)) ||
           line.blocks.find((g) => g.block != null) ||
           line.blocks[0]
-        if (first) locatePlots(first.plotIds)
+        // With a pointer on the block row, the viewer's own click does the flying.
+        if (first && !step.point?.length) locatePlots(first.plotIds)
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2609,7 +3102,7 @@ export default function SharedPropertyMap({
 
       {/* Drawing instructions — stays in the corner; the Draw button lives in the panel */}
       {isDrawing && !draft && (
-        <div className="absolute bottom-3 left-14 z-[1000] flex items-center gap-2">
+        <div className="absolute bottom-3 left-14 z-[1000] flex items-center gap-2" data-tour="drawing-hint">
           <div className="rounded-md bg-white shadow px-3 py-2 text-xs text-gray-700">
             <span className="font-medium text-green-600">Drawing</span> — click to add points, then click the first
             point (or double-click) to finish
@@ -2625,7 +3118,7 @@ export default function SharedPropertyMap({
 
       {/* Species autocomplete options (nursery availability list) */}
       <datalist id="plnt-species">
-        {SPECIES_LIST.map((s) => (
+        {speciesOptions.map((s) => (
           <option key={s} value={s} />
         ))}
       </datalist>
@@ -2692,6 +3185,31 @@ export default function SharedPropertyMap({
                       className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
                     />
                   </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Bay / bed</label>
+                      <input
+                        type="text"
+                        value={form.bay}
+                        onChange={(e) => setForm((f) => ({ ...f, bay: e.target.value }))}
+                        placeholder="e.g. L-8"
+                        data-tour="species-bay"
+                        className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Pot size (gal)</label>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        value={form.size}
+                        onChange={(e) => setForm((f) => ({ ...f, size: e.target.value }))}
+                        placeholder="e.g. 3"
+                        className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                  </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Readiness date</label>
                     <input
@@ -2733,6 +3251,7 @@ export default function SharedPropertyMap({
               </button>
               <button
                 onClick={editing ? updatePlot : savePlot}
+                data-tour="tag-save"
                 disabled={saving}
                 className="flex-1 rounded-md bg-green-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-60 flex items-center justify-center gap-1.5"
               >
@@ -2762,6 +3281,15 @@ export default function SharedPropertyMap({
             >
               edited
             </span>
+          )}
+          {dotsHidden && (
+            <button
+              onClick={() => mapRef.current?.zoomIn(2)}
+              className="text-[11px] text-green-100 border-l border-white/20 pl-2 hover:text-white"
+              title="Plant dots appear once single plants are visible"
+            >
+              Zoom in to see each plant
+            </button>
           )}
         </div>
       )}
@@ -2809,9 +3337,24 @@ export default function SharedPropertyMap({
         </div>
       )}
 
+      {/* Walkthrough pointer tabs on the controls to click */}
+      {tour && tourStep != null && tourStep >= 0 && tour.steps[tourStep]?.point?.length ? (
+        <TourPointers points={tour.steps[tourStep].point!} root={rootRef.current} />
+      ) : null}
+
       {/* Guided walkthrough card */}
-      {tour && tourStep != null && (
-        <ShareWalkthrough tour={tour} step={tourStep} onStep={setTourStep} onClose={closeTour} />
+      {tour && tour.mode === 'pills' && tourStep != null && tourStep >= 0 && (
+        <TourChip step={tourStep} total={tour.steps.length} onClose={closeTour} />
+      )}
+      {tour && tour.mode !== 'pills' && tourStep != null && (
+        <ShareWalkthrough
+          tour={tour}
+          step={tourStep}
+          onStep={setTourStep}
+          onClose={closeTour}
+          onVerify={sendTourCheck}
+          dock={draft || editing ? 'left' : 'center'}
+        />
       )}
 
       {/* Layer controls — collapsible */}
@@ -2822,7 +3365,7 @@ export default function SharedPropertyMap({
               <span className="text-sm font-semibold text-gray-900">Layers</span>
               {tour && tourStep == null && (
                 <button
-                  onClick={() => setTourStep(-1)}
+                  onClick={startTour}
                   className="ml-auto mr-2 inline-flex items-center gap-1 rounded bg-[#0f2e1d] px-2 py-0.5 text-[11px] font-medium text-white hover:bg-[#143d27]"
                   title="Replay the guided walkthrough"
                 >
@@ -2877,6 +3420,7 @@ export default function SharedPropertyMap({
                       <div className="pl-6 pt-1.5">
                         <button
                           onClick={() => (editingCount ? stopEditCount() : startEditCount())}
+                          data-tour="add-remove"
                           className={`w-full flex items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium border transition-colors ${
                             editingCount
                               ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
@@ -2987,6 +3531,7 @@ export default function SharedPropertyMap({
                       checked={annot.block}
                       onChange={(e) => setAnnot((p) => ({ ...p, block: e.target.checked }))}
                       className="rounded border-gray-300"
+                      data-tour="block-toggle"
                     />
                     <span className="text-sm text-gray-800 truncate">{ANNOT_META.block.label}</span>
                   </label>
@@ -2999,6 +3544,7 @@ export default function SharedPropertyMap({
                     ) : (
                       <button
                         onClick={() => startDrawing('block')}
+                        data-tour="draw-block"
                         className="flex items-center gap-1 rounded bg-green-600 text-white px-2 py-0.5 text-[11px] font-medium hover:bg-green-700 shrink-0"
                         title="Draw a block plot"
                       >
@@ -3016,6 +3562,36 @@ export default function SharedPropertyMap({
                   />
                   <span className="text-xs text-gray-600 flex-1">{ANNOT_META.size.label}</span>
                 </label>
+                {/* Published bays ride on the Block layer. The reviewer view colours
+                    them by how each one was counted; the client sees one colour. */}
+                {showMethodNotes && plots.some((p) => p.bayRef) && annot.block && (
+                  <>
+                    <label
+                      className="flex items-center gap-2 cursor-pointer rounded p-1.5 pl-7 hover:bg-gray-50"
+                      title="Colour each bay by how it was counted"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={reviewer}
+                        onChange={(e) => setReviewer(e.target.checked)}
+                        className="rounded border-gray-300"
+                      />
+                      <Eye className="h-3.5 w-3.5 text-gray-500" />
+                      <span className="text-xs text-gray-600 flex-1">Reviewer view</span>
+                    </label>
+                    {reviewer && (
+                      <div className="flex flex-col gap-0.5 pl-9 pb-1 text-[11px] text-gray-600">
+                        {Object.entries(CONFIDENCE_META).map(([k, m]) => (
+                          <div key={k} className="flex items-center gap-1.5">
+                            <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: m.color }} />
+                            {m.label}
+                            {showMethodNotes ? `: ${m.note}` : ''}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
                 {/* Species row, with its own Draw button */}
                 <div className="flex items-center gap-2 rounded p-1.5 hover:bg-gray-50">
                   <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
@@ -3024,6 +3600,7 @@ export default function SharedPropertyMap({
                       checked={annot.species}
                       onChange={(e) => setAnnot((p) => ({ ...p, species: e.target.checked }))}
                       className="rounded border-gray-300"
+                      data-tour="species-toggle"
                     />
                     <span className="text-sm text-gray-800 truncate">{ANNOT_META.species.label}</span>
                   </label>
@@ -3036,6 +3613,7 @@ export default function SharedPropertyMap({
                     ) : (
                       <button
                         onClick={() => startDrawing('species')}
+                        data-tour="draw-species"
                         className="flex items-center gap-1 rounded bg-green-600 text-white px-2 py-0.5 text-[11px] font-medium hover:bg-green-700 shrink-0"
                         title="Draw a species plot"
                       >
@@ -3090,6 +3668,7 @@ export default function SharedPropertyMap({
         ) : (
           <button
             onClick={() => setPanelOpen(true)}
+            data-tour="layers-button"
             className="rounded-lg bg-white shadow-lg px-3 py-2 flex items-center gap-2 text-sm text-gray-900 hover:shadow-md"
             title="Show layers"
             aria-label="Show layers"
@@ -3514,10 +4093,249 @@ export default function SharedPropertyMap({
         </div>
       )}
 
+      {/* Bay card — the published count for one bay, confirm or correct it, flag it */}
+      {selectedBay && !ordersOpen && (
+        <div className="absolute right-3 bottom-14 z-[1160] w-[min(22rem,calc(100%-1.5rem))] max-h-[72%] overflow-y-auto rounded-xl bg-white shadow-xl border border-gray-200">
+          <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-2">
+            <div>
+              {/* Published bays show just their name; a drawn plot shows its species and pot size above it. */}
+              {!selectedBay.bayRef && (
+                <div className="text-[11px] text-gray-500">
+                  {[selectedBay.species, selectedBay.size != null ? `${selectedBay.size}-Gallon` : null].filter(Boolean).join(' · ') ||
+                    'Drawn on the map'}
+                </div>
+              )}
+              <div className="text-lg font-semibold text-gray-900 leading-tight">{plotTitle(selectedBay)}</div>
+            </div>
+            <button
+              onClick={() => setSelectedBayId(null)}
+              className="text-gray-400 hover:text-gray-700 p-1"
+              title="Close"
+              aria-label="Close bay card"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex items-end justify-between gap-3 px-4">
+            <div>
+              <div className="text-3xl font-bold text-gray-900 leading-none tabular-nums">
+                {bayCount(selectedBay) != null ? bayCount(selectedBay)!.toLocaleString() : '—'}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">plants counted{selectedBay.manualCount != null ? ' (entered)' : ''}</div>
+            </div>
+            <div className="flex flex-col items-end gap-1 max-w-[11rem]">
+              {selectedBay.bayRef || selectedBay.countConfidence ? (
+                showMethodNotes && (
+                <>
+                  <span
+                    className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold text-white"
+                    style={{ backgroundColor: confidenceMeta(selectedBay.countConfidence).color }}
+                  >
+                    {confidenceMeta(selectedBay.countConfidence).label}
+                  </span>
+                  <span className="text-[11px] text-gray-500 text-right">{confidenceMeta(selectedBay.countConfidence).note}</span>
+                </>
+                )
+              ) : (
+                <>
+                  <span className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold text-white bg-gray-500">Drawn on the map</span>
+                </>
+              )}
+            </div>
+          </div>
+          <div className="flex gap-2 px-4 mt-3">
+            {correctDraft == null ? (
+              <>
+                <button
+                  onClick={() => reviewCount('confirm')}
+                  disabled={countBusy || selectedBay.countConfidence === 'verified'}
+                  className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm font-medium text-[#0f2e1d] hover:bg-gray-50 disabled:opacity-40"
+                >
+                  {selectedBay.countConfidence === 'verified' ? 'Verified' : 'Confirm count'}
+                </button>
+                <button
+                  onClick={() => setCorrectDraft(String(bayCount(selectedBay) ?? ''))}
+                  className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm font-medium text-[#0f2e1d] hover:bg-gray-50"
+                >
+                  Correct count
+                </button>
+              </>
+            ) : (
+              <div className="flex-1 flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  value={correctDraft}
+                  onChange={(e) => setCorrectDraft(e.target.value)}
+                  aria-label="Corrected plant count"
+                  className="w-24 rounded-md border border-gray-300 px-2 py-1.5 text-sm tabular-nums"
+                />
+                <button
+                  onClick={() => reviewCount('correct')}
+                  disabled={countBusy}
+                  className="rounded-md bg-[#0f2e1d] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#143d27] disabled:opacity-40"
+                >
+                  Save
+                </button>
+                <button onClick={() => setCorrectDraft(null)} className="text-sm text-gray-500 hover:text-gray-800">
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+          {!selectedBay.bayRef && (
+            <div className="flex gap-2 px-4 mt-2">
+              <button
+                onClick={() => startEdit(selectedBay)}
+                className="flex-1 rounded-md border border-gray-300 px-2 py-1.5 text-sm font-medium text-[#0f2e1d] hover:bg-gray-50"
+              >
+                Edit details
+              </button>
+              <button
+                onClick={() => {
+                  deletePlot(selectedBay.id)
+                  setSelectedBayId(null)
+                }}
+                className="flex-1 rounded-md border border-red-200 px-2 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50"
+              >
+                Delete
+              </button>
+            </div>
+          )}
+          <div className="mt-3 border-t border-gray-100 px-4 py-3 flex flex-col gap-2">
+            <div className="text-sm font-semibold text-gray-900">Flag this {selectedBay.bayRef ? 'bay' : 'plot'}</div>
+            <label className="text-[11px] text-gray-500 flex flex-col gap-1">
+              Task
+              <select
+                value={orderTask}
+                onChange={(e) => setOrderTask(e.target.value)}
+                className="rounded-md border border-gray-300 px-2 py-1.5 text-sm text-gray-900 bg-white"
+              >
+                {ORDER_TASKS.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-[11px] text-gray-500 flex flex-col gap-1">
+              Note
+              <textarea
+                value={orderNote}
+                onChange={(e) => setOrderNote(e.target.value)}
+                rows={2}
+                placeholder="What you see and what needs doing"
+                className="rounded-md border border-gray-300 px-2 py-1.5 text-sm text-gray-900 resize-y"
+              />
+            </label>
+            <button
+              onClick={createOrder}
+              disabled={orderBusy}
+              className="rounded-md bg-[#0f2e1d] px-3 py-2 text-sm font-medium text-white hover:bg-[#143d27] disabled:opacity-40"
+            >
+              {orderBusy ? 'Creating…' : 'Create work order'}
+            </button>
+            {orderMsg && <div className="text-[12px] text-[#1b5e20] bg-[#e8f3ea] rounded-md px-2.5 py-2">{orderMsg}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Work orders — collapsed trigger (bottom-right) */}
+      {!ordersOpen && !fieldOpen && (
+        <button
+          onClick={() => {
+            setInvOpen(false)
+            setOrdersOpen(true)
+          }}
+          className="absolute bottom-3 right-3 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"
+          title="Work orders"
+        >
+          <ClipboardList className="h-4 w-4" />
+          Orders
+          <span className="text-green-300 tabular-nums">({orders.filter((o) => o.status === 'open').length})</span>
+          <ChevronUp className="h-4 w-4" />
+        </button>
+      )}
+
+      {/* Work orders — bottom sheet */}
+      {ordersOpen && (
+        <div
+          className="absolute inset-x-0 bottom-0 z-[1150] flex flex-col bg-white shadow-[0_-4px_20px_rgba(0,0,0,0.15)] rounded-t-xl overflow-hidden"
+          style={{ height: '50%' }}
+        >
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100">
+            <ClipboardList className="h-4 w-4 text-[#0f2e1d] shrink-0" />
+            <span className="text-sm font-semibold text-gray-900">Work orders</span>
+            <span className="text-xs text-gray-400 tabular-nums">
+              {orders.filter((o) => o.status === 'open').length} open · {orders.filter((o) => o.status === 'done').length} done
+            </span>
+            <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={() => window.print()}
+                disabled={orders.length === 0}
+                className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
+                title="Print the list"
+                aria-label="Print the work order list"
+              >
+                <Download className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setOrdersOpen(false)}
+                className="text-gray-400 hover:text-gray-700 p-1"
+                title="Hide work orders"
+                aria-label="Hide work orders"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-auto">
+            {orders.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-sm text-gray-400 p-6 text-center">
+                No work orders yet. Click a bay on the map and use “Flag this bay”.
+              </div>
+            ) : (
+              <ul className="divide-y divide-gray-100">
+                {orders.map((o) => (
+                  <li key={o.id} className={`flex items-center gap-3 px-3 py-2 ${o.status === 'done' ? 'bg-gray-50 text-gray-500' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={o.status === 'done'}
+                      onChange={(e) => setOrderStatus(o, e.target.checked ? 'done' : 'open')}
+                      aria-label={`Mark ${taskLabel(o.task)} on bay ${o.bayRef ?? ''} done`}
+                      className="h-4 w-4 accent-[#0f2e1d]"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-900 truncate">
+                        {taskLabel(o.task)} · Bay {o.bayRef ?? '—'}
+                        {o.plantCountAtCreation != null && (
+                          <span className="font-normal text-gray-500"> ({o.plantCountAtCreation.toLocaleString()} plants)</span>
+                        )}
+                      </div>
+                      {o.note && <div className="text-xs text-gray-500 truncate">{o.note}</div>}
+                    </div>
+                    <div className="text-[11px] text-gray-400 whitespace-nowrap">{new Date(o.createdAt).toLocaleDateString()}</div>
+                    {o.plotId && (
+                      <button
+                        onClick={() => goToBay(o.plotId)}
+                        className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-[#0f2e1d] hover:bg-gray-50 whitespace-nowrap"
+                      >
+                        Open on map
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Inventory drawer — collapsed trigger (bottom-right) */}
       {!invOpen && !fieldOpen && (
         <button
           onClick={() => setInvOpen(true)}
+          data-tour="inventory-button"
           className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[1100] flex items-center gap-1.5 rounded-md bg-[#0f2e1d] text-white shadow-lg px-3 py-2 text-sm font-medium hover:bg-[#143d27]"
           title="Show inventory"
         >
@@ -3546,6 +4364,7 @@ export default function SharedPropertyMap({
             <div className="ml-auto flex items-center gap-1">
               <button
                 onClick={exportInventoryCSV}
+                data-tour="download"
                 disabled={speciesSizeGroups.length === 0}
                 className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
                 title="Download CSV"
@@ -3596,6 +4415,7 @@ export default function SharedPropertyMap({
                       <Fragment key={ss.key}>
                         {/* Species + size rollup — the day-to-day line. Click to drill into blocks. */}
                         <tr
+                          data-tour={ss === speciesSizeGroups[0] ? 'inv-first-line' : undefined}
                           className="group hover:bg-gray-50 cursor-pointer"
                           onClick={() =>
                             setInvExpanded((prev) => {
@@ -3665,14 +4485,18 @@ export default function SharedPropertyMap({
                         {expanded &&
                           ss.blocks.map((g) => (
                             <tr key={g.key} className="bg-gray-50/60">
-                              <td className="px-3 py-1.5 pl-9 text-xs">
+                              <td
+                                className="px-3 py-1.5 pl-9 text-xs"
+                                data-tour={ss === speciesSizeGroups[0] && g === ss.blocks[0] ? 'inv-first-block' : undefined}
+                              >
                                 <button
                                   onClick={() => locatePlots(g.plotIds)}
+                                  data-tour={g.block != null ? `inv-block-${g.block}` : undefined}
                                   className="inline-flex items-center gap-1 text-gray-500 hover:text-green-700"
                                   title="Show this block on the map"
                                 >
                                   <Crosshair className="h-3 w-3 shrink-0" />
-                                  {g.block != null ? `Block ${g.block}` : 'No block'}
+                                  {g.block != null ? `Block ${g.block}` : g.bay ? `Bay ${g.bay}` : 'No block'}
                                 </button>
                               </td>
                               <td className="px-3 py-1.5" />

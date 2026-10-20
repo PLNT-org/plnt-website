@@ -39,7 +39,8 @@ function isValidPolygon(b: any): b is GeoJSONPolygon {
 
 // Columns every handler returns — kept in one place so a new field can't be
 // added to some responses and forgotten in others.
-const PLOT_COLUMNS = 'id, boundary, area_acres, block, container_size, species, readiness_date, manual_count'
+const PLOT_COLUMNS =
+  'id, boundary, area_acres, block, container_size, species, readiness_date, manual_count, bay_ref, bed_ref, plant_count, count_method, count_confidence'
 
 // Map a DB row to the shape the client renders.
 function toClientPlot(row: any) {
@@ -52,6 +53,12 @@ function toClientPlot(row: any) {
     species: row.species,
     readinessDate: row.readiness_date,
     manualCount: row.manual_count,
+    // Published by PLNT's bay-layer sync; null on plots the viewer drew by hand.
+    bayRef: row.bay_ref ?? null,
+    bedRef: row.bed_ref ?? null,
+    plantCount: row.plant_count ?? null,
+    countMethod: row.count_method ?? null,
+    countConfidence: row.count_confidence ?? null,
   }
 }
 
@@ -71,17 +78,26 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const { data, error } = await supabaseAdmin
-    .from('share_plots')
-    .select(PLOT_COLUMNS)
-    .eq('share_id', shareId)
-    .order('created_at', { ascending: true })
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  // Supabase caps a select at 1,000 rows; a property with its bays published
+  // has a few thousand plots, so page through them.
+  const PAGE = 1000
+  const rows: any[] = []
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabaseAdmin
+      .from('share_plots')
+      .select(PLOT_COLUMNS)
+      .eq('share_id', shareId)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+    rows.push(...(data || []))
+    if (!data || data.length < PAGE) break
   }
 
-  return NextResponse.json({ plots: (data || []).map(toClientPlot) })
+  return NextResponse.json({ plots: rows.map(toClientPlot) })
 }
 
 // POST — create a plot. Body: { boundary, areaAcres?, block?, size?, species?, readinessDate?, manualCount?, email? }
@@ -119,6 +135,9 @@ export async function POST(request: NextRequest) {
       : null
   const email =
     typeof body.email === 'string' && body.email.includes('@') ? body.email.trim().toLowerCase() : null
+  // A viewer-drawn plot may name the bay or bed it sits in (e.g. "L-8"); kept in bed_ref,
+  // which only published bays use otherwise (they also carry bay_ref, drawn plots never do).
+  const bedRef = typeof body.bedRef === 'string' && body.bedRef.trim() ? body.bedRef.trim().slice(0, 40) : null
 
   const { data, error } = await supabaseAdmin
     .from('share_plots')
@@ -131,6 +150,7 @@ export async function POST(request: NextRequest) {
       species,
       readiness_date: readinessDate,
       manual_count: parseManualCount(body.manualCount),
+      bed_ref: bedRef,
       created_by_email: email,
     })
     .select(PLOT_COLUMNS)
@@ -181,6 +201,9 @@ export async function PATCH(request: NextRequest) {
       typeof body.readinessDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.readinessDate)
         ? body.readinessDate
         : null
+  }
+  if ('bedRef' in body) {
+    update.bed_ref = typeof body.bedRef === 'string' && body.bedRef.trim() ? body.bedRef.trim().slice(0, 40) : null
   }
   // Clearing the input sends '' -> null, which restores the derived count.
   if ('manualCount' in body) {
