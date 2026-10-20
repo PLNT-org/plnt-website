@@ -3,7 +3,8 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints } from 'lucide-react'
+import { ShareWalkthrough, type Tour } from '@/components/share-walkthrough'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
 
@@ -167,6 +168,8 @@ export interface SharedPropertyData {
   // the zoom floor, and panning is clamped to the parcel's bounds. Zooming in
   // and panning within the parcel stay unrestricted. Set per share.
   lockToParcel?: boolean
+  // Signed URL of this share's walkthrough steps (tour.json), when it has one.
+  tourUrl?: string
 }
 
 const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales beyond
@@ -515,6 +518,51 @@ export default function SharedPropertyMap({
   // Which species+size rollup rows are expanded to show their per-block breakdown.
   const [invExpanded, setInvExpanded] = useState<Set<string>>(new Set())
 
+  // ---- Guided walkthrough (tour.json on the share) ----
+  // step: null = closed, -1 = intro card, 0.. = a step. Opens by itself the
+  // first time this browser visits the share; after that it waits in the
+  // Layers panel. The tour's own highlight sits in its own layer group so it
+  // never fights the inventory highlight.
+  const [tour, setTour] = useState<Tour | null>(null)
+  const [tourStep, setTourStep] = useState<number | null>(null)
+  const tourLayerRef = useRef<L.LayerGroup | null>(null)
+  const tourSeenKey = `plnt-tour-seen:${token}`
+
+  useEffect(() => {
+    if (!data.tourUrl) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(data.tourUrl!)
+        const t = (await res.json()) as Tour
+        if (cancelled || !Array.isArray(t?.steps) || t.steps.length === 0) return
+        setTour(t)
+        let seen = false
+        try {
+          seen = !!localStorage.getItem(tourSeenKey)
+        } catch {
+          /* private mode — just open it */
+        }
+        if (!seen) setTourStep(-1)
+      } catch (err) {
+        console.error('Failed to load walkthrough:', err)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.tourUrl])
+
+  const closeTour = () => {
+    setTourStep(null)
+    try {
+      localStorage.setItem(tourSeenKey, '1')
+    } catch {
+      /* ignore */
+    }
+  }
+
   const resetView = () => {
     const map = mapRef.current
     if (!map) return
@@ -568,6 +616,8 @@ export default function SharedPropertyMap({
     plotsLayerRef.current = L.layerGroup().addTo(map)
     // Highlight overlay sits on top of the plots (added last).
     highlightLayerRef.current = L.layerGroup().addTo(map)
+    // The walkthrough's own outline, above everything else.
+    tourLayerRef.current = L.layerGroup().addTo(map)
 
     for (const layer of data.layers) {
       if (layer.tilesUrl) {
@@ -601,6 +651,7 @@ export default function SharedPropertyMap({
       gpsLayerRef.current = null
       plotsLayerRef.current = null
       highlightLayerRef.current = null
+      tourLayerRef.current = null
       eraseLayerRef.current = null
       areaShapeRef.current = null
     }
@@ -2246,11 +2297,13 @@ export default function SharedPropertyMap({
     window.addEventListener('pointerup', up)
   }
 
-  // Inventory rows = species plots only. A species is drawn inside a block, so
-  // it inherits that block's number + size (found by which block boundary its
-  // centroid falls inside).
+  // Inventory rows = species plots, plus any block that has no species plot
+  // drawn inside it yet. A species is drawn inside a block, so it inherits that
+  // block's number + size (found by which block boundary its centroid falls
+  // inside). A block with no species still has a count — its dots — so it gets
+  // a line of its own (species "—") rather than vanishing from the table.
   const blockPlots = plots.filter((p) => p.block != null)
-  const inventoryRows = plots
+  const speciesRows = plots
     .filter((p) => !!p.species)
     .map((sp) => {
       const ring = sp.boundary?.coordinates?.[0]
@@ -2265,12 +2318,27 @@ export default function SharedPropertyMap({
       }
       return {
         id: sp.id,
-        species: sp.species,
+        species: sp.species ?? null,
         size: block?.size ?? null,
         block: block?.block ?? null,
+        blockId: block?.id ?? null,
         readinessDate: sp.readinessDate ?? null,
       }
     })
+  const blocksWithSpecies = new Set(speciesRows.map((r) => r.blockId).filter(Boolean))
+  const inventoryRows = [
+    ...speciesRows,
+    ...blockPlots
+      .filter((b) => !blocksWithSpecies.has(b.id))
+      .map((b) => ({
+        id: b.id,
+        species: null as string | null,
+        size: b.size ?? null,
+        block: b.block ?? null,
+        blockId: b.id,
+        readinessDate: b.readinessDate ?? null,
+      })),
+  ]
 
   // Group the species plots by (block, size, species) so every unique combination
   // is a single line — the count is summed across all of that combination's plots.
@@ -2447,6 +2515,68 @@ export default function SharedPropertyMap({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlightKey, plots])
+
+  // ---- Walkthrough: drive the map for the current step ----
+  // A block step frames the block and outlines it; an inventory step opens
+  // the drawer and, for 'expand', opens the first line that has block rows and
+  // flies to its first block — the same thing a click on that row does.
+  useEffect(() => {
+    const map = mapRef.current
+    const layer = tourLayerRef.current
+    if (!map || !layer) return
+    layer.clearLayers()
+    if (tourStep == null || !tour) return
+    if (tourStep < 0) {
+      setInvOpen(false)
+      resetView()
+      return
+    }
+    const step = tour.steps[tourStep]
+    if (!step) return
+    if (step.kind === 'block') {
+      setInvOpen(false)
+      setShowPoints(true)
+      const ring = step.polygon?.coordinates?.[0]
+      if (ring) {
+        const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
+        L.polygon(coords, { color: '#ffffff', weight: 7, opacity: 0.9, fill: false, interactive: false }).addTo(layer)
+        L.polygon(coords, { color: '#f59e0b', weight: 3, opacity: 1, fill: false, interactive: false }).addTo(layer)
+      }
+      const b = step.bounds
+      if (b) {
+        // Pad the top so the card doesn't cover the block.
+        map.fitBounds([[b.south, b.west], [b.north, b.east]], {
+          paddingTopLeft: [40, 220],
+          paddingBottomRight: [40, 40],
+          maxZoom: 21,
+        })
+      }
+      return
+    }
+    // inventory steps
+    setInvOpen(true)
+    setInvFrac(0.5)
+    if (step.action === 'open') {
+      setInvExpanded(new Set())
+      resetView()
+    } else if (step.action === 'expand') {
+      // Prefer the line holding the block the step names; else any line with blocks.
+      const wanted = step.block
+      const line =
+        (wanted != null && speciesSizeGroups.find((ss) => ss.blocks.some((g) => g.block === wanted))) ||
+        speciesSizeGroups.find((ss) => ss.blocks.some((g) => g.block != null)) ||
+        speciesSizeGroups[0]
+      if (line) {
+        setInvExpanded(new Set([line.key]))
+        const first =
+          (wanted != null && line.blocks.find((g) => g.block === wanted)) ||
+          line.blocks.find((g) => g.block != null) ||
+          line.blocks[0]
+        if (first) locatePlots(first.plotIds)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tourStep, tour])
 
   const allLoading = data.layers.length > 0 && Object.keys(ready).length < data.layers.filter((l) => l.tilesUrl).length
 
@@ -2679,12 +2809,27 @@ export default function SharedPropertyMap({
         </div>
       )}
 
+      {/* Guided walkthrough card */}
+      {tour && tourStep != null && (
+        <ShareWalkthrough tour={tour} step={tourStep} onStep={setTourStep} onClose={closeTour} />
+      )}
+
       {/* Layer controls — collapsible */}
       <div className="absolute top-3 right-3 z-[1000]">
         {panelOpen ? (
           <div className="w-56 rounded-lg bg-white shadow-lg overflow-hidden">
             <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
               <span className="text-sm font-semibold text-gray-900">Layers</span>
+              {tour && tourStep == null && (
+                <button
+                  onClick={() => setTourStep(-1)}
+                  className="ml-auto mr-2 inline-flex items-center gap-1 rounded bg-[#0f2e1d] px-2 py-0.5 text-[11px] font-medium text-white hover:bg-[#143d27]"
+                  title="Replay the guided walkthrough"
+                >
+                  <Footprints className="h-3 w-3" />
+                  Walkthrough
+                </button>
+              )}
               <button
                 onClick={() => setPanelOpen(false)}
                 className="text-gray-400 hover:text-gray-700"

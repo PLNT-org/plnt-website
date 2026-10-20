@@ -58,3 +58,6 @@ scripts/*.json
 # Python bytecode (aruco-service)
 __pycache__/
 *.pyc
+
+# Local-only walkthrough copies for dev (SHARE_TOUR_URL_OVERRIDE)
+public/dev/
