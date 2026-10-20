@@ -13,7 +13,9 @@ import { useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Footprints, X } from 'lucide-react'
 
 export interface TourStep {
-  kind: 'block' | 'inventory' | 'info' // info: a how-to step that only points at controls
+  // info: a how-to step that only points at controls; summary: a results card computed from
+  // the tour's block steps (hand count vs flight, average error)
+  kind: 'block' | 'inventory' | 'info' | 'summary'
   title: string
   note?: string
   // block steps
@@ -41,6 +43,9 @@ export interface TourStep {
   // Pills mode: a dashed outline (GeoJSON polygon, lng/lat) for the viewer to trace while drawing;
   // drawing clicks near its corners snap onto them.
   guide?: { type: 'Polygon'; coordinates: number[][][] }
+  // Cards mode: false hides this step's card and leaves only its pills and the progress chip
+  // (e.g. once the inventory is open, so the card doesn't cover the block it zooms to).
+  card?: boolean
 }
 
 export interface TourPoint {
@@ -63,6 +68,8 @@ export interface Tour {
   mode?: 'cards' | 'pills'
   // Species suggestions for this link (e.g. the grower's catalog), offered before the general list.
   species_list?: string[]
+  // Greeting on the intro card by the viewer's email, e.g. {"andrewc@…": "Andrew"} -> "Welcome, Andrew".
+  viewer_names?: Record<string, string>
 }
 
 export function ShareWalkthrough({
@@ -72,6 +79,7 @@ export function ShareWalkthrough({
   onClose,
   onVerify,
   dock = 'center',
+  viewerEmail,
 }: {
   tour: Tour
   step: number // -1 = intro
@@ -81,7 +89,9 @@ export function ShareWalkthrough({
   onVerify?: (step: TourStep, count: number | null) => Promise<void>
   // 'left' moves the card out of the middle of the screen (e.g. while the plot form is open there).
   dock?: 'center' | 'left'
+  viewerEmail?: string
 }) {
+  const viewerName = viewerEmail ? tour.viewer_names?.[viewerEmail.trim().toLowerCase()] : undefined
   const total = tour.steps.length
   const current = step >= 0 ? tour.steps[step] : null
   const last = step >= total - 1
@@ -114,6 +124,7 @@ export function ShareWalkthrough({
           <>
             <h2 className="text-base font-semibold text-gray-900">{current.title}</h2>
             {/* No hand count: the flight count is the number to look at, on its own. */}
+            {current.kind === 'summary' && <TourSummary tour={tour} />}
             {current.kind === 'block' && typeof current.ours === 'number' && typeof current.truth !== 'number' && (
               <div className="mt-2 rounded-lg bg-[#0f2e1d] px-3 py-2 text-white">
                 <div className="text-[10px] uppercase tracking-wide text-green-200/80">From the flight</div>
@@ -147,7 +158,9 @@ export function ShareWalkthrough({
           </>
         ) : (
           <>
-            <h2 className="text-base font-semibold text-gray-900">{tour.title}</h2>
+            <h2 className="text-base font-semibold text-gray-900">
+              {tour.viewer_names ? (viewerName ? `Welcome, ${viewerName}` : 'Welcome') : tour.title}
+            </h2>
             {tour.intro && <p className="mt-2 text-sm leading-snug text-gray-600">{tour.intro}</p>}
           </>
         )}
@@ -348,6 +361,57 @@ export function TourChip({ step, total, onClose }: { step: number; total: number
       <button onClick={onClose} className="ml-1 text-green-200 hover:text-white" title="End the tour" aria-label="End the tour">
         Skip <X className="inline h-3 w-3" />
       </button>
+    </div>
+  )
+}
+
+// Results card: every block step with a hand count, the flight count beside it, and the
+// average error across them (the mean of the per-block differences, ignoring sign).
+function TourSummary({ tour }: { tour: Tour }) {
+  const rows = tour.steps.filter(
+    (st) => st.kind === 'block' && typeof st.ours === 'number' && typeof st.truth === 'number' && st.truth > 0
+  )
+  if (!rows.length) return null
+  const pct = (st: TourStep) => ((st.ours! - st.truth!) / st.truth!) * 100
+  const meanAbs = rows.reduce((a, st) => a + Math.abs(pct(st)), 0) / rows.length
+  const hand = rows.reduce((a, st) => a + st.truth!, 0)
+  const flight = rows.reduce((a, st) => a + st.ours!, 0)
+  const fmtPct = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`
+  return (
+    <div className="mt-2">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="rounded-lg bg-[#0f2e1d] px-3 py-2 text-white">
+          <div className="text-[10px] uppercase tracking-wide text-green-200/80">Average margin of error</div>
+          <div className="text-lg font-semibold tabular-nums">{meanAbs.toFixed(1)}%</div>
+        </div>
+        <div className="rounded-lg bg-gray-50 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">All {rows.length} blocks</div>
+          <div className="text-sm font-semibold tabular-nums text-gray-900">
+            {flight.toLocaleString()} vs {hand.toLocaleString()} by hand
+          </div>
+          <div className="text-xs tabular-nums text-gray-500">{fmtPct(((flight - hand) / hand) * 100)}</div>
+        </div>
+      </div>
+      <table className="mt-2 w-full text-xs tabular-nums">
+        <thead>
+          <tr className="text-gray-500">
+            <th className="text-left font-medium py-0.5">Block</th>
+            <th className="text-right font-medium">By hand</th>
+            <th className="text-right font-medium">Flight</th>
+            <th className="text-right font-medium">Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((st) => (
+            <tr key={st.title} className="border-t border-gray-100">
+              <td className="py-0.5 text-gray-800">{st.title.replace(/,.*$/, '')}</td>
+              <td className="text-right text-gray-700">{st.truth!.toLocaleString()}</td>
+              <td className="text-right text-gray-700">{st.ours!.toLocaleString()}</td>
+              <td className="text-right text-gray-700">{fmtPct(pct(st))}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
