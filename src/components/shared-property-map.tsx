@@ -4100,8 +4100,8 @@ export default function SharedPropertyMap({
         <div className="absolute right-3 bottom-14 z-[1160] w-[min(22rem,calc(100%-1.5rem))] max-h-[72%] overflow-y-auto rounded-xl bg-white shadow-xl border border-gray-200">
           <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-2">
             <div>
-              {/* Published bays show just their name; a drawn plot shows its species and pot size above it. */}
-              {!selectedBay.bayRef && (
+              {/* A drawn plot shows its species and pot size above its name; a published bay shows its species when one is recorded. */}
+              {(!selectedBay.bayRef || selectedBay.species) && (
                 <div className="text-[11px] text-gray-500">
                   {[selectedBay.species, selectedBay.size != null ? `${selectedBay.size}-Gallon` : null].filter(Boolean).join(' · ') ||
                     'Drawn on the map'}
