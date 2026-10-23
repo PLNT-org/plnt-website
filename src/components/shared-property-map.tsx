@@ -4100,14 +4100,21 @@ export default function SharedPropertyMap({
         <div className="absolute right-3 bottom-14 z-[1160] w-[min(22rem,calc(100%-1.5rem))] max-h-[72%] overflow-y-auto rounded-xl bg-white shadow-xl border border-gray-200">
           <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-2">
             <div>
-              {/* A drawn plot shows its species and pot size above its name; a published bay shows its species when one is recorded. */}
-              {(!selectedBay.bayRef || selectedBay.species) && (
-                <div className="text-[11px] text-gray-500">
-                  {[selectedBay.species, selectedBay.size != null ? `${selectedBay.size}-Gallon` : null].filter(Boolean).join(' · ') ||
-                    'Drawn on the map'}
-                </div>
-              )}
               <div className="text-lg font-semibold text-gray-900 leading-tight">{plotTitle(selectedBay)}</div>
+              {/* The species is the headline under the name: a leaf and bold green text. Drawn plots add the pot size. */}
+              {selectedBay.species ? (
+                <div className="mt-1 flex items-start gap-1.5 text-sm font-semibold text-[#0f2e1d] leading-snug">
+                  <Leaf className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true" />
+                  <span>
+                    {selectedBay.species}
+                    {selectedBay.size != null && <span className="font-normal text-gray-500"> · {selectedBay.size}-Gallon</span>}
+                  </span>
+                </div>
+              ) : (
+                !selectedBay.bayRef && (
+                  <div className="text-[11px] text-gray-500">{selectedBay.size != null ? `${selectedBay.size}-Gallon` : 'Drawn on the map'}</div>
+                )
+              )}
             </div>
             <button
               onClick={() => setSelectedBayId(null)}
