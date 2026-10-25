@@ -97,7 +97,31 @@ export async function GET(request: NextRequest) {
     if (!data || data.length < PAGE) break
   }
 
-  return NextResponse.json({ plots: rows.map(toClientPlot) })
+  // Which flights each published bay was counted on (share_plot_counts has one
+  // row per bay per flight). The map shows a bay only on those flights, so a
+  // block flown on its own date does not litter the other flights' views. A bay
+  // with no count rows stays on every flight.
+  const flightKeys = new Map<string, string[]>()
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabaseAdmin
+      .from('share_plot_counts')
+      .select('plot_id, flight_key')
+      .eq('share_id', shareId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1)
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+    for (const c of data || []) {
+      if (!c.plot_id || !c.flight_key) continue
+      const list = flightKeys.get(c.plot_id) ?? []
+      if (!list.includes(c.flight_key)) list.push(c.flight_key)
+      flightKeys.set(c.plot_id, list)
+    }
+    if (!data || data.length < PAGE) break
+  }
+
+  return NextResponse.json({ plots: rows.map((r) => ({ ...toClientPlot(r), flightKeys: flightKeys.get(r.id) ?? null })) })
 }
 
 // POST — create a plot. Body: { boundary, areaAcres?, block?, size?, species?, readinessDate?, manualCount?, email? }
