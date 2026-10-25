@@ -37,6 +37,9 @@ export interface SharePlot {
   plantCount?: number | null
   countMethod?: string | null
   countConfidence?: 'verified' | 'good' | 'medium' | 'estimate' | string | null
+  // Flights this bay was counted on; it is drawn only while one of them is
+  // showing. null = not tied to a flight (drawn on every flight).
+  flightKeys?: string[] | null
 }
 
 // A flagged bay: task + note, created from the bay card or the phone.
@@ -2125,6 +2128,8 @@ export default function SharedPropertyMap({
     for (const plot of plots) {
       const ring = plot.boundary?.coordinates?.[0]
       if (!plot.bayRef || !ring) continue
+      // A bay counted on other flights only (e.g. the juniper block flown on its own date) stays off this flight's map.
+      if (flightKey && plot.flightKeys?.length && !plot.flightKeys.includes(flightKey)) continue
       const coords = ring.map(([lng, lat]) => [lat, lng] as [number, number])
       const sel = plot.id === selectedBayId
       const color = sel ? '#ffd600' : reviewer ? confidenceMeta(plot.countConfidence).color : '#ffffff'
@@ -2147,7 +2152,7 @@ export default function SharedPropertyMap({
       })
       polygon.addTo(layer)
     }
-  }, [plots, annot.block, selectedBayId, reviewer, editingCount, dotsHidden, isDrawing])
+  }, [plots, annot.block, selectedBayId, reviewer, editingCount, dotsHidden, isDrawing, flightKey])
 
   // Frame a bay and select it (from the orders sheet).
   const goToBay = useCallback(
