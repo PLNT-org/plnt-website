@@ -2955,7 +2955,7 @@ export default function SharedPropertyMap({
   // "Count Source" travels with the number so a hand-entered figure is never
   // mistaken for one the survey measured once this leaves the app.
   const inventoryTable = () => {
-    const headers = ['Species', 'Size (gal)', 'Count', 'Count Source', 'Block', 'Planted Date', 'Readiness Date']
+    const headers = ['Species', 'Size (gal)', 'Count', 'Count Source', 'Block', 'Planted Date', 'Ready Date']
     const rows: (string | number)[][] = inventoryGroups.map((g) => [
       g.species || '',
       g.size != null ? g.size : '',
@@ -3311,7 +3311,7 @@ export default function SharedPropertyMap({
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Readiness date</label>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Ready date</label>
                       <input
                         type="date"
                         value={form.readinessDate}
@@ -4553,7 +4553,7 @@ export default function SharedPropertyMap({
                     <th className="text-left font-medium px-3 py-2">Size</th>
                     <th className="text-right font-medium px-3 py-2">Count</th>
                     <th className="text-left font-medium px-3 py-2">Planted Date</th>
-                    <th className="text-left font-medium px-3 py-2">Readiness Date</th>
+                    <th className="text-left font-medium px-3 py-2">Ready Date</th>
                     <th className="px-3 py-2 w-14"></th>
                   </tr>
                 </thead>
