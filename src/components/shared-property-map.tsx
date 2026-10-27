@@ -2791,8 +2791,11 @@ export default function SharedPropertyMap({
     .filter((p) => !!p.species && !p.bayRef)
     .map((sp) => {
       const ring = sp.boundary?.coordinates?.[0]
-      let block: SharePlot | null = null
-      if (ring) {
+      // A plot that is its own block (numbered and tagged with a species) is that block;
+      // otherwise an odd-shaped plot's centroid can land in a neighbour and leave its own
+      // block listed again as a blank "—" line.
+      let block: SharePlot | null = blockPlots.includes(sp) ? sp : null
+      if (!block && ring) {
         const [clng, clat] = ringCentroid(ring)
         block =
           blockPlots.find((b) => {
