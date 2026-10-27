@@ -3,10 +3,11 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints, ClipboardList, Eye } from 'lucide-react'
+import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, ChevronDown, FileSpreadsheet, FileText, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints, ClipboardList, Eye } from 'lucide-react'
 import { ShareWalkthrough, TourChip, TourPointers, type Tour, type TourStep } from '@/components/share-walkthrough'
 import { Slider } from '@/components/ui/slider'
 import { SPECIES_LIST } from '@/lib/species-list'
+import JSZip from 'jszip'
 
 export type LayerType = 'rgb' | 'ndvi' | 'chm'
 
@@ -584,6 +585,12 @@ export default function SharedPropertyMap({
   const [invCounting, setInvCounting] = useState(false)
   // Which species+size rollup rows are expanded to show their per-block breakdown.
   const [invExpanded, setInvExpanded] = useState<Set<string>>(new Set())
+  const [dlMenuOpen, setDlMenuOpen] = useState(false)
+  // Opening the inventory closes an open bay card, which would otherwise sit over the drawer's buttons.
+  useEffect(() => {
+    if (invOpen) setSelectedBayId(null)
+    else setDlMenuOpen(false)
+  }, [invOpen])
 
   // ---- Guided walkthrough (tour.json on the share) ----
   // step: null = closed, -1 = intro card, 0.. = a step. Opens by itself the
@@ -2930,16 +2937,12 @@ export default function SharedPropertyMap({
       ? ss.blocks.reduce((sum, b) => sum + (groupCount(b) ?? 0), 0)
       : null
 
-  // Export the current location's species inventory as CSV (matches the drawer's columns).
-  const exportInventoryCSV = () => {
-    const cell = (v: unknown) => {
-      const s = v == null ? '' : String(v)
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-    }
-    // "Count Source" travels with the number so a hand-entered figure is never
-    // mistaken for one the survey measured once this leaves the app.
+  // Export the current location's species inventory (matches the drawer's columns).
+  // "Count Source" travels with the number so a hand-entered figure is never
+  // mistaken for one the survey measured once this leaves the app.
+  const inventoryTable = () => {
     const headers = ['Species', 'Size (gal)', 'Count', 'Count Source', 'Block', 'Readiness Date']
-    const rows = inventoryGroups.map((g) => [
+    const rows: (string | number)[][] = inventoryGroups.map((g) => [
       g.species || '',
       g.size != null ? g.size : '',
       groupCount(g) ?? '',
@@ -2947,14 +2950,68 @@ export default function SharedPropertyMap({
       g.block != null ? g.block : g.bay ? `Bay ${g.bay}` : '',
       g.readinessDate ? fmtReadiness(g.readinessDate) : '',
     ])
-    const csv = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\n')
-    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+    return { headers, rows }
+  }
+  const saveFile = (blob: Blob, ext: string) => {
+    const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     const slug = (data.title || 'inventory').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase()
-    a.download = `${slug || 'inventory'}-inventory.csv`
+    a.download = `${slug || 'inventory'}-inventory.${ext}`
     a.click()
     URL.revokeObjectURL(url)
+  }
+  const exportInventoryCSV = () => {
+    const cell = (v: unknown) => {
+      const s = v == null ? '' : String(v)
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    }
+    const { headers, rows } = inventoryTable()
+    const csv = [headers, ...rows].map((r) => r.map(cell).join(',')).join('\n')
+    saveFile(new Blob([csv], { type: 'text/csv' }), 'csv')
+  }
+  // A one-sheet .xlsx (Excel, Google Sheets, Numbers): numbers stay numbers, header row bold.
+  const exportInventoryXLSX = async () => {
+    const { headers, rows } = inventoryTable()
+    const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    const col = (i: number) => String.fromCharCode(65 + i)
+    const xmlRow = (r: (string | number)[], n: number, bold = false) =>
+      `<row r="${n}">${r
+        .map((v, i) =>
+          typeof v === 'number'
+            ? `<c r="${col(i)}${n}"><v>${v}</v></c>`
+            : `<c r="${col(i)}${n}" t="inlineStr"${bold ? ' s="1"' : ''}><is><t xml:space="preserve">${esc(v)}</t></is></c>`
+        )
+        .join('')}</row>`
+    const sheet =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<cols><col min="1" max="1" width="48" customWidth="1"/><col min="2" max="6" width="14" customWidth="1"/></cols>' +
+      `<sheetData>${[xmlRow(headers, 1, true), ...rows.map((r, i) => xmlRow(r, i + 2))].join('')}</sheetData></worksheet>`
+    const zip = new JSZip()
+    zip.file(
+      '[Content_Types].xml',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'
+    )
+    zip.file(
+      '_rels/.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+    )
+    zip.file(
+      'xl/workbook.xml',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Inventory" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    zip.file(
+      'xl/_rels/workbook.xml.rels',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'
+    )
+    zip.file(
+      'xl/styles.xml',
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf/><xf fontId="1" applyFont="1"/></cellXfs></styleSheet>'
+    )
+    zip.file('xl/worksheets/sheet1.xml', sheet)
+    const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    saveFile(blob, 'xlsx')
   }
 
   // ---- Inventory → map: light up an expanded line's plots, and frame them on
@@ -4391,16 +4448,53 @@ export default function SharedPropertyMap({
             <span className="text-sm font-semibold text-gray-900">Inventory</span>
             <span className="text-xs text-gray-400 tabular-nums">{speciesSizeGroups.length} lines</span>
             <div className="ml-auto flex items-center gap-1">
-              <button
-                onClick={exportInventoryCSV}
-                data-tour="download"
-                disabled={speciesSizeGroups.length === 0}
-                className="text-gray-400 hover:text-gray-700 p-1 disabled:opacity-40"
-                title="Download CSV"
-                aria-label="Download inventory as CSV"
-              >
-                <Download className="h-4 w-4" />
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setDlMenuOpen((o) => !o)}
+                  data-tour="download"
+                  disabled={speciesSizeGroups.length === 0}
+                  className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+                  title="Download the inventory (Excel or CSV)"
+                  aria-haspopup="menu"
+                  aria-expanded={dlMenuOpen}
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download
+                  <ChevronDown className="h-3 w-3" />
+                </button>
+                {dlMenuOpen && (
+                  <div role="menu" className="absolute right-0 top-full mt-1 z-10 w-56 rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setDlMenuOpen(false)
+                        void exportInventoryXLSX()
+                      }}
+                      className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-gray-50"
+                    >
+                      <FileSpreadsheet className="h-4 w-4 mt-0.5 text-[#0f2e1d] shrink-0" />
+                      <span>
+                        <span className="block text-sm text-gray-900">Excel (.xlsx)</span>
+                        <span className="block text-[11px] text-gray-500">Excel, Google Sheets, Numbers</span>
+                      </span>
+                    </button>
+                    <button
+                      role="menuitem"
+                      onClick={() => {
+                        setDlMenuOpen(false)
+                        exportInventoryCSV()
+                      }}
+                      className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-gray-50"
+                    >
+                      <FileText className="h-4 w-4 mt-0.5 text-[#0f2e1d] shrink-0" />
+                      <span>
+                        <span className="block text-sm text-gray-900">CSV (.csv)</span>
+                        <span className="block text-[11px] text-gray-500">Inventory and accounting software</span>
+                      </span>
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 onClick={() => setInvFrac((f) => (f >= 0.95 ? 0.5 : 1))}
                 className="text-gray-400 hover:text-gray-700 p-1"
