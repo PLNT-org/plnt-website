@@ -720,6 +720,7 @@ export default function SharedPropertyMap({
       setPanelOpen(false)
       setAnnot((p) => ({ ...p, species: false }))
       setInvOpen(false)
+      setSelectedBayId(null) // an open bay card would skip a "click this bay" step
       setTourStep(0)
     } else setTourStep(-1)
   }
@@ -2678,6 +2679,8 @@ export default function SharedPropertyMap({
         })
       }
       layer.addLayer(polygon)
+      // A walkthrough pill can point at a numbered block ("plot-12").
+      if (plot.block != null) polygon.getElement()?.setAttribute('data-tour', `plot-${plot.block}`)
     }
     fitPlotLabels()
   }, [plots, annot, deletePlot, startEdit, fitPlotLabels, tour, isDrawing, selectedBayId])
@@ -3024,6 +3027,12 @@ export default function SharedPropertyMap({
     if (!step) return
     // A how-to step points at controls, and the results card sits over the map as it is:
     // both leave the drawer and camera where the viewer has them.
+    // An info step with bounds frames that spot first (e.g. a bay the viewer is asked to click).
+    if (step.kind === 'info' && step.bounds) {
+      const b = step.bounds
+      map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [60, 60], maxZoom: 21 })
+      return
+    }
     if (step.kind === 'info' || step.kind === 'summary') return
     if (step.kind === 'block') {
       setInvOpen(false)
@@ -4102,7 +4111,10 @@ export default function SharedPropertyMap({
 
       {/* Bay card — the published count for one bay, confirm or correct it, flag it */}
       {selectedBay && !ordersOpen && (
-        <div className="absolute right-3 bottom-14 z-[1160] w-[min(22rem,calc(100%-1.5rem))] max-h-[72%] overflow-y-auto rounded-xl bg-white shadow-xl border border-gray-200">
+        <div
+          data-tour="bay-card"
+          className="absolute right-3 bottom-14 z-[1160] w-[min(22rem,calc(100%-1.5rem))] max-h-[72%] overflow-y-auto rounded-xl bg-white shadow-xl border border-gray-200"
+        >
           <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-2">
             <div>
               <div className="text-lg font-semibold text-gray-900 leading-tight">{plotTitle(selectedBay)}</div>
