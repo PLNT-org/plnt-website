@@ -37,10 +37,9 @@ function isValidPolygon(b: any): b is GeoJSONPolygon {
   )
 }
 
-// Columns every handler returns — kept in one place so a new field can't be
-// added to some responses and forgotten in others.
-const PLOT_COLUMNS =
-  'id, boundary, area_acres, block, container_size, species, readiness_date, manual_count, bay_ref, bed_ref, plant_count, count_method, count_confidence'
+// Every handler returns whole rows, so a column added by a migration (planted_date)
+// shows up once it exists and nothing breaks before then.
+const PLOT_COLUMNS = '*'
 
 // Map a DB row to the shape the client renders.
 function toClientPlot(row: any) {
@@ -52,6 +51,7 @@ function toClientPlot(row: any) {
     size: row.container_size,
     species: row.species,
     readinessDate: row.readiness_date,
+    plantedDate: row.planted_date ?? null,
     manualCount: row.manual_count,
     // Published by PLNT's bay-layer sync; null on plots the viewer drew by hand.
     bayRef: row.bay_ref ?? null,
@@ -157,6 +157,8 @@ export async function POST(request: NextRequest) {
     typeof body.readinessDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.readinessDate)
       ? body.readinessDate
       : null
+  const plantedDate =
+    typeof body.plantedDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.plantedDate) ? body.plantedDate : null
   const email =
     typeof body.email === 'string' && body.email.includes('@') ? body.email.trim().toLowerCase() : null
   // A viewer-drawn plot may name the bay or bed it sits in (e.g. "L-8"); kept in bed_ref,
@@ -175,6 +177,8 @@ export async function POST(request: NextRequest) {
       readiness_date: readinessDate,
       manual_count: parseManualCount(body.manualCount),
       bed_ref: bedRef,
+      // Only sent when set, so drawing a plot still works on a database without the column.
+      ...(plantedDate ? { planted_date: plantedDate } : {}),
       created_by_email: email,
     })
     .select(PLOT_COLUMNS)
@@ -225,6 +229,10 @@ export async function PATCH(request: NextRequest) {
       typeof body.readinessDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.readinessDate)
         ? body.readinessDate
         : null
+  }
+  if ('plantedDate' in body) {
+    update.planted_date =
+      typeof body.plantedDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.plantedDate) ? body.plantedDate : null
   }
   if ('bedRef' in body) {
     update.bed_ref = typeof body.bedRef === 'string' && body.bedRef.trim() ? body.bedRef.trim().slice(0, 40) : null

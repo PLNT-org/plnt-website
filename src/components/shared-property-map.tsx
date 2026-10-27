@@ -25,6 +25,7 @@ export interface SharePlot {
   size?: number | null // container size (gallons)
   species?: string | null
   readinessDate?: string | null // yyyy-mm-dd
+  plantedDate?: string | null // yyyy-mm-dd
   // Operator-entered count. When set, it OVERRIDES the point-in-polygon count
   // for this plot everywhere the inventory totals it — for sections the imagery
   // can't count (uncovered strip, under shade cloth, staged after the flight).
@@ -504,7 +505,7 @@ export default function SharedPropertyMap({
   const [draft, setDraft] = useState<{ boundary: GeoJSONPolygon; areaAcres: number } | null>(null)
   // The saved plot currently being edited (fields only — boundary untouched).
   const [editing, setEditing] = useState<SharePlot | null>(null)
-  const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '', manualCount: '', bay: '' })
+  const [form, setForm] = useState({ block: '', size: '', species: '', readinessDate: '', plantedDate: '', manualCount: '', bay: '' })
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
@@ -2301,7 +2302,7 @@ export default function SharedPropertyMap({
     if (points.length < 3) return
     const ring = points.map((p) => [p.lng, p.lat])
     ring.push(ring[0]) // close the polygon
-    setForm({ block: '', size: '', species: '', readinessDate: '', manualCount: '', bay: '' })
+    setForm({ block: '', size: '', species: '', readinessDate: '', plantedDate: '', manualCount: '', bay: '' })
     setSaveError('')
     setDraft({ boundary: { type: 'Polygon', coordinates: [ring] }, areaAcres: plotAreaAcres(points) })
   }, [teardownDraw])
@@ -2450,6 +2451,7 @@ export default function SharedPropertyMap({
       size: plot.size != null ? String(plot.size) : '',
       species: plot.species || '',
       readinessDate: plot.readinessDate || '',
+      plantedDate: plot.plantedDate || '',
       manualCount: plot.manualCount != null ? String(plot.manualCount) : '',
       bay: !plot.bayRef && plot.bedRef ? plot.bedRef : '',
     })
@@ -2485,6 +2487,7 @@ export default function SharedPropertyMap({
           species: drawMode === 'species' ? form.species : undefined,
           bedRef: drawMode === 'species' ? form.bay : undefined,
           readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
+          plantedDate: drawMode === 'species' && form.plantedDate ? form.plantedDate : undefined,
           manualCount: drawMode === 'species' ? form.manualCount : undefined,
           email: viewerEmail,
         }),
@@ -2528,6 +2531,8 @@ export default function SharedPropertyMap({
           species: drawMode === 'species' ? form.species : undefined,
           bedRef: drawMode === 'species' ? form.bay : undefined,
           readinessDate: drawMode === 'species' ? form.readinessDate : undefined,
+          // Sent only when there is or was a date, so editing works before the column exists.
+          plantedDate: drawMode === 'species' && (form.plantedDate || editing.plantedDate) ? form.plantedDate : undefined,
           manualCount: drawMode === 'species' ? form.manualCount : undefined,
         }),
       })
@@ -2819,6 +2824,7 @@ export default function SharedPropertyMap({
         blockId: block?.id ?? null,
         bay: sp.bedRef ?? null, // the bay/bed the viewer named for this plot, shown when it has no block
         readinessDate: sp.readinessDate ?? null,
+        plantedDate: sp.plantedDate ?? null,
       }
     })
   const blocksWithSpecies = new Set(speciesRows.map((r) => r.blockId).filter(Boolean))
@@ -2835,6 +2841,7 @@ export default function SharedPropertyMap({
         blockId: b.id,
         bay: null as string | null,
         readinessDate: b.readinessDate ?? null,
+        plantedDate: b.plantedDate ?? null,
       })),
   ]
 
@@ -2850,6 +2857,7 @@ export default function SharedPropertyMap({
     bay: string | null
     plotIds: string[]
     readiness: string[]
+    planted: string[]
   }
   const inventoryGroups = Object.values(
     inventoryRows.reduce((acc: Record<string, InvGroup>, r) => {
@@ -2857,10 +2865,11 @@ export default function SharedPropertyMap({
       const bay = r.block == null ? r.bay ?? null : null
       const key = `${r.block ?? ''}|${bay ?? ''}|${r.size ?? ''}|${(r.species ?? '').trim().toLowerCase()}`
       if (!acc[key]) {
-        acc[key] = { key, species: r.species, size: r.size, block: r.block, bay, plotIds: [], readiness: [] }
+        acc[key] = { key, species: r.species, size: r.size, block: r.block, bay, plotIds: [], readiness: [], planted: [] }
       }
       acc[key].plotIds.push(r.id)
       if (r.readinessDate) acc[key].readiness.push(r.readinessDate)
+      if (r.plantedDate) acc[key].planted.push(r.plantedDate)
       return acc
     }, {})
   )
@@ -2873,6 +2882,8 @@ export default function SharedPropertyMap({
       plotIds: g.plotIds,
       // Earliest readiness across the group (ISO dates sort chronologically).
       readinessDate: g.readiness.length ? g.readiness.slice().sort()[0] : null,
+      // Earliest planting across the group.
+      plantedDate: g.planted.length ? g.planted.slice().sort()[0] : null,
     }))
     .sort(
       (a, b) =>
@@ -2908,13 +2919,15 @@ export default function SharedPropertyMap({
     size: number | null
     blocks: typeof inventoryGroups
     readiness: string[]
+    planted: string[]
   }
   const speciesSizeGroups = Object.values(
     inventoryGroups.reduce((acc: Record<string, SizeGroup>, g) => {
       const key = `${g.size ?? ''}|${(g.species ?? '').trim().toLowerCase()}`
-      if (!acc[key]) acc[key] = { key, species: g.species, size: g.size, blocks: [], readiness: [] }
+      if (!acc[key]) acc[key] = { key, species: g.species, size: g.size, blocks: [], readiness: [], planted: [] }
       acc[key].blocks.push(g)
       if (g.readinessDate) acc[key].readiness.push(g.readinessDate)
+      if (g.plantedDate) acc[key].planted.push(g.plantedDate)
       return acc
     }, {})
   )
@@ -2924,6 +2937,7 @@ export default function SharedPropertyMap({
       size: ss.size,
       blocks: [...ss.blocks].sort((a, b) => (a.block ?? Infinity) - (b.block ?? Infinity)),
       readinessDate: ss.readiness.length ? ss.readiness.slice().sort()[0] : null,
+      plantedDate: ss.planted.length ? ss.planted.slice().sort()[0] : null,
     }))
     .sort(
       (a, b) =>
@@ -2941,13 +2955,14 @@ export default function SharedPropertyMap({
   // "Count Source" travels with the number so a hand-entered figure is never
   // mistaken for one the survey measured once this leaves the app.
   const inventoryTable = () => {
-    const headers = ['Species', 'Size (gal)', 'Count', 'Count Source', 'Block', 'Readiness Date']
+    const headers = ['Species', 'Size (gal)', 'Count', 'Count Source', 'Block', 'Planted Date', 'Readiness Date']
     const rows: (string | number)[][] = inventoryGroups.map((g) => [
       g.species || '',
       g.size != null ? g.size : '',
       groupCount(g) ?? '',
       groupCount(g) == null ? '' : countSource(g.plotIds),
       g.block != null ? g.block : g.bay ? `Bay ${g.bay}` : '',
+      g.plantedDate ? fmtReadiness(g.plantedDate) : '',
       g.readinessDate ? fmtReadiness(g.readinessDate) : '',
     ])
     return { headers, rows }
@@ -2986,7 +3001,7 @@ export default function SharedPropertyMap({
     const sheet =
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-      '<cols><col min="1" max="1" width="48" customWidth="1"/><col min="2" max="6" width="14" customWidth="1"/></cols>' +
+      '<cols><col min="1" max="1" width="48" customWidth="1"/><col min="2" max="7" width="14" customWidth="1"/></cols>' +
       `<sheetData>${[xmlRow(headers, 1, true), ...rows.map((r, i) => xmlRow(r, i + 2))].join('')}</sheetData></worksheet>`
     const zip = new JSZip()
     zip.file(
@@ -3285,14 +3300,25 @@ export default function SharedPropertyMap({
                       />
                     </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Readiness date</label>
-                    <input
-                      type="date"
-                      value={form.readinessDate}
-                      onChange={(e) => setForm((f) => ({ ...f, readinessDate: e.target.value }))}
-                      className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-                    />
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Planted date</label>
+                      <input
+                        type="date"
+                        value={form.plantedDate}
+                        onChange={(e) => setForm((f) => ({ ...f, plantedDate: e.target.value }))}
+                        className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Readiness date</label>
+                      <input
+                        type="date"
+                        value={form.readinessDate}
+                        onChange={(e) => setForm((f) => ({ ...f, readinessDate: e.target.value }))}
+                        className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">
@@ -3309,8 +3335,7 @@ export default function SharedPropertyMap({
                       className="w-full rounded-md border border-gray-300 px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
                     />
                     <p className="mt-1 text-[11px] leading-snug text-gray-500">
-                      Leave blank to count this plot from the imagery. Enter a number to override it —
-                      for sections the flight can&apos;t count.
+                      Leave blank to count this plot from the imagery. Enter a number to override it.
                     </p>
                   </div>
                 </>
@@ -4527,6 +4552,7 @@ export default function SharedPropertyMap({
                     <th className="text-left font-medium px-3 py-2">Species</th>
                     <th className="text-left font-medium px-3 py-2">Size</th>
                     <th className="text-right font-medium px-3 py-2">Count</th>
+                    <th className="text-left font-medium px-3 py-2">Planted Date</th>
                     <th className="text-left font-medium px-3 py-2">Readiness Date</th>
                     <th className="px-3 py-2 w-14"></th>
                   </tr>
@@ -4587,6 +4613,9 @@ export default function SharedPropertyMap({
                             })()}
                           </td>
                           <td className="px-3 py-2 text-gray-700">
+                            {ss.plantedDate ? fmtReadiness(ss.plantedDate) : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-3 py-2 text-gray-700">
                             {ss.readinessDate ? fmtReadiness(ss.readinessDate) : <span className="text-gray-300">—</span>}
                           </td>
                           <td className="px-3 py-2 text-right whitespace-nowrap">
@@ -4639,6 +4668,9 @@ export default function SharedPropertyMap({
                                     </span>
                                   )
                                 })()}
+                              </td>
+                              <td className="px-3 py-1.5 text-xs text-gray-500">
+                                {g.plantedDate ? fmtReadiness(g.plantedDate) : ''}
                               </td>
                               <td className="px-3 py-1.5 text-xs text-gray-500">
                                 {g.readinessDate ? fmtReadiness(g.readinessDate) : ''}
