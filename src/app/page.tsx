@@ -45,7 +45,7 @@ const DETAILS = [
   "Species and container sizes to track",
   "Plant height",
   "Plant health maps",
-  "Readiness dates for your sales team",
+  "Ready dates for your sales team",
 ]
 
 // One step in the stacked "How it works" scroll: centered title, wide visual.

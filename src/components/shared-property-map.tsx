@@ -92,7 +92,7 @@ type AnnotKey = 'block' | 'size' | 'species'
 const ANNOT_META: Record<AnnotKey, { label: string; hint: string }> = {
   block: { label: 'Block', hint: 'Block / bed / plot number' },
   size: { label: 'Size', hint: 'Container size (gallons)' },
-  species: { label: 'Species', hint: 'Species name, readiness date + count' },
+  species: { label: 'Species', hint: 'Species name, ready date + count' },
 }
 
 // ---- Field mode -----------------------------------------------------------

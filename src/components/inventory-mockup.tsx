@@ -38,7 +38,7 @@ export default function InventoryMockup() {
               <th className="px-3 py-2 text-left font-medium">Species</th>
               <th className="px-3 py-2 text-left font-medium">Size</th>
               <th className="px-3 py-2 text-right font-medium">Count</th>
-              <th className="whitespace-nowrap px-3 py-2 text-left font-medium">Readiness Date</th>
+              <th className="whitespace-nowrap px-3 py-2 text-left font-medium">Ready Date</th>
               <th className="w-10 px-3 py-2" />
             </tr>
           </thead>

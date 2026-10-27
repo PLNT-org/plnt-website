@@ -377,7 +377,7 @@ export default function InventoryPage() {
 
   // Export to CSV
   const exportCSV = () => {
-    const headers = ['Species', 'Size (gal)', 'Count', 'Readiness Date', 'Date Counted', 'Block']
+    const headers = ['Species', 'Size (gal)', 'Count', 'Ready Date', 'Date Counted', 'Block']
     const rows = filteredInventory.map((item) => [
       item.species_name,
       item.size != null ? item.size.toString() : '',
@@ -560,7 +560,7 @@ export default function InventoryPage() {
                     className="cursor-pointer hover:bg-gray-50"
                     onClick={() => handleSort('readiness')}
                   >
-                    Readiness Date
+                    Ready Date
                     <SortIndicator field="readiness" />
                   </TableHead>
                   <TableHead
