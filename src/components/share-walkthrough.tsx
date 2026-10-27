@@ -265,6 +265,14 @@ function VerifyBox({ step, onVerify }: { step: TourStep; onVerify: (step: TourSt
 // timer, which keeps running when the tab is in the background, unlike
 // requestAnimationFrame) and hides while the target is missing. Clicking the pill
 // clicks the control itself.
+// A map shape is an SVG path, which has no click(): send it a click at its centre instead.
+function clickTarget(el: Element | null) {
+  if (!el) return
+  if (el instanceof HTMLElement) return el.click()
+  const r = el.getBoundingClientRect()
+  el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }))
+}
+
 export function TourPointers({ points, root }: { points: TourPoint[]; root: HTMLElement | null }) {
   const [boxes, setBoxes] = useState<({ x: number; y: number; w: number; h: number } | null)[]>([])
   // The map's size and each pill's own size, so a pill can be kept inside the screen.
@@ -338,7 +346,7 @@ export function TourPointers({ points, root }: { points: TourPoint[]; root: HTML
               ref={(el) => {
                 pillEls.current[i] = el
               }}
-              onClick={() => (root?.querySelector(`[data-tour="${p.target}"]`) as HTMLElement | null)?.click()}
+              onClick={() => clickTarget(root?.querySelector(`[data-tour="${p.target}"]`) ?? null)}
               className="pointer-events-auto absolute w-max rounded-2xl bg-[#e5484d] px-3 py-1 text-xs font-semibold leading-snug text-white shadow-lg hover:bg-[#d13c41]"
               style={{ ...pos, maxWidth: Math.min(288, Math.max(160, frame.w - 2 * M)) }}
             >
