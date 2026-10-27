@@ -587,6 +587,23 @@ export default function SharedPropertyMap({
   // Which species+size rollup rows are expanded to show their per-block breakdown.
   const [invExpanded, setInvExpanded] = useState<Set<string>>(new Set())
   const [dlMenuOpen, setDlMenuOpen] = useState(false)
+  const dlMenuRef = useRef<HTMLDivElement>(null)
+  // A click anywhere outside the download menu (or Escape) closes it.
+  useEffect(() => {
+    if (!dlMenuOpen) return
+    const onDown = (e: PointerEvent) => {
+      if (!dlMenuRef.current?.contains(e.target as Node)) setDlMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDlMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [dlMenuOpen])
   // Opening the inventory closes an open bay card, which would otherwise sit over the drawer's buttons.
   useEffect(() => {
     if (invOpen) setSelectedBayId(null)
@@ -4473,7 +4490,7 @@ export default function SharedPropertyMap({
             <span className="text-sm font-semibold text-gray-900">Inventory</span>
             <span className="text-xs text-gray-400 tabular-nums">{speciesSizeGroups.length} lines</span>
             <div className="ml-auto flex items-center gap-1">
-              <div className="relative">
+              <div ref={dlMenuRef} className="relative">
                 <button
                   onClick={() => setDlMenuOpen((o) => !o)}
                   data-tour="download"
