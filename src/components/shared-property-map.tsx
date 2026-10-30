@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, ChevronDown, FileSpreadsheet, FileText, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints, ClipboardList, Eye } from 'lucide-react'
@@ -466,6 +466,8 @@ export default function SharedPropertyMap({
   const [pointsLoading, setPointsLoading] = useState(false)
   const [showHealth, setShowHealth] = useState(true)
   const [healthCounts, setHealthCounts] = useState<{ stressed: number; sparse: number } | null>(null)
+  // The raw flag rows, kept for per-bay counts on the bay card.
+  const [healthRows, setHealthRows] = useState<[number, number, string, string][] | null>(null)
   // True while the map is zoomed out too far to draw single plants (see dotStyle).
   const [dotsHidden, setDotsHidden] = useState(false)
 
@@ -1043,6 +1045,7 @@ export default function SharedPropertyMap({
             const m = new Map<string, HealthFlag>()
             for (const [lat, lng, kind, reason] of rows) m.set(ptKey(lat, lng), { kind, reason })
             healthDataRef.current = m
+            setHealthRows(rows)
             setHealthCounts({
               stressed: rows.filter((r) => r[2] === 'stressed').length,
               sparse: rows.filter((r) => r[2] === 'sparse').length,
@@ -2167,6 +2170,21 @@ export default function SharedPropertyMap({
   }
   const showMethodNotes = !!viewerEmail && METHOD_NOTE_VIEWERS.includes(viewerEmail.trim().toLowerCase())
   const bayCount = (p: SharePlot) => p.manualCount ?? p.plantCount ?? (p.bayRef ? null : dotsInPlot(p))
+  // Health flags inside the selected bay (viewer-removed dots excluded), with a count per reason for the card.
+  const bayHealth = useMemo(() => {
+    if (!healthRows || !selectedBay) return null
+    const ring = selectedBay.boundary.coordinates[0]
+    const removed = new Set(pointEdits.filter((e) => e.kind === 'remove').map((e) => ptKey(e.lat, e.lng)))
+    let stressed = 0, sparse = 0
+    const reasons = new Map<string, number>()
+    for (const [lat, lng, kind, reason] of healthRows) {
+      if (removed.has(ptKey(lat, lng)) || !pointInRing(lng, lat, ring)) continue
+      if (kind === 'sparse') sparse++
+      else stressed++
+      for (const r of reason.split(', ')) reasons.set(r, (reasons.get(r) ?? 0) + 1)
+    }
+    return { stressed, sparse, reasons: Array.from(reasons.entries()).sort((a, b) => b[1] - a[1]) }
+  }, [healthRows, selectedBay, pointEdits])
   // How a drawn plot is titled on its card and in messages.
   const plotTitle = (p: SharePlot) =>
     p.bayRef ? `Bay ${p.bayRef}` : p.bedRef ? `Bay ${p.bedRef}` : p.block != null ? `Block ${p.block}` : p.species || 'Your plot'
@@ -4313,6 +4331,34 @@ export default function SharedPropertyMap({
               )}
             </div>
           </div>
+          {bayHealth && (
+            <div className="px-4 pt-2">
+              {bayHealth.stressed + bayHealth.sparse > 0 ? (
+                <>
+                  <div className="flex items-center gap-3 text-xs text-gray-800">
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-[#ef4444] ring-1 ring-white shrink-0" />
+                      <span className="font-semibold tabular-nums">{bayHealth.stressed.toLocaleString()}</span> stressed
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-[#f97316] ring-1 ring-white shrink-0" />
+                      <span className="font-semibold tabular-nums">{bayHealth.sparse.toLocaleString()}</span> sparse
+                    </span>
+                    {bayCount(selectedBay) ? (
+                      <span className="text-gray-400 ml-auto tabular-nums">
+                        {Math.round(((bayHealth.stressed + bayHealth.sparse) / bayCount(selectedBay)!) * 100)}% of plants
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">
+                    {bayHealth.reasons.map(([r, n]) => `${r} ${n}`).join(' · ')}
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-gray-500">No plants flagged in this bay</div>
+              )}
+            </div>
+          )}
           <div className="flex gap-2 px-4 mt-3">
             {correctDraft == null ? (
               <>
