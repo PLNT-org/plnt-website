@@ -20,6 +20,7 @@ interface StoredLayer {
   tiled?: boolean
   plant_count?: number
   points_path?: string
+  health_path?: string // flagged plants ([[lat,lng,kind,reason],...]) next to points.json
   max_zoom?: number // deepest zoom level tiles were generated for (default 22)
   // A handful of identified specimens to walk to and verify in the field.
   field_targets_path?: string
@@ -129,6 +130,13 @@ export async function POST(
             out.pointsUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.points_path, SIGNED_URL_TTL)
           } catch {
             // No points file — map just won't draw per-plant dots.
+          }
+        }
+        if (layer.health_path) {
+          try {
+            out.healthUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.health_path, SIGNED_URL_TTL)
+          } catch {
+            // No health file — dots just stay green.
           }
         }
         if (layer.field_targets_path && canSeeFieldTargets(layer)) {

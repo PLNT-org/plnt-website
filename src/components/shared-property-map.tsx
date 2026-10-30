@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { Layers, X, Maximize2, Minimize2, RotateCcw, Leaf, Pencil, Trash2, Check, ChevronUp, ChevronRight, Crosshair, Table2, Download, ChevronDown, FileSpreadsheet, FileText, MousePointerClick, Square, Lasso, Flag, LocateFixed, Navigation, Footprints, ClipboardList, Eye } from 'lucide-react'
@@ -192,6 +192,7 @@ export interface ShareLayer {
   value_max?: number
   plant_count?: number // in-boundary plant count (RGB layer only); shown when RGB is active
   pointsUrl?: string // signed URL to points.json ([[lat,lng],...]); per-plant dots, RGB only
+  healthUrl?: string // signed URL to health.json ([[lat,lng,kind,reason],...]); flagged plants, RGB only
   maxNativeZoom?: number // deepest zoom this layer has tiles for (default 22)
   fieldTargetsUrl?: string // signed URL to field-targets.json; only sent to viewers cleared for it
   fieldTargetsLabel?: string // panel/drawer title, e.g. "Height check (20)"
@@ -234,6 +235,10 @@ const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales b
 type PointEdit = { id: string; kind: 'add' | 'remove'; lat: number; lng: number }
 // Round to 6 decimals to match points.json, so a 'remove' keys to the exact dot.
 const ptKey = (lat: number, lng: number) => `${lat.toFixed(6)},${lng.toFixed(6)}`
+// Health flags from the RGB screen: a stressed plant (browning, yellowing, discoloured, declined) or a sparse canopy.
+type HealthFlag = { kind: string; reason: string }
+const HEALTH_COLORS: Record<string, string> = { stressed: '#ef4444', sparse: '#f97316' }
+const healthLabel = (h: HealthFlag) => `${h.kind === 'sparse' ? 'Sparse canopy' : 'Stressed'}: ${h.reason}`
 
 // Multi-select erase: drag a box, or click out a free-form lasso. `null` is the
 // original one-click-per-plant tool.
@@ -443,6 +448,8 @@ export default function SharedPropertyMap({
   const pointsLayerRef = useRef<L.LayerGroup | null>(null)
   const pointsCanvasRef = useRef<L.Canvas | null>(null)
   const pointsDataRef = useRef<[number, number][] | null>(null)
+  // Flagged plants keyed by ptKey, loaded once from health.json when the flight has one.
+  const healthDataRef = useRef<Map<string, HealthFlag> | null>(null)
 
   const present = data.layers.map((l) => l.type)
   const [visible, setVisible] = useState<Record<string, boolean>>(() =>
@@ -457,6 +464,10 @@ export default function SharedPropertyMap({
   const [cogLoading, setCogLoading] = useState<Record<string, boolean>>({})
   const [showPoints, setShowPoints] = useState(true)
   const [pointsLoading, setPointsLoading] = useState(false)
+  const [showHealth, setShowHealth] = useState(true)
+  const [healthCounts, setHealthCounts] = useState<{ stressed: number; sparse: number } | null>(null)
+  // The raw flag rows, kept for per-bay counts on the bay card.
+  const [healthRows, setHealthRows] = useState<[number, number, string, string][] | null>(null)
   // True while the map is zoomed out too far to draw single plants (see dotStyle).
   const [dotsHidden, setDotsHidden] = useState(false)
 
@@ -1027,6 +1038,22 @@ export default function SharedPropertyMap({
           const res = await fetch(rgbLayer!.pointsUrl!)
           pointsDataRef.current = await res.json()
         }
+        if (rgbLayer!.healthUrl && !healthDataRef.current) {
+          try {
+            const res = await fetch(rgbLayer!.healthUrl)
+            const rows: [number, number, string, string][] = await res.json()
+            const m = new Map<string, HealthFlag>()
+            for (const [lat, lng, kind, reason] of rows) m.set(ptKey(lat, lng), { kind, reason })
+            healthDataRef.current = m
+            setHealthRows(rows)
+            setHealthCounts({
+              stressed: rows.filter((r) => r[2] === 'stressed').length,
+              sparse: rows.filter((r) => r[2] === 'sparse').length,
+            })
+          } catch (err) {
+            console.error('Failed to load plant health flags:', err)
+          }
+        }
         if (cancelled) return
         if (!pointsCanvasRef.current) pointsCanvasRef.current = L.canvas({ padding: 0.5 })
         const renderer = pointsCanvasRef.current
@@ -1045,13 +1072,16 @@ export default function SharedPropertyMap({
           deletePointRef.current(pt)
         }
         const addDot = (lat: number, lng: number, addId?: string) => {
+          const health = !addId && showHealth ? healthDataRef.current?.get(ptKey(lat, lng)) : undefined
           const m = L.circleMarker([lat, lng], {
             renderer,
             ...dot0,
-            fillColor: addId ? '#f59e0b' : '#22c55e', // viewer-added = amber, detected = green
+            // viewer-added = amber, flagged = red (stressed) / orange (sparse), detected = green
+            fillColor: addId ? '#f59e0b' : health ? HEALTH_COLORS[health.kind] ?? '#ef4444' : '#22c55e',
             color: '#ffffff',
             opacity: 1,
           })
+          if (health) m.bindTooltip(healthLabel(health), { direction: 'top', offset: [0, -6] })
           m.on('click', onDotClick({ lat, lng, addId }))
           m.addTo(group)
         }
@@ -1078,7 +1108,7 @@ export default function SharedPropertyMap({
     return () => {
       cancelled = true
     }
-  }, [visible, showPoints, rgbLayer, pointEdits])
+  }, [visible, showPoints, rgbLayer, pointEdits, showHealth])
 
   // Resize the plant dots as the map zooms (see dotStyle). Only acts when the
   // size actually changes, and restyles the whole canvas group in one pass.
@@ -2140,6 +2170,21 @@ export default function SharedPropertyMap({
   }
   const showMethodNotes = !!viewerEmail && METHOD_NOTE_VIEWERS.includes(viewerEmail.trim().toLowerCase())
   const bayCount = (p: SharePlot) => p.manualCount ?? p.plantCount ?? (p.bayRef ? null : dotsInPlot(p))
+  // Health flags inside the selected bay (viewer-removed dots excluded), with a count per reason for the card.
+  const bayHealth = useMemo(() => {
+    if (!healthRows || !selectedBay) return null
+    const ring = selectedBay.boundary.coordinates[0]
+    const removed = new Set(pointEdits.filter((e) => e.kind === 'remove').map((e) => ptKey(e.lat, e.lng)))
+    let stressed = 0, sparse = 0
+    const reasons = new Map<string, number>()
+    for (const [lat, lng, kind, reason] of healthRows) {
+      if (removed.has(ptKey(lat, lng)) || !pointInRing(lng, lat, ring)) continue
+      if (kind === 'sparse') sparse++
+      else stressed++
+      for (const r of reason.split(', ')) reasons.set(r, (reasons.get(r) ?? 0) + 1)
+    }
+    return { stressed, sparse, reasons: Array.from(reasons.entries()).sort((a, b) => b[1] - a[1]) }
+  }, [healthRows, selectedBay, pointEdits])
   // How a drawn plot is titled on its card and in messages.
   const plotTitle = (p: SharePlot) =>
     p.bayRef ? `Bay ${p.bayRef}` : p.bedRef ? `Bay ${p.bedRef}` : p.block != null ? `Block ${p.block}` : p.species || 'Your plot'
@@ -3534,6 +3579,21 @@ export default function SharedPropertyMap({
                         {pointsLoading && <span className="text-[10px] text-gray-400">loading…</span>}
                       </label>
                     )}
+                    {layer.type === 'rgb' && isOn && showPoints && healthCounts && (
+                      <label className="flex items-center gap-2 cursor-pointer pl-6 pt-1.5">
+                        <input
+                          type="checkbox"
+                          checked={showHealth}
+                          onChange={(e) => setShowHealth(e.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="h-2.5 w-2.5 rounded-full bg-[#ef4444] shrink-0 ring-1 ring-white" />
+                        <span className="h-2.5 w-2.5 rounded-full bg-[#f97316] shrink-0 ring-1 ring-white -ml-1" />
+                        <span className="text-xs text-gray-600 flex-1">
+                          Health flags ({healthCounts.stressed.toLocaleString()} stressed · {healthCounts.sparse.toLocaleString()} sparse)
+                        </span>
+                      </label>
+                    )}
                     {layer.type === 'rgb' && canEditCount && isOn && (
                       <div className="pl-6 pt-1.5">
                         <button
@@ -4271,6 +4331,34 @@ export default function SharedPropertyMap({
               )}
             </div>
           </div>
+          {bayHealth && (
+            <div className="px-4 pt-2">
+              {bayHealth.stressed + bayHealth.sparse > 0 ? (
+                <>
+                  <div className="flex items-center gap-3 text-xs text-gray-800">
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-[#ef4444] ring-1 ring-white shrink-0" />
+                      <span className="font-semibold tabular-nums">{bayHealth.stressed.toLocaleString()}</span> stressed
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-[#f97316] ring-1 ring-white shrink-0" />
+                      <span className="font-semibold tabular-nums">{bayHealth.sparse.toLocaleString()}</span> sparse
+                    </span>
+                    {bayCount(selectedBay) ? (
+                      <span className="text-gray-400 ml-auto tabular-nums">
+                        {Math.round(((bayHealth.stressed + bayHealth.sparse) / bayCount(selectedBay)!) * 100)}% of plants
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">
+                    {bayHealth.reasons.map(([r, n]) => `${r} ${n}`).join(' · ')}
+                  </div>
+                </>
+              ) : (
+                <div className="text-xs text-gray-500">No plants flagged in this bay</div>
+              )}
+            </div>
+          )}
           <div className="flex gap-2 px-4 mt-3">
             {correctDraft == null ? (
               <>
