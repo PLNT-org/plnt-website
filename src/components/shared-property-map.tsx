@@ -193,6 +193,7 @@ export interface ShareLayer {
   plant_count?: number // in-boundary plant count (RGB layer only); shown when RGB is active
   pointsUrl?: string // signed URL to points.json ([[lat,lng],...]); per-plant dots, RGB only
   healthUrl?: string // signed URL to health.json ([[lat,lng,kind,reason],...]); flagged plants, RGB only
+  sizeUrl?: string // signed URL to size.json ([[lat,lng,diam_cm],...]); crown width per plant, RGB only
   maxNativeZoom?: number // deepest zoom this layer has tiles for (default 22)
   fieldTargetsUrl?: string // signed URL to field-targets.json; only sent to viewers cleared for it
   fieldTargetsLabel?: string // panel/drawer title, e.g. "Height check (20)"
@@ -239,6 +240,14 @@ const ptKey = (lat: number, lng: number) => `${lat.toFixed(6)},${lng.toFixed(6)}
 type HealthFlag = { kind: string; reason: string }
 const HEALTH_COLORS: Record<string, string> = { stressed: '#ef4444', sparse: '#f97316' }
 const healthLabel = (h: HealthFlag) => `${h.kind === 'sparse' ? 'Sparse canopy' : 'Stressed'}: ${h.reason}`
+// Crown width classes (equivalent diameter of the crown footprint, cm) and their dot colours.
+const SIZE_CLASSES = [
+  { max: 20, color: '#ef4444', label: '< 20 cm' },
+  { max: 30, color: '#f97316', label: '20-30 cm' },
+  { max: 40, color: '#facc15', label: '30-40 cm' },
+  { max: Infinity, color: '#3b82f6', label: '40 cm +' },
+]
+const sizeClass = (cm: number) => SIZE_CLASSES.findIndex((c) => cm < c.max)
 
 // Multi-select erase: drag a box, or click out a free-form lasso. `null` is the
 // original one-click-per-plant tool.
@@ -468,6 +477,10 @@ export default function SharedPropertyMap({
   const [healthCounts, setHealthCounts] = useState<{ stressed: number; sparse: number } | null>(null)
   // The raw flag rows, kept for per-bay counts on the bay card.
   const [healthRows, setHealthRows] = useState<[number, number, string, string][] | null>(null)
+  // Crown width per dot (keyed by ptKey) and the raw rows for per-bay stats; 'Plant size' toggle colours dots by class.
+  const sizeDataRef = useRef<Map<string, number> | null>(null)
+  const [sizeRows, setSizeRows] = useState<[number, number, number][] | null>(null)
+  const [showSize, setShowSize] = useState(false)
   // True while the map is zoomed out too far to draw single plants (see dotStyle).
   const [dotsHidden, setDotsHidden] = useState(false)
 
@@ -1054,6 +1067,18 @@ export default function SharedPropertyMap({
             console.error('Failed to load plant health flags:', err)
           }
         }
+        if (rgbLayer!.sizeUrl && !sizeDataRef.current) {
+          try {
+            const res = await fetch(rgbLayer!.sizeUrl)
+            const rows: [number, number, number][] = await res.json()
+            const m = new Map<string, number>()
+            for (const [lat, lng, cm] of rows) m.set(ptKey(lat, lng), cm)
+            sizeDataRef.current = m
+            setSizeRows(rows)
+          } catch (err) {
+            console.error('Failed to load plant sizes:', err)
+          }
+        }
         if (cancelled) return
         if (!pointsCanvasRef.current) pointsCanvasRef.current = L.canvas({ padding: 0.5 })
         const renderer = pointsCanvasRef.current
@@ -1073,15 +1098,17 @@ export default function SharedPropertyMap({
         }
         const addDot = (lat: number, lng: number, addId?: string) => {
           const health = !addId && showHealth ? healthDataRef.current?.get(ptKey(lat, lng)) : undefined
+          const cm = !addId && showSize ? sizeDataRef.current?.get(ptKey(lat, lng)) : undefined
           const m = L.circleMarker([lat, lng], {
             renderer,
             ...dot0,
-            // viewer-added = amber, flagged = red (stressed) / orange (sparse), detected = green
-            fillColor: addId ? '#f59e0b' : health ? HEALTH_COLORS[health.kind] ?? '#ef4444' : '#22c55e',
+            // viewer-added = amber; size mode = class colour; flagged = red (stressed) / orange (sparse); detected = green
+            fillColor: addId ? '#f59e0b' : cm != null ? SIZE_CLASSES[sizeClass(cm)].color : health ? HEALTH_COLORS[health.kind] ?? '#ef4444' : '#22c55e',
             color: '#ffffff',
             opacity: 1,
           })
-          if (health) m.bindTooltip(healthLabel(health), { direction: 'top', offset: [0, -6] })
+          const tip = [cm != null ? `Crown ${cm} cm` : '', health ? healthLabel(health) : ''].filter(Boolean).join(' · ')
+          if (tip) m.bindTooltip(tip, { direction: 'top', offset: [0, -6] })
           m.on('click', onDotClick({ lat, lng, addId }))
           m.addTo(group)
         }
@@ -1108,7 +1135,7 @@ export default function SharedPropertyMap({
     return () => {
       cancelled = true
     }
-  }, [visible, showPoints, rgbLayer, pointEdits, showHealth])
+  }, [visible, showPoints, rgbLayer, pointEdits, showHealth, showSize])
 
   // Resize the plant dots as the map zooms (see dotStyle). Only acts when the
   // size actually changes, and restyles the whole canvas group in one pass.
@@ -2185,6 +2212,21 @@ export default function SharedPropertyMap({
     }
     return { stressed, sparse, reasons: Array.from(reasons.entries()).sort((a, b) => b[1] - a[1]) }
   }, [healthRows, selectedBay, pointEdits])
+  // Crown widths inside the selected bay: median and the count per size class.
+  const baySize = useMemo(() => {
+    if (!sizeRows || !selectedBay) return null
+    const ring = selectedBay.boundary.coordinates[0]
+    const removed = new Set(pointEdits.filter((e) => e.kind === 'remove').map((e) => ptKey(e.lat, e.lng)))
+    const cms: number[] = []
+    for (const [lat, lng, cm] of sizeRows) {
+      if (removed.has(ptKey(lat, lng)) || !pointInRing(lng, lat, ring)) continue
+      cms.push(cm)
+    }
+    if (!cms.length) return null
+    cms.sort((a, b) => a - b)
+    const classes = SIZE_CLASSES.map((c, k) => ({ ...c, n: cms.filter((cm) => sizeClass(cm) === k).length }))
+    return { n: cms.length, median: cms[Math.floor(cms.length / 2)], p10: cms[Math.floor(cms.length * 0.1)], p90: cms[Math.floor(cms.length * 0.9)], classes }
+  }, [sizeRows, selectedBay, pointEdits])
   // How a drawn plot is titled on its card and in messages.
   const plotTitle = (p: SharePlot) =>
     p.bayRef ? `Bay ${p.bayRef}` : p.bedRef ? `Bay ${p.bedRef}` : p.block != null ? `Block ${p.block}` : p.species || 'Your plot'
@@ -3594,6 +3636,30 @@ export default function SharedPropertyMap({
                         </span>
                       </label>
                     )}
+                    {layer.type === 'rgb' && isOn && showPoints && sizeRows && (
+                      <div className="pl-6 pt-1.5">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={showSize}
+                            onChange={(e) => setShowSize(e.target.checked)}
+                            className="rounded border-gray-300"
+                          />
+                          <span className="text-xs text-gray-600 flex-1">Plant size (crown width)</span>
+                        </label>
+                        {showSize && (
+                          <div className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 pl-6">
+                            {SIZE_CLASSES.map((c, k) => (
+                              <span key={c.label} className="flex items-center gap-1.5 text-[11px] text-gray-600">
+                                <span className="h-2.5 w-2.5 rounded-full shrink-0 ring-1 ring-white" style={{ backgroundColor: c.color }} />
+                                {c.label}
+                                <span className="text-gray-400 tabular-nums">{sizeRows.filter((r) => sizeClass(r[2]) === k).length.toLocaleString()}</span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {layer.type === 'rgb' && canEditCount && isOn && (
                       <div className="pl-6 pt-1.5">
                         <button
@@ -4357,6 +4423,23 @@ export default function SharedPropertyMap({
               ) : (
                 <div className="text-xs text-gray-500">No plants flagged in this bay</div>
               )}
+            </div>
+          )}
+          {baySize && (
+            <div className="px-4 pt-2">
+              <div className="flex items-baseline gap-2 text-xs text-gray-800">
+                <span className="font-semibold tabular-nums text-sm">{baySize.median} cm</span>
+                <span>median crown width</span>
+                <span className="text-gray-400 tabular-nums ml-auto">{baySize.p10}-{baySize.p90} cm (10th-90th)</span>
+              </div>
+              <div className="mt-1 flex h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                {baySize.classes.map((c) => (
+                  <span key={c.label} title={`${c.label}: ${c.n}`} style={{ width: `${(100 * c.n) / baySize.n}%`, backgroundColor: c.color }} />
+                ))}
+              </div>
+              <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">
+                {baySize.classes.filter((c) => c.n > 0).map((c) => `${c.label} ${c.n}`).join(' · ')}
+              </div>
             </div>
           )}
           <div className="flex gap-2 px-4 mt-3">
