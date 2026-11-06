@@ -207,13 +207,25 @@ export function makeSupabaseDb(sb: SupabaseClient) {
 export const browserDownloads = {
   async save({ filename, data }: { filename: string; data: string | Blob }) {
     const blob = data instanceof Blob ? data : new Blob([data], { type: 'text/csv;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    triggerDownload(filename, blob)
   },
+  /** Bundle several text files into one zip and download it. */
+  async saveZip(filename: string, files: Record<string, string>) {
+    const { default: JSZip } = await import('jszip')
+    const zip = new JSZip()
+    const folder = zip.folder(filename.replace(/\.zip$/i, '')) || zip
+    for (const [name, text] of Object.entries(files)) folder.file(name, text)
+    triggerDownload(filename, await zip.generateAsync({ type: 'blob' }))
+  },
+}
+
+function triggerDownload(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
