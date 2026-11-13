@@ -36,7 +36,7 @@ function orgState(o){return o.state||stateFromAddress(o.address);}
 
 /* ---------- state ---------- */
 const S={email:'',byEmail:{},statusLive:null,statusText:'Connecting…',orgs:new Map(),templates:new Map(),team:[],me:'',view:'today',scope:'mine',q:'',stageF:'',ownerF:'',sort:'next',sortDir:1,online:null,drawerOrg:null,tplSel:null,imp:null,selDay:null,weekOff:0,stateF:'',acreMin:'',acreMax:'',pipeSort:'updated:desc'};
-let db=null,downloads=null;const listeners=[];function on(ev,fn){document.addEventListener(ev,fn);listeners.push([ev,fn]);}
+let db=null,downloads=null,hubspot=null;const listeners=[];function on(ev,fn){document.addEventListener(ev,fn);listeners.push([ev,fn]);}
 
 /* ---------- utils ---------- */
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -74,7 +74,7 @@ async function saveOrg(id,o){o.updatedAt=nowISO();if(!o.createdAt)o.createdAt=o.
 async function deleteOrg(id){S.orgs.delete(id);if(S.drawerOrg===id)closeDrawer();render();await persist(()=>db.doc('orgs/'+id).delete(),'Delete');}
 async function saveTemplate(id,t){t.updatedAt=nowISO();S.templates.set(id,t);render();await persist(()=>db.doc('templates/'+id).set(t),'Save');}
 async function deleteTemplate(id){S.templates.delete(id);if(S.tplSel===id)S.tplSel=null;render();await persist(()=>db.doc('templates/'+id).delete(),'Delete');}
-async function saveTeam(members,extra){S.team=members;render();await persist(()=>db.doc('settings/team').set({...(extra||{}),byEmail:S.byEmail||{},members,updatedAt:nowISO()}),'Save');}
+async function saveTeam(members){S.team=members;render();await persist(()=>db.doc('settings/team').set({byEmail:S.byEmail||{},members,updatedAt:nowISO()}),'Save');}
 
 function setStatus(live,text){S.statusLive=live;S.statusText=text;applyStatus();}
 function applyStatus(){const el=document.getElementById('status');if(!el)return;el.className='status'+(S.statusLive?' live':'');const sp=el.querySelector('span');if(sp)sp.textContent=S.statusText||'Connecting…';}
@@ -88,7 +88,7 @@ async function init(){
     const LIVE='Shared with your team · live';
     unsubs.push(db.collection('orgs').onSnapshot(snap=>{S.orgs=new Map(snap.docs.map(d=>[d.id,d.data()]));render();},e=>{const net=/fetch|network|offline/i.test(e.message||'');setStatus(false,net?'Offline · reconnecting…':'Connection problem: '+(e.message||e.code));},()=>{if(S.statusText!==LIVE)setStatus(true,LIVE);}));
     unsubs.push(db.collection('templates').onSnapshot(snap=>{S.templates=new Map(snap.docs.map(d=>[d.id,d.data()]));render();},e=>{}));
-    unsubs.push(db.doc('settings/team').onSnapshot(snap=>{const d=snap.exists?snap.data():{};S.team=d.members||[];S.byEmail=d.byEmail||{};const nm=S.byEmail[S.email]||S.me;if(nm&&nm!==S.me){S.me=nm;}if(S.me&&!S.team.includes(S.me))saveTeam([...S.team,S.me].sort(),d);render();},e=>{}));
+    unsubs.push(db.doc('settings/team').onSnapshot(snap=>{if(!snap.exists)return;const d=snap.data();S.team=d.members||[];S.byEmail=d.byEmail||{};const nm=S.byEmail[S.email];if(nm&&nm!==S.me)S.me=nm;render();},e=>{}));
   }else{
     S.online=false;local.load();setStatus(false,'Not connected · changes stay in this browser');render();
   }
@@ -310,7 +310,7 @@ function evRow(e,withOrg){
 function vSettings(){
   const ex=orgsList().filter(o=>o.isExample).length;
   return `<div class="two"><div class="panel"><div class="ph"><h2>Team members</h2></div><div class="mb"><p class="small muted" style="margin:0 0 10px">Names here appear as owners. Your own name comes from your plnt.net sign-in.</p>${S.team.length?`<table>${S.team.map(m=>`<tr><td>${esc(m)}</td><td style="text-align:right"><button class="btn sm ghost" data-act="team-del" data-n="${esc(m)}">Remove</button></td></tr>`).join('')}</table>`:'<div class="muted small">No one yet.</div>'}<form data-form="team" class="btnrow" style="margin-top:12px"><input name="name" placeholder="Full name" required style="flex:1"><button class="btn primary">Add</button></form></div></div>
-  <div><div class="panel" style="margin-bottom:16px"><div class="ph"><h2>Data</h2></div><div class="mb grid"><div><b>Export</b><div class="small muted">One row per contact, with organization fields, stage, owner and next action.</div><div class="btnrow" style="margin-top:8px"><button class="btn" data-act="export">Export CSV</button></div></div>
+  <div><div class="panel" style="margin-bottom:16px"><div class="ph"><h2>Data</h2></div><div class="mb grid"><div><b>Export</b><div class="small muted">One row per contact, with organization fields, stage, owner and next action.</div><div class="btnrow" style="margin-top:8px"><button class="btn" data-act="export">Export CSV</button></div></div><div><b>Export for HubSpot</b><div class="small muted">A zip of import-ready files: companies, contacts and deals in one sheet, then calls, notes and follow-up tasks, with step-by-step instructions inside.</div><div class="btnrow" style="margin-top:8px"><button class="btn primary" data-act="export-hubspot">Export for HubSpot</button></div></div>
   ${ex?`<div><b>Example data</b><div class="small muted">${ex} example organization${ex===1?'':'s'} were loaded so you could see the desk working.</div><div class="btnrow" style="margin-top:8px"><button class="btn danger" data-act="clear-examples">Remove example data</button></div></div>`:''}
   <div><b>Storage</b><div class="small muted">${S.online===true?'Records are stored in the PLNT database and shared live with everyone who can open plnt.net/sales.':S.online===false?'Not connected to the database. Changes stay in this browser only.':'Connecting…'}</div></div></div></div>
   <div class="panel"><div class="ph"><h2>How the pipeline works</h2></div><div class="mb small" style="line-height:1.7">${STAGES.map(s=>`<div>${stagePill(s.id)} <span class="muted">${esc(s.hint)}</span></div>`).join('')}<p class="muted" style="margin:10px 0 0">Log every call or email from Today or an organization's page. The desk asks how it went, what happens next, and offers a template to send right away.</p></div></div></div></div>`;
@@ -485,6 +485,17 @@ const ACT={
   'imp-run'(){runImport();},
   async 'team-del'(el){await saveTeam(S.team.filter(m=>m!==el.dataset.n));},
   async 'clear-examples'(){const ex=orgsList().filter(o=>o.isExample);if(!await ask(`Remove ${ex.length} example organization${ex.length===1?'':'s'}?`,{ok:'Remove',danger:true}))return;for(const o of ex)await deleteOrg(o.id);toast('Example data removed');},
+  async 'export-hubspot'(){
+    if(!hubspot||!downloads||!downloads.saveZip){toast('HubSpot export is not available in this view.','err');return;}
+    // HubSpot assigns owners by user email; the desk stores names, so invert the team map.
+    const ownerEmails={};for(const [em,nm] of Object.entries(S.byEmail||{}))if(!ownerEmails[nm]||/@plnt\.net$/.test(em))ownerEmails[nm]=em;
+    if(S.me&&S.email&&!ownerEmails[S.me])ownerEmails[S.me]=S.email;
+    for(const [em,nm] of Object.entries(S.byEmail||{}))ownerEmails[em]=ownerEmails[nm];
+    try{const {files,summary}=hubspot(orgsList(),{ownerEmails});
+      await downloads.saveZip('plnt-hubspot-export-'+todayStr()+'.zip',files);
+      toast(`HubSpot export: ${summary.companies} companies, ${summary.contacts} contacts, ${summary.deals} deals`);}
+    catch(e){toast('Export failed: '+(e.message||e.code||e),'err');}
+  },
   async export(){const rows=[['Organization','Contact','Role','Phone','Email','Address','State','Acreage','Plant types','Critical inventory','Stage','Owner','Monthly value','Next action','Next date','Last outcome','Last activity','Notes']];
     for(const o of orgsList()){const cs=(o.contacts||[]).length?o.contacts:[{}];for(const c of cs)rows.push([o.name,c.name||'',c.role||'',c.phone||'',c.email||'',o.address||'',orgState(o),o.acreage||'',o.plantTypes||'',o.inventory||'',STAGE[o.stage]?.label||o.stage,o.owner||'',o.monthly||'',c.next?.type||'',c.next?.date||'',OUT_LABEL[c.lastOutcome]||'',c.lastAt||'',o.notes||'']);}
     const csv=rows.map(r=>r.map(v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}).join(',')).join('\n');
@@ -554,7 +565,7 @@ on('drop',async e=>{const t=dropTarget(e);if(!t)return;e.preventDefault();t.clas
 on('dragend',()=>{drag=null;document.querySelectorAll('.over').forEach(c=>c.classList.remove('over'));});
 
 
-  S.me=opts.me||'';S.email=(opts.email||'').toLowerCase();db=opts.db||null;downloads=opts.downloads||null;
+  S.me=opts.me||'';S.email=(opts.email||'').toLowerCase();db=opts.db||null;downloads=opts.downloads||null;hubspot=opts.hubspot||null;
   init();
   if(typeof window!=='undefined')window.__plntSalesDesk={get state(){return S;}};
   return function unmount(){listeners.forEach(([ev,fn])=>document.removeEventListener(ev,fn));unsubs.forEach(u=>{try{u&&u();}catch(e){}});unsubs=[];};
