@@ -67,7 +67,10 @@ export interface Tour {
   // plus a small progress chip. 'cards' (default): the step card with Back/Next.
   mode?: 'cards' | 'pills'
   // Species suggestions for this link (e.g. the grower's catalog), offered before the general list.
+  // Read even when `steps` is empty, so a link can have its own list without a walkthrough.
   species_list?: string[]
+  // true: offer only species_list, not the general list after it.
+  species_list_only?: boolean
   // Greeting on the intro card by the viewer's email, e.g. {"andrewc@…": "Andrew"} -> "Welcome, Andrew".
   viewer_names?: Record<string, string>
 }
