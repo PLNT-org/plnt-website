@@ -628,6 +628,9 @@ export default function SharedPropertyMap({
   // never fights the inventory highlight.
   const [tour, setTour] = useState<Tour | null>(null)
   const [tourStep, setTourStep] = useState<number | null>(null)
+  // The link's own species list from tour.json (e.g. the grower's availability list). It applies
+  // even when tour.json has no walkthrough steps; `only` drops the general list after it.
+  const [linkSpecies, setLinkSpecies] = useState<{ list: string[]; only: boolean } | null>(null)
   const tourLayerRef = useRef<L.LayerGroup | null>(null)
   // Pills mode: a dashed "training line" the viewer traces, and its corners, which drawing clicks snap to.
   const tourGuideLayerRef = useRef<L.LayerGroup | null>(null)
@@ -642,7 +645,11 @@ export default function SharedPropertyMap({
       try {
         const res = await fetch(data.tourUrl!)
         const t = (await res.json()) as Tour
-        if (cancelled || !Array.isArray(t?.steps) || t.steps.length === 0) return
+        if (cancelled) return
+        if (Array.isArray(t?.species_list) && t.species_list.length) {
+          setLinkSpecies({ list: t.species_list, only: t.species_list_only === true })
+        }
+        if (!Array.isArray(t?.steps) || t.steps.length === 0) return
         setTour(t)
         let seen = false
         try {
@@ -742,8 +749,10 @@ export default function SharedPropertyMap({
   }, [tour, tourStep])
 
   // Species suggestions: the link's own list (e.g. its grower's catalog) first, then the general list.
-  const speciesOptions = tour?.species_list?.length
-    ? [...tour.species_list, ...SPECIES_LIST.filter((x) => !tour.species_list!.includes(x))]
+  const speciesOptions = linkSpecies
+    ? linkSpecies.only
+      ? linkSpecies.list
+      : [...linkSpecies.list, ...SPECIES_LIST.filter((x) => !linkSpecies.list.includes(x))]
     : SPECIES_LIST
 
   // Pills mode starts from a clean screen so the first steps (open Layers, turn on Species) show
