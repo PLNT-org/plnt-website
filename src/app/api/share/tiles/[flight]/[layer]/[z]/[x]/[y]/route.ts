@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { BUCKETS } from '@/lib/supabase/storage'
-import { verifyAccessToken } from '@/lib/share/access-token'
+import { verifyAccessToken, verifyTileSource } from '@/lib/share/access-token'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,7 +38,14 @@ export async function GET(
     return new NextResponse('Bad request', { status: 400 })
   }
 
-  const prefix = flight === 'legacy' ? verified.shareId : `${verified.shareId}/${flight}`
+  // `s` = a signed, borrowed tile folder (another share's flight); see signTileSource.
+  const src = request.nextUrl.searchParams.get('s')
+  let prefix = flight === 'legacy' ? verified.shareId : `${verified.shareId}/${flight}`
+  if (src) {
+    const borrowed = verifyTileSource(verified.shareId, flight, src)
+    if (!borrowed) return new NextResponse('Forbidden', { status: 403 })
+    prefix = borrowed
+  }
   const path = `${prefix}/tiles/${layer}/${z}/${x}/${y}.webp`
   const { data, error } = await supabaseAdmin.storage.from(BUCKETS.PROPERTY_SHARES).download(path)
   if (error || !data) {

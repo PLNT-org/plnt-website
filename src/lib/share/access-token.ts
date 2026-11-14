@@ -34,3 +34,22 @@ export function verifyAccessToken(token: string): { shareId: string } | null {
   if (!Number.isFinite(exp) || exp < Date.now()) return null
   return { shareId }
 }
+
+// A flight can borrow another share's tile pyramid (the demo link shows other
+// nurseries' imagery without copying it). The access route signs the borrowed
+// storage prefix for this share + flight; the tile proxy accepts only a prefix
+// carrying that signature, so a viewer can never point it at another folder.
+export function signTileSource(shareId: string, flightKey: string, prefix: string): string {
+  const p = Buffer.from(prefix).toString('base64url')
+  return `${p}.${hmac(`tiles|${shareId}|${flightKey}|${prefix}`)}`
+}
+
+export function verifyTileSource(shareId: string, flightKey: string, src: string): string | null {
+  const [p, sig] = src.split('.')
+  if (!p || !sig) return null
+  const prefix = Buffer.from(p, 'base64url').toString()
+  const expected = hmac(`tiles|${shareId}|${flightKey}|${prefix}`)
+  if (sig.length !== expected.length) return null
+  if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
+  return prefix
+}

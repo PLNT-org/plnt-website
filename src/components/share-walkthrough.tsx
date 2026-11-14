@@ -71,6 +71,7 @@ export interface Tour {
   species_list?: string[]
   // true: offer only species_list, not the general list after it.
   species_list_only?: boolean
+  flights?: string[] // when set, the tour runs only on these flight keys (multi-site shares)
   // Greeting on the intro card by the viewer's email, e.g. {"andrewc@…": "Andrew"} -> "Welcome, Andrew".
   viewer_names?: Record<string, string>
 }
