@@ -209,6 +209,7 @@ export interface ShareFlight {
   key: string
   date: string | null // YYYY-MM-DD
   label?: string | null // shown in the dropdown instead of the date when set
+  site_label?: string | null // multi-site share: shown under the title while this flight is open
   bounds: { north: number; south: number; east: number; west: number }
   layers: ShareLayer[]
 }
@@ -227,6 +228,8 @@ export interface SharedPropertyData {
   lockToParcel?: boolean
   // Signed URL of this share's walkthrough steps (tour.json), when it has one.
   tourUrl?: string
+  // Multi-site share: drop saved plots that lie outside this flight's bounds.
+  plotsInBoundsOnly?: boolean
 }
 
 const MAX_NATIVE_ZOOM = 22 // matches the gdal2tiles pyramid; Leaflet upscales beyond
@@ -650,6 +653,8 @@ export default function SharedPropertyMap({
           setLinkSpecies({ list: t.species_list, only: t.species_list_only === true })
         }
         if (!Array.isArray(t?.steps) || t.steps.length === 0) return
+        // A tour written for one site of a multi-site share runs only on its flights.
+        if (Array.isArray(t.flights) && t.flights.length && !t.flights.includes(flightKey ?? '')) return
         setTour(t)
         let seen = false
         try {
@@ -2123,9 +2128,21 @@ export default function SharedPropertyMap({
         if (!res.ok) return
         const body = await res.json()
         if (!cancelled && Array.isArray(body.plots)) {
-          setPlots(body.plots)
+          let list: SharePlot[] = body.plots
+          if (data.plotsInBoundsOnly) {
+            const b = data.bounds
+            const inside = (p: SharePlot) => {
+              const ring = p.boundary?.coordinates?.[0]
+              const c = Array.isArray(ring) ? ring[0] : null
+              if (!Array.isArray(c)) return true
+              const [lng, lat] = c
+              return lat >= b.south - 0.002 && lat <= b.north + 0.002 && lng >= b.west - 0.002 && lng <= b.east + 0.002
+            }
+            list = list.filter(inside)
+          }
+          setPlots(list)
           // A share with published bays opens with them showing.
-          if (body.plots.some((p: SharePlot) => p.bayRef)) setAnnot((prev) => ({ ...prev, block: true }))
+          if (list.some((p: SharePlot) => p.bayRef)) setAnnot((prev) => ({ ...prev, block: true }))
         }
       } catch {
         // Non-fatal — the map still works without saved plots.

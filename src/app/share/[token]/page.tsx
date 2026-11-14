@@ -81,7 +81,13 @@ export default function SharePage() {
     const flights = data.flights || []
     const selectedFlight = flights.find((f) => f.key === selectedFlightKey) || flights[0]
     const mapData: SharedPropertyData = selectedFlight
-      ? { ...data, bounds: selectedFlight.bounds, layers: selectedFlight.layers }
+      ? {
+          ...data,
+          bounds: selectedFlight.bounds,
+          layers: selectedFlight.layers,
+          // A multi-site share: only this site's plots belong on its map and inventory.
+          plotsInBoundsOnly: !!selectedFlight.site_label,
+        }
       : data
 
     return (
@@ -90,8 +96,10 @@ export default function SharePage() {
           {/* Left: location title + client (where the logo used to be) */}
           <div className="min-w-0">
             <h1 className="text-sm sm:text-base font-semibold leading-tight truncate">{data.title}</h1>
-            {data.client_name && (
-              <p className="text-[11px] sm:text-xs text-green-200/80 truncate">{data.client_name}</p>
+            {(selectedFlight?.site_label || data.client_name) && (
+              <p className="text-[11px] sm:text-xs text-green-200/80 truncate">
+                {selectedFlight?.site_label || data.client_name}
+              </p>
             )}
           </div>
           {/* Center: brand */}

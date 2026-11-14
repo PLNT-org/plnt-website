@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { BUCKETS, getSignedUrl } from '@/lib/supabase/storage'
-import { signAccessToken } from '@/lib/share/access-token'
+import { signAccessToken, signTileSource } from '@/lib/share/access-token'
 import { logShareAccess } from '@/lib/share/access-log'
 
 const supabaseAdmin = createClient(
@@ -36,13 +36,26 @@ interface StoredFlight {
   label?: string | null // shown in the dropdown instead of the date when set
   bounds?: { north: number; south: number; east: number; west: number }
   layers: StoredLayer[]
+  // Multi-site shares (the demo link): each flight is a different site.
+  site_label?: string | null // shown under the share title while this flight is open
+  order?: number // dropdown position (ascending); flights without one sort by date after
+  tiles_prefix?: string // borrow another share's tiles: '<shareId>/<flightKey>' or '<shareId>' (legacy)
+}
+
+// Dropdown order: explicit `order` first, then newest date first.
+function flightSort(a: { order?: number; date: string | null }, b: { order?: number; date: string | null }) {
+  const ao = a.order ?? Infinity
+  const bo = b.order ?? Infinity
+  if (ao !== bo) return ao - bo
+  return String(b.date || '').localeCompare(String(a.date || ''))
 }
 
 // Gated XYZ tile URL template — served through the proxy that validates the
 // access token and streams from the private property-shares bucket. `flightKey`
 // selects the dated orthophoto within the share.
-function tileUrlTemplate(flightKey: string, layerType: string, accessToken: string): string {
-  return `/api/share/tiles/${flightKey}/${layerType}/{z}/{x}/{y}?k=${accessToken}`
+function tileUrlTemplate(flightKey: string, layerType: string, accessToken: string, src?: string): string {
+  const s = src ? `&s=${src}` : ''
+  return `/api/share/tiles/${flightKey}/${layerType}/{z}/{x}/{y}?k=${accessToken}${s}`
 }
 
 // POST - Redeem a share link. Requires an email on the share's allowlist.
@@ -107,7 +120,7 @@ export async function POST(
       layer.field_targets_emails.map((e) => e.trim().toLowerCase()).includes(normalizedEmail)
 
     // Resolve a stored layer into client-ready URLs for a given flight.
-    const resolveLayer = async (flightKey: string, layer: StoredLayer) => {
+    const resolveLayer = async (flightKey: string, layer: StoredLayer, tilesPrefix?: string) => {
       const base = {
         type: layer.type,
         bounds: layer.bounds,
@@ -117,7 +130,13 @@ export async function POST(
         maxNativeZoom: layer.max_zoom ?? 22,
       }
       if (layer.tiled) {
-        const out: Record<string, any> = { ...base, tilesUrl: tileUrlTemplate(flightKey, layer.type, accessToken) }
+        const out: Record<string, any> = { ...base, tilesUrl: tileUrlTemplate(
+            flightKey,
+            layer.type,
+            accessToken,
+            tilesPrefix ? signTileSource(share.id, flightKey, tilesPrefix) : undefined
+          ),
+        }
         if (layer.storage_path) {
           try {
             out.url = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.storage_path, SIGNED_URL_TTL)
@@ -168,12 +187,14 @@ export async function POST(
         key: f.key,
         date: f.date ?? null,
         label: f.label ?? null,
+        site_label: f.site_label ?? null,
+        order: f.order,
         bounds: f.bounds ?? share.bounds,
-        layers: await Promise.all((f.layers || []).map((l) => resolveLayer(f.key, l))),
+        layers: await Promise.all((f.layers || []).map((l) => resolveLayer(f.key, l, f.tiles_prefix))),
       }))
     )
-    // Newest first (nulls last).
-    flights.sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+    // Explicit order first, then newest first (nulls last).
+    flights.sort(flightSort)
 
     const latest = flights[0]
     const layers = latest?.layers ?? []
@@ -207,8 +228,8 @@ export async function POST(
           client_name: s.client_name,
           // Just keys + dates + labels for the per-parcel dropdown (newest first).
           flights: fl
-            .map((f) => ({ key: f.key, date: f.date ?? null, label: f.label ?? null }))
-            .sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))),
+            .map((f) => ({ key: f.key, date: f.date ?? null, label: f.label ?? null, order: f.order }))
+            .sort(flightSort),
         }
       })
 
