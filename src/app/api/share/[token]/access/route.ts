@@ -95,7 +95,10 @@ export async function POST(
     }
 
     const allowed: string[] = share.allowed_emails || []
-    if (!allowed.includes(normalizedEmail)) {
+    // '*' on the allowlist opens the link to anyone who enters an email (the
+    // demo link). The email is still asked for and logged.
+    const openToAnyone = allowed.includes('*')
+    if (!openToAnyone && !allowed.includes(normalizedEmail)) {
       await logShareAccess({
         request, linkType: 'share', token: params.token, outcome: 'denied_email',
         email: normalizedEmail, shareId: share.id,
@@ -232,6 +235,18 @@ export async function POST(
             .sort(flightSort),
         }
       })
+    // A viewer let in by the '*' rule isn't on this share's list, so the query
+    // above misses it; add the share itself so its dropdown still shows.
+    if (!locations.some((l) => l.token === params.token)) {
+      locations.unshift({
+        token: params.token,
+        title: share.title,
+        client_name: share.client_name,
+        flights: storedFlights
+          .map((f) => ({ key: f.key, date: f.date ?? null, label: f.label ?? null, order: f.order }))
+          .sort(flightSort),
+      })
+    }
 
     // Optional guided walkthrough: `<shareId>/tour.json` in the share's folder
     // (steps the viewer through hand-counted blocks, then the inventory). Most
