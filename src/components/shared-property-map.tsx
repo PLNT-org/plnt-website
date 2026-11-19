@@ -17,6 +17,19 @@ interface GeoJSONPolygon {
 }
 
 // A viewer-drawn boundary plot, tagged via the Block/Size/Species annotation layers.
+// plot_sizes.json: one entry per plot id. Height is measured from the soil or the pot rim, or from
+// the ground (pot included) where the crown hides the pot; width is the crown seen from above.
+export interface PlotSize {
+  height?: number | null
+  width?: number | null
+  height_from?: 'rim' | 'ground' | 'soil' | null
+  plants?: number | null
+}
+export interface PlotSizeFile {
+  unit: string // 'in' or 'cm'
+  plots: Record<string, PlotSize>
+}
+
 export interface SharePlot {
   id: string
   boundary: GeoJSONPolygon
@@ -193,6 +206,7 @@ export interface ShareLayer {
   plant_count?: number // in-boundary plant count (RGB layer only); shown when RGB is active
   pointsUrl?: string // signed URL to points.json ([[lat,lng],...]); per-plant dots, RGB only
   healthUrl?: string // signed URL to health.json ([[lat,lng,kind,reason],...]); flagged plants, RGB only
+  plotSizeUrl?: string // signed URL to plot_sizes.json; average plant height / crown width per plot, RGB only
   maxNativeZoom?: number // deepest zoom this layer has tiles for (default 22)
   fieldTargetsUrl?: string // signed URL to field-targets.json; only sent to viewers cleared for it
   fieldTargetsLabel?: string // panel/drawer title, e.g. "Height check (20)"
@@ -471,6 +485,8 @@ export default function SharedPropertyMap({
   const [healthCounts, setHealthCounts] = useState<{ stressed: number; sparse: number } | null>(null)
   // The raw flag rows, kept for per-bay counts on the bay card.
   const [healthRows, setHealthRows] = useState<[number, number, string, string][] | null>(null)
+  // Average plant size per plot for this flight, measured from the imagery (PLNT publishes the file).
+  const [plotSizes, setPlotSizes] = useState<PlotSizeFile | null>(null)
   // True while the map is zoomed out too far to draw single plants (see dotStyle).
   const [dotsHidden, setDotsHidden] = useState(false)
 
@@ -1014,6 +1030,21 @@ export default function SharedPropertyMap({
   // The plant count is tied to the RGB orthophoto, so it's only meaningful (and
   // only shown) while the RGB layer is the active one.
   const rgbLayer = data.layers.find((l) => l.type === 'rgb')
+  const plotSizeUrl = rgbLayer?.plotSizeUrl
+  useEffect(() => {
+    setPlotSizes(null)
+    if (!plotSizeUrl) return
+    let cancelled = false
+    fetch(plotSizeUrl)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: PlotSizeFile | null) => {
+        if (!cancelled && j && j.plots) setPlotSizes(j)
+      })
+      .catch((err) => console.error('Failed to load plot sizes:', err))
+    return () => {
+      cancelled = true
+    }
+  }, [plotSizeUrl])
   // Displayed count = the baked detection count, plus viewer corrections. A
   // 'remove' only ever hides a real detected dot, so this stays accurate even
   // before points.json loads (no need to diff the full array).
@@ -4357,6 +4388,39 @@ export default function SharedPropertyMap({
               )}
             </div>
           </div>
+          {(() => {
+            const sz = plotSizes?.plots[selectedBay.id]
+            if (!sz || (sz.height == null && sz.width == null)) return null
+            const u = plotSizes!.unit
+            // Whole units only; a measured size that rounds to nothing reads "under 1".
+            const whole = (v: number) => (Math.round(v) >= 1 ? `${Math.round(v)} ${u}` : `under 1 ${u}`)
+            return (
+              <div className="px-4 pt-2" data-testid="plot-size">
+                <div className="flex items-baseline gap-4 text-xs text-gray-800">
+                  {sz.height != null && (
+                    <span>
+                      <span className="font-semibold tabular-nums">{whole(sz.height)}</span> avg height
+                    </span>
+                  )}
+                  {sz.width != null && (
+                    <span>
+                      <span className="font-semibold tabular-nums">{whole(sz.width)}</span> avg width
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">
+                  {sz.height != null
+                    ? sz.height_from === 'ground'
+                      ? 'Height from the ground, pot included. '
+                      : sz.height_from === 'soil'
+                        ? 'Height above the soil. '
+                        : 'Height above the pot rim. '
+                    : ''}
+                  Estimated from the imagery{sz.plants ? ` on ${sz.plants.toLocaleString()} plants` : ''}.
+                </div>
+              </div>
+            )
+          })()}
           {bayHealth && (
             <div className="px-4 pt-2">
               {bayHealth.stressed + bayHealth.sparse > 0 ? (

@@ -21,6 +21,7 @@ interface StoredLayer {
   plant_count?: number
   points_path?: string
   health_path?: string // flagged plants ([[lat,lng,kind,reason],...]) next to points.json
+  plot_size_path?: string // average plant size per plot ({unit, plots: {plotId: {height, width, ...}}})
   // When present, only these addresses get the health flags (staff review before a client sees them).
   health_emails?: string[]
   max_zoom?: number // deepest zoom level tiles were generated for (default 22)
@@ -166,6 +167,13 @@ export async function POST(
             out.healthUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.health_path, SIGNED_URL_TTL)
           } catch {
             // No health file — dots just stay green.
+          }
+        }
+        if (layer.plot_size_path) {
+          try {
+            out.plotSizeUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.plot_size_path, SIGNED_URL_TTL)
+          } catch {
+            // No size file — plot cards just don't show an average size.
           }
         }
         if (layer.field_targets_path && canSeeFieldTargets(layer)) {
