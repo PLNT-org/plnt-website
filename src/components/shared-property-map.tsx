@@ -4392,17 +4392,19 @@ export default function SharedPropertyMap({
             const sz = plotSizes?.plots[selectedBay.id]
             if (!sz || (sz.height == null && sz.width == null)) return null
             const u = plotSizes!.unit
+            // Whole units only; a measured size that rounds to nothing reads "under 1".
+            const whole = (v: number) => (Math.round(v) >= 1 ? `${Math.round(v)} ${u}` : `under 1 ${u}`)
             return (
               <div className="px-4 pt-2" data-testid="plot-size">
                 <div className="flex items-baseline gap-4 text-xs text-gray-800">
                   {sz.height != null && (
                     <span>
-                      <span className="font-semibold tabular-nums">{sz.height.toFixed(1)} {u}</span> avg height
+                      <span className="font-semibold tabular-nums">{whole(sz.height)}</span> avg height
                     </span>
                   )}
                   {sz.width != null && (
                     <span>
-                      <span className="font-semibold tabular-nums">{sz.width.toFixed(1)} {u}</span> avg width
+                      <span className="font-semibold tabular-nums">{whole(sz.width)}</span> avg width
                     </span>
                   )}
                 </div>
