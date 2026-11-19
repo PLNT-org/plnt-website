@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Publish average plant size per plot for one flight of a share:
 //   node scripts/publish-plot-sizes.mjs <shareId> <flightKey> <sizes.json> [unit]
-// sizes.json is keyed by block number: { "25": { height, width, height_from: 'rim'|'ground', plants } }.
+// sizes.json is keyed by block number: { "25": { height, width, height_from: 'rim'|'ground'|'soil', plants } }.
 // Writes <shareId>/<flightKey>/plot_sizes.json keyed by plot id and sets plot_size_path on the flight's RGB layer.
 import { createClient } from '@supabase/supabase-js'
 import fs from 'fs'

@@ -17,12 +17,12 @@ interface GeoJSONPolygon {
 }
 
 // A viewer-drawn boundary plot, tagged via the Block/Size/Species annotation layers.
-// plot_sizes.json: one entry per plot id. Height is measured from the pot rim, or from the
-// ground (pot included) where the crown hides the rim; width is the crown seen from above.
+// plot_sizes.json: one entry per plot id. Height is measured from the soil or the pot rim, or from
+// the ground (pot included) where the crown hides the pot; width is the crown seen from above.
 export interface PlotSize {
   height?: number | null
   width?: number | null
-  height_from?: 'rim' | 'ground' | null
+  height_from?: 'rim' | 'ground' | 'soil' | null
   plants?: number | null
 }
 export interface PlotSizeFile {
@@ -4412,7 +4412,9 @@ export default function SharedPropertyMap({
                   {sz.height != null
                     ? sz.height_from === 'ground'
                       ? 'Height from the ground, pot included. '
-                      : 'Height above the pot rim. '
+                      : sz.height_from === 'soil'
+                        ? 'Height above the soil. '
+                        : 'Height above the pot rim. '
                     : ''}
                   Estimated from the imagery{sz.plants ? ` on ${sz.plants.toLocaleString()} plants` : ''}.
                 </div>
