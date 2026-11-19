@@ -24,6 +24,7 @@ import { useAuth } from '@/lib/auth/auth-context'
 import { SHELL } from './shell'
 import { makeSupabaseDb, browserDownloads } from './supabase-db'
 import { mountSalesDesk } from './sales-desk'
+import { buildHubspotExport } from './hubspot-export'
 import './sales-desk.css'
 
 const display = Bricolage_Grotesque({
@@ -66,6 +67,7 @@ export default function SalesDeskPage() {
       root,
       db: makeSupabaseDb(supabase),
       downloads: browserDownloads,
+      hubspot: buildHubspotExport,
       me: displayName(userProfile, user.email),
       email: user.email || '',
     })
