@@ -21,6 +21,8 @@ interface StoredLayer {
   plant_count?: number
   points_path?: string
   health_path?: string // flagged plants ([[lat,lng,kind,reason],...]) next to points.json
+  // When present, only these addresses get the health flags (staff review before a client sees them).
+  health_emails?: string[]
   max_zoom?: number // deepest zoom level tiles were generated for (default 22)
   // A handful of identified specimens to walk to and verify in the field.
   field_targets_path?: string
@@ -122,6 +124,11 @@ export async function POST(
       !layer.field_targets_emails?.length ||
       layer.field_targets_emails.map((e) => e.trim().toLowerCase()).includes(normalizedEmail)
 
+    // Health flags likewise: an absent list means everyone on the share sees them.
+    const canSeeHealth = (layer: StoredLayer) =>
+      !layer.health_emails?.length ||
+      layer.health_emails.map((e) => e.trim().toLowerCase()).includes(normalizedEmail)
+
     // Resolve a stored layer into client-ready URLs for a given flight.
     const resolveLayer = async (flightKey: string, layer: StoredLayer, tilesPrefix?: string) => {
       const base = {
@@ -154,7 +161,7 @@ export async function POST(
             // No points file — map just won't draw per-plant dots.
           }
         }
-        if (layer.health_path) {
+        if (layer.health_path && canSeeHealth(layer)) {
           try {
             out.healthUrl = await getSignedUrl(BUCKETS.PROPERTY_SHARES, layer.health_path, SIGNED_URL_TTL)
           } catch {

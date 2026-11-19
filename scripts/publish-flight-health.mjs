@@ -4,7 +4,10 @@
 // (stressed) or orange (sparse) and shows a "Health flags" toggle.
 //
 //   set -a; source .env.local; set +a
-//   node scripts/publish-flight-health.mjs <share_url_or_token> <flight_key> <health.json>
+//   node scripts/publish-flight-health.mjs <share_url_or_token> <flight_key> <health.json> [--only a@x.com,b@y.com]
+//
+// --only limits who sees the flags (health_emails on the layer); without it the
+// flags show to everyone on the share and any earlier restriction is removed.
 //
 // health.json is [[lat, lng, kind, reason], ...] with lat/lng rounded to 6
 // decimals exactly as in points.json (that's how a flag finds its dot), kind
@@ -22,7 +25,9 @@ function extractToken(s) {
 }
 
 async function main() {
-  const [, , shareRef, flightKey, file] = process.argv
+  const [, , shareRef, flightKey, file, flag, onlyList] = process.argv
+  const only = flag === '--only' ? String(onlyList || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean) : []
+  if (flag && (flag !== '--only' || !only.length)) throw new Error('Use --only a@x.com,b@y.com')
   if (!shareRef || !flightKey || !file) throw new Error('Usage: publish-flight-health.mjs <share_url_or_token> <flight_key> <health.json>')
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -48,12 +53,14 @@ async function main() {
   const { error: upErr } = await supabase.storage.from(SHARE_BUCKET).upload(path, body, { contentType: 'application/json', upsert: true })
   if (upErr) throw new Error(`upload health.json: ${upErr.message}`)
   rgb.health_path = path
+  if (only.length) rgb.health_emails = only
+  else delete rgb.health_emails
   const newest = [...flights].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))[0]
   const topLayers = newest && newest.key === flightKey ? flight.layers : share.layers
   const { error: updErr } = await supabase.from('property_shares').update({ flights, layers: topLayers, updated_at: new Date().toISOString() }).eq('id', share.id)
   if (updErr) throw new Error(`update share: ${updErr.message}`)
   const n = (k) => rows.filter((r) => r[2] === k).length
-  console.log(`✅ "${share.title}" · flight ${flightKey}: ${rows.length} flags (${n('stressed')} stressed, ${n('sparse')} sparse) -> ${path}`)
+  console.log(`✅ "${share.title}" · flight ${flightKey}: ${rows.length} flags (${n('stressed')} stressed, ${n('sparse')} sparse) -> ${path}${only.length ? ` (visible only to ${only.join(', ')})` : ''}`)
 }
 
 main().catch((e) => {
